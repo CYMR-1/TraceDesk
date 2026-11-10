@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>TraceDesk 证据文件与放大镜</title>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="#95672f"/>
+  <path d="M68 42h61l47 47v113a12 12 0 0 1-12 12H68a13 13 0 0 1-13-13V55a13 13 0 0 1 13-13Z" fill="#fff8ea"/>
+  <path d="M129 42v35a12 12 0 0 0 12 12h35Z" fill="#d9b47a"/>
+  <path d="M79 112h50M79 139h25" fill="none" stroke="#95672f" stroke-width="9" stroke-linecap="round"/>
+  <path d="m192 191 26 28" fill="none" stroke="#fff8ea" stroke-width="26" stroke-linecap="round"/>
+  <path d="m192 191 26 28" fill="none" stroke="#573b1d" stroke-width="14" stroke-linecap="round"/>
+  <circle cx="161" cy="160" r="44" fill="#fff8ea"/>
+  <circle cx="161" cy="160" r="36" fill="#573b1d"/>
+  <circle cx="161" cy="160" r="24" fill="#ead9b7"/>
+</svg>

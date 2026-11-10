@@ -52,6 +52,7 @@ python -m venv .venv
 - 设计、评分对应、限制与 AI 参与说明见 `docs/设计与验收说明.md`；录屏流程见 `docs/演示脚本.md`。
 - 面向对象结构：`ApplicationLauncher` 管理入口和异常报告，`App` 协调操作，`WorkbenchView` / `FileBrowserView` 管理布局和文件树，`DesktopAppearance` 管理 DPI 与主题，`TaskRunner` 管理后台任务，`FilePreview` / `PreviewReader` 分离预览显示与读取，`Case` 和 `TSK` 保留原有取证业务接口。案件格式和取证流程保持不变。
 - 代码入口 `main.py`；控制器 `forensic/gui.py`；视图 `forensic/workspace.py` 与 `forensic/views.py`；外观 `forensic/appearance.py`；后台任务 `forensic/tasks.py`；案件逻辑 `forensic/core.py`；TSK 适配 `forensic/tsk.py`。
+- 标题栏与任务栏使用原创棕金色“证据文件＋放大镜”图标，资源位于 `forensic/assets`。修改 SVG 后，可运行 `.\.venv\Scripts\python.exe scripts/make_icon.py` 重建 PNG 和多尺寸 ICO；重启程序生效。
 - `.\.venv\Scripts\python.exe scripts/package.py` 生成 `dist/学号_姓名_ForensicTool.zip`，提交前将文件名中的姓名和学号替换为本人信息。包内不含本地运行案件，解压后可重新运行演示脚本。
 
 ## 证据保护边界

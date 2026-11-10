@@ -6,6 +6,7 @@ from PySide6.QtCore import QEvent, QObject, QTimer, Qt
 from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
 from .appearance import DesktopAppearance
+from .branding import set_window_icon, set_windows_app_id
 from .core import Case, deleted_export_summary, display_time
 from .tasks import TaskRunner
 from .tsk import ROOT, can_export, entry_status
@@ -23,6 +24,7 @@ class App(QObject):
         self._closed = False
         self.appearance = DesktopAppearance(root)
         self.appearance.configure()
+        set_window_icon(root)
         commands = {name: getattr(self, name) for name in
                     ('new_case', 'open_case', 'load', 'verify', 'export', 'report', 'scan', 'filter', 'select')}
         self.view = WorkbenchView(root, self.appearance, commands)
@@ -265,6 +267,7 @@ HELP_TEXT = '''操作顺序
 def main(case=None):
     from .launcher import ErrorReporter
 
+    set_windows_app_id()
     qt_app = QApplication.instance() or QApplication(sys.argv)
     qt_app.setApplicationName('TraceDesk')
     root = QMainWindow()
