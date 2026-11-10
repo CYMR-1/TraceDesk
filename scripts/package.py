@@ -9,12 +9,14 @@ def build():
     output = ROOT / 'dist' / '学号_姓名_ForensicTool.zip'
     output.parent.mkdir(exist_ok=True)
     selected = [ROOT / name for name in ('main.py', '启动取证工作台.bat', 'README.md',
-                                         'THIRD_PARTY_NOTICES.md', 'requirements.txt', '.gitignore', 'AGENTS.md')]
+                                         'THIRD_PARTY_NOTICES.md', 'requirements.txt', '.gitignore')]
     for name in ('forensic', 'tests', 'scripts', 'docs', 'evidence', 'tools/sleuthkit-4.15.0-win32'):
         selected.extend((ROOT / name).rglob('*'))
     with ZipFile(output, 'w', compression=ZIP_DEFLATED) as archive:
         for path in selected:
-            if not path.is_file() or '__pycache__' in path.parts or path.suffix == '.pyc' or path.name == 'latest-demo.txt':
+            if (not path.is_file() or '__pycache__' in path.parts or path.suffix == '.pyc'
+                    or path.name == 'latest-demo.txt'
+                    or path.name.casefold() in ('agent.md', 'agents.md')):
                 continue
             archive.write(path, Path('ForensicTool') / path.relative_to(ROOT))
         archive.writestr('ForensicTool/cases/.gitkeep', '')

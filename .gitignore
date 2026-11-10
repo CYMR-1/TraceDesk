@@ -8,6 +8,10 @@ dist/
 .venv/
 logs/
 
+# Local assistant instructions are not project deliverables.
+AGENT.md
+AGENTS.md
+
 # Local evidence and generated machine-specific files.
 /evidence/DRF2024.dd
 /docs/latest-demo.txt
