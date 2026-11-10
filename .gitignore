@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.test-work/
+cases/*
+!cases/.gitkeep
+dist/
+
+.venv/
+logs/
+
+# Local evidence and generated machine-specific files.
+/evidence/DRF2024.dd
+/docs/latest-demo.txt
+
+# The extracted TSK distribution is tracked instead.
+/tools/*.zip

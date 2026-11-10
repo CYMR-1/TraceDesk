@@ -1,0 +1,44 @@
+test_callback_failure_keeps_polling_and_restores_controls (test_gui.ControllerTests.test_callback_failure_keeps_polling_and_restores_controls) ... ok
+test_close_during_task_keeps_case_and_window_open (test_gui.ControllerTests.test_close_during_task_keeps_case_and_window_open) ... ok
+test_destroy_cancels_poll_and_future_tree_batches (test_gui.ControllerTests.test_destroy_cancels_poll_and_future_tree_batches) ... ok
+test_idle_close_stops_display_and_releases_case (test_gui.ControllerTests.test_idle_close_stops_display_and_releases_case) ... ok
+test_inventory_refresh_replaces_pending_tree_rows (test_gui.FileBrowserTests.test_inventory_refresh_replaces_pending_tree_rows) ... ok
+test_startup_failure_is_reported (test_launcher.LauncherTests.test_startup_failure_is_reported) ... ok
+test_successful_startup (test_launcher.LauncherTests.test_successful_startup) ... ok
+test_tk_callback_writes_traceback_and_shows_log_path (test_launcher.LauncherTests.test_tk_callback_writes_traceback_and_shows_log_path) ... ok
+test_file_selection_encoding_paging_and_resize (test_preview.PreviewTests.test_file_selection_encoding_paging_and_resize) ... ok
+test_partial_deleted_preview_keeps_pages_after_read_error (test_preview.PreviewTests.test_partial_deleted_preview_keeps_pages_after_read_error) ... ok
+test_utf8_across_rows_and_pages (test_preview.PreviewTests.test_utf8_across_rows_and_pages) ... ok
+test_busy_task_rejects_second_submission (test_tasks.TaskRunnerTests.test_busy_task_rejects_second_submission) ... ok
+test_callback_runs_only_when_caller_consumes_result (test_tasks.TaskRunnerTests.test_callback_runs_only_when_caller_consumes_result) ... ok
+test_none_value_is_a_completed_task (test_tasks.TaskRunnerTests.test_none_value_is_a_completed_task) ... ok
+test_task_error_is_returned_and_next_task_can_run (test_tasks.TaskRunnerTests.test_task_error_is_returned_and_next_task_can_run) ... ok
+test_thread_start_failure_restores_idle_state (test_tasks.TaskRunnerTests.test_thread_start_failure_restores_idle_state) ... ok
+test_audit_edit_detected (test_workflow.WorkflowTests.test_audit_edit_detected) ... ok
+test_audit_truncation_detected (test_workflow.WorkflowTests.test_audit_truncation_detected) ... ok
+test_case_folder_keeps_inputs_inside_library (test_workflow.WorkflowTests.test_case_folder_keeps_inputs_inside_library) ... ok
+test_case_folder_name_and_collision (test_workflow.WorkflowTests.test_case_folder_name_and_collision) ... ok
+test_case_isolation (test_workflow.WorkflowTests.test_case_isolation) ... ok
+test_case_lock_and_invalid_metadata (test_workflow.WorkflowTests.test_case_lock_and_invalid_metadata) ... ok
+test_chinese_fls_names (test_workflow.WorkflowTests.test_chinese_fls_names) ... ok
+test_complete_real_tsk_workflow (test_workflow.WorkflowTests.test_complete_real_tsk_workflow) ... ok
+test_deleted_export_partial_and_unreadable (test_workflow.WorkflowTests.test_deleted_export_partial_and_unreadable) ... ok
+test_deleted_records_and_fat_regions (test_workflow.WorkflowTests.test_deleted_records_and_fat_regions) ... ok
+test_directory_export_rejected (test_workflow.WorkflowTests.test_directory_export_rejected) ... ok
+test_east_8_display_with_legacy_audit (test_workflow.WorkflowTests.test_east_8_display_with_legacy_audit) ... ok
+test_export_filename_windows_limits (test_workflow.WorkflowTests.test_export_filename_windows_limits) ... ok
+test_export_preserves_name_on_collision (test_workflow.WorkflowTests.test_export_preserves_name_on_collision) ... ok
+test_failed_save_preserves_state (test_workflow.WorkflowTests.test_failed_save_preserves_state) ... ok
+test_filter (test_workflow.WorkflowTests.test_filter) ... ok
+test_invalid_image_audited (test_workflow.WorkflowTests.test_invalid_image_audited) ... ok
+test_missing_tool_and_timeout (test_workflow.WorkflowTests.test_missing_tool_and_timeout) ... ok
+test_modified_image_blocks_export_and_report_marks_failure (test_workflow.WorkflowTests.test_modified_image_blocks_export_and_report_marks_failure) ... ok
+test_partial_export_cleanup (test_workflow.WorkflowTests.test_partial_export_cleanup) ... ok
+test_scan_image_changed (test_workflow.WorkflowTests.test_scan_image_changed) ... ok
+test_stream_hash (test_workflow.WorkflowTests.test_stream_hash) ... ok
+test_unpartitioned_volume (test_workflow.WorkflowTests.test_unpartitioned_volume) ... ok
+
+----------------------------------------------------------------------
+Ran 39 tests in 7.968s
+
+OK

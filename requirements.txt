@@ -1,0 +1,5 @@
+# TraceDesk 仅使用 Python 标准库。
+# 后续新增依赖仅装入 .venv，使用 -i https://pypi.tuna.tsinghua.edu.cn/simple。
+# 需要 Python 3.10+，并确保已启用 tkinter。
+# The Sleuth Kit 4.15.0 二进制文件已随项目放置在 tools/ 目录下，
+# 无需通过 pip 安装。

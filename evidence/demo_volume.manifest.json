@@ -1,0 +1,25 @@
+{
+  "image_sha256": "a67bd44a28eb789dc7dbd29c6994ca66a905a96f3166a7312ba4327ee17c5f3d",
+  "files": {
+    "README.TXT": {
+      "size": 65,
+      "sha256": "0eb9a85cdab3d5c2cb17ca19bb12d1b627c9025b88db546248b1bc33d13833df"
+    },
+    "NOTES.TXT": {
+      "size": 56,
+      "sha256": "a42bf6d571984ef0abeabd9062f57f3c9579c0853fc93950b272e42bfe3aaade"
+    },
+    "EVENTS.CSV": {
+      "size": 67,
+      "sha256": "d37facf30fca1b557730ff32ff8b31397dd3e66f96eabb3c4a608ea032efa412"
+    },
+    "PAYLOAD.BIN": {
+      "size": 1536,
+      "sha256": "fe7f957aec14d14f8f5e13959eaf70a8db4981e64f4828af5b05378277f6e514"
+    },
+    "DOCS/CASE.TXT": {
+      "size": 38,
+      "sha256": "65760c5c042fa64abd0398d08186802d7eb3527d2d4ae7fa2fe2e1c83c2c8113"
+    }
+  }
+}
