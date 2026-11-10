@@ -54,12 +54,13 @@ class FileBrowserView(ttk.Frame):
         self.tree.tag_configure('alternate', background='#f2f6fb')
         self.tree.heading('#0', text='镜像内路径 / 文件目录', anchor='w')
         self.tree.column('#0', width=px(270), minwidth=px(180), stretch=True)
-        for key, label, width in [('state', '状态', 105), ('size', '字节数', 100), ('inode', 'inode', 90),
+        for key, label, width in [('state', '状态', 105), ('size', '字节数', 120), ('inode', 'inode', 120),
                                   ('m', 'M 内容修改 (UTC+8)', 195), ('a', 'A 访问 (UTC+8)', 195),
                                   ('c', 'C 元数据变更 (UTC+8)', 195)]:
-            self.tree.heading(key, text=label, anchor='w')
+            anchor = 'center' if key in ('size', 'inode') else 'w'
+            self.tree.heading(key, text=label, anchor=anchor)
             self.tree.column(key, width=px(width), minwidth=px(width), stretch=False,
-                             anchor='e' if key == 'size' else 'w')
+                             anchor=anchor)
         vertical = ttk.Scrollbar(tree_frame, orient='vertical', command=self.tree.yview)
         horizontal = ttk.Scrollbar(tree_frame, orient='horizontal', command=self.tree.xview)
         self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
