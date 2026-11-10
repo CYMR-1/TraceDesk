@@ -63,14 +63,18 @@ python -m venv .venv
 
 范围限定：一个案件固定一份非分段 RAW 镜像、512 字节扇区；分区及文件系统兼容性取决于 TSK，实际验收覆盖 FAT16；不实现 E01、无目录项的文件雕刻、硬件写保护、多用户签名或异常分区修复。分析期间应确保源镜像稳定。TSK 调用 300 秒超时，文件清单目前整体载入内存，面向课程小镜像。
 
-## 开源来源
+## 第三方依赖与 AI 参与
 
-PySide6 官方文档与安装说明：[Qt for Python](https://doc.qt.io/qtforpython-6/)、[Getting Started](https://doc.qt.io/qtforpython-6/quickstart.html)。
+The Sleuth Kit 4.15.0 Windows 官方发行包来自：
+https://github.com/sleuthkit/sleuthkit/releases/download/sleuthkit-4.15.0/sleuthkit-4.15.0-win32.zip
 
-TSK 官方仓库：https://github.com/sleuthkit/sleuthkit
+本次下载文件 SHA-256：`C2EBAB8105B893D97BD8CE35B88E01985E2A106EFC97F03ADF95840A631B20CE`。
+此值为本工程实际下载记录，未执行独立 GPG 签名认证。安装脚本使用它检测后续下载变化。
 
-官方发行：https://github.com/sleuthkit/sleuthkit/releases/tag/sleuthkit-4.15.0
+上游源码：https://github.com/sleuthkit/sleuthkit/tree/sleuthkit-4.15.0
 
-命令参考：https://sleuthkit.org/sleuthkit/man/fls.html 与 https://sleuthkit.org/sleuthkit/man/icat.html
+发行包的许可证及第三方组件许可证完整保留于 `tools/sleuthkit-4.15.0-win32/licenses/`，分发时必须一并保留。TSK 未作二进制修改；通过独立进程调用。
 
-保留第三方原始许可证于 `tools/sleuthkit-4.15.0-win32/licenses`。自主代码由 AI 协助生成，详情见 `THIRD_PARTY_NOTICES.md`。未复制 Autopsy 源码，仅参考其案件→证据→分析→报告流程。
+桌面界面使用 Qt for Python 官方 PySide6（Qt 6）及其随包依赖，由 `requirements.txt` 安装到项目 `.venv`。官方文档与许可入口：[Qt for Python](https://doc.qt.io/qtforpython-6/)、[Commercial Use](https://doc.qt.io/qtforpython-6/commercial/index.html)。上游提供 LGPLv3/GPLv3 和商业许可选项，具体组件适用许可及第三方声明以安装包所附文件为准。本工程通过 Python 导入使用，未修改 PySide6 或 Qt 二进制文件；源码工程包不包含 `.venv`，运行前需安装依赖，若另行分发运行库应一并保留其许可证和声明。
+
+AI 使用说明：Codex 主要用于辅助代码实现与调试、界面调整、测试及技术文档整理。个人学习心得、姓名学号和对项目的理解由本人据实补充。

@@ -8,8 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def build():
     output = ROOT / 'dist' / '学号_姓名_ForensicTool.zip'
     output.parent.mkdir(exist_ok=True)
-    selected = [ROOT / name for name in ('main.py', '启动取证工作台.bat', 'README.md',
-                                         'THIRD_PARTY_NOTICES.md', 'requirements.txt', '.gitignore')]
+    selected = [ROOT / name for name in ('main.py', '启动取证工作台.bat', 'README.md','requirements.txt', '.gitignore')]
     for name in ('forensic', 'tests', 'scripts', 'docs', 'evidence', 'tools/sleuthkit-4.15.0-win32'):
         selected.extend((ROOT / name).rglob('*'))
     with ZipFile(output, 'w', compression=ZIP_DEFLATED) as archive:
