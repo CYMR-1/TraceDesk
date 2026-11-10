@@ -1,27 +1,28 @@
 # TraceDesk 电子数据取证工作台
 
-依据本目录《取证软件开发的要求和评估文档》实现的中文桌面教学原型。Python 标准库负责界面、案件、SHA-256、审计和报告，The Sleuth Kit 4.15.0 负责真实 RAW 镜像解析与文件读取。没有网络服务，不上传证据。
+依据本目录《取证软件开发的要求和评估文档》实现的中文桌面教学原型。PySide6（Qt 6）提供桌面界面，Python 标准库负责案件、SHA-256、审计和报告，The Sleuth Kit 4.15.0 负责真实 RAW 镜像解析与文件读取。取证操作在本地执行，不上传证据。
 
 ## 启动
 
-Windows 已安装 Python 3.10+（含 tkinter）时，双击 **启动取证工作台.bat**。脚本会切换到项目目录，首次运行创建本目录 `.venv`，再通过 `.venv\Scripts\python.exe main.py` 启动界面；保留终端窗口，运行失败时暂停以便查看错误。也可在本目录手动执行：
+Windows 已安装 Python 3.10+ 时，双击 **启动取证工作台.bat**。脚本会切换到项目目录，首次运行创建本目录 `.venv`，缺少 PySide6 时通过清华镜像安装 `requirements.txt` 中的依赖，再通过 `.venv\Scripts\python.exe main.py` 启动界面。首次安装依赖需要联网；依赖已安装后直接启动，不重复联网安装。保留终端窗口，运行失败时暂停以便查看错误。也可在本目录手动执行：
 
 ```powershell
 python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 .\.venv\Scripts\python.exe main.py
 ```
 
-已有虚拟环境时可直接执行 `.\.venv\Scripts\python.exe main.py`。程序初始化失败和未处理的界面回调错误会弹窗提示，并记录到 `logs/startup.log`。
+已有虚拟环境并安装依赖后，可直接执行 `.\.venv\Scripts\python.exe main.py`。程序初始化失败和未处理的 Qt 界面回调错误会弹窗提示，并记录到 `logs/startup.log`。
 
-当前工程已经包含官方 Windows TSK 程序和两份演示镜像，不需要 pip 安装。若依赖丢失，运行 `powershell -File scripts/install_tsk.ps1`，或将环境变量 `TSK_BIN` 指向完整 TSK `bin` 目录。需要保留 DLL 与 licenses，不要只复制四个 exe。
+当前工程已经包含官方 Windows TSK 程序和两份演示镜像，TSK 无需通过 pip 安装。若 TSK 文件丢失，运行 `powershell -File scripts/install_tsk.ps1`，或将环境变量 `TSK_BIN` 指向完整 TSK `bin` 目录。需要保留 DLL 与 licenses，不要只复制四个 exe。
 
-界面使用 Windows 原生高 DPI 感知，按显示比例设置字体和控件尺寸；中文使用微软雅黑，十六进制预览使用等宽字体。文件树、预览和文本页均支持横向滚动，工具栏会随窗口宽度换行。无需新增第三方 UI 依赖。以后若添加 Python 第三方依赖，只安装到本项目 `.venv`，使用清华镜像：
+界面统一使用 PySide6 原生控件，采用浅色主题，以暖米白、砂岩与棕金配色。Qt 6 自动处理高 DPI 和逻辑像素缩放；中文优先使用微软雅黑，十六进制预览使用等宽字体。文件树、预览和文本页均支持横向滚动，工具栏会随窗口宽度换行。所有 Python 第三方依赖只安装到本项目 `.venv`，使用清华镜像：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 ```
 
-若启动器创建的精简虚拟环境没有 pip，可先运行 `.\.venv\Scripts\python.exe -m ensurepip --upgrade`。
+若已有精简虚拟环境没有 pip，可先运行 `.\.venv\Scripts\python.exe -m ensurepip --upgrade`；BAT 启动器也会在依赖缺失时自动补齐 pip。
 
 ## 完整操作
 
@@ -62,6 +63,8 @@ python -m venv .venv
 范围限定：一个案件固定一份非分段 RAW 镜像、512 字节扇区；分区及文件系统兼容性取决于 TSK，实际验收覆盖 FAT16；不实现 E01、无目录项的文件雕刻、硬件写保护、多用户签名或异常分区修复。分析期间应确保源镜像稳定。TSK 调用 300 秒超时，文件清单目前整体载入内存，面向课程小镜像。
 
 ## 开源来源
+
+PySide6 官方文档与安装说明：[Qt for Python](https://doc.qt.io/qtforpython-6/)、[Getting Started](https://doc.qt.io/qtforpython-6/quickstart.html)。
 
 TSK 官方仓库：https://github.com/sleuthkit/sleuthkit
 

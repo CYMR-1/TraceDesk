@@ -1,11 +1,16 @@
 test_callback_failure_keeps_polling_and_restores_controls (test_gui.ControllerTests.test_callback_failure_keeps_polling_and_restores_controls) ... ok
 test_close_during_task_keeps_case_and_window_open (test_gui.ControllerTests.test_close_during_task_keeps_case_and_window_open) ... ok
-test_destroy_cancels_poll_and_future_tree_batches (test_gui.ControllerTests.test_destroy_cancels_poll_and_future_tree_batches) ... ok
-test_idle_close_stops_display_and_releases_case (test_gui.ControllerTests.test_idle_close_stops_display_and_releases_case) ... ok
+test_idle_close_stops_timers_and_releases_case_once (test_gui.ControllerTests.test_idle_close_stops_timers_and_releases_case_once) ... ok
+test_native_close_event_uses_same_task_guard (test_gui.ControllerTests.test_native_close_event_uses_same_task_guard) ... ok
 test_inventory_refresh_replaces_pending_tree_rows (test_gui.FileBrowserTests.test_inventory_refresh_replaces_pending_tree_rows) ... ok
+test_numeric_columns_keep_centered_headers_and_values (test_gui.FileBrowserTests.test_numeric_columns_keep_centered_headers_and_values) ... ok
+test_selected_partition_survives_audit_refresh (test_gui.FileBrowserTests.test_selected_partition_survives_audit_refresh) ... ok
+test_creation_failure_keeps_inputs_for_retry (test_gui.NewCaseDialogTests.test_creation_failure_keeps_inputs_for_retry) ... ok
+test_missing_fields_do_not_open_folder_picker (test_gui.NewCaseDialogTests.test_missing_fields_do_not_open_folder_picker) ... ok
+test_qt_callback_writes_traceback_and_shows_log_path (test_launcher.LauncherTests.test_qt_callback_writes_traceback_and_shows_log_path) ... ok
+test_restore_preserves_a_new_host_exception_hook (test_launcher.LauncherTests.test_restore_preserves_a_new_host_exception_hook) ... ok
 test_startup_failure_is_reported (test_launcher.LauncherTests.test_startup_failure_is_reported) ... ok
 test_successful_startup (test_launcher.LauncherTests.test_successful_startup) ... ok
-test_tk_callback_writes_traceback_and_shows_log_path (test_launcher.LauncherTests.test_tk_callback_writes_traceback_and_shows_log_path) ... ok
 test_file_selection_encoding_paging_and_resize (test_preview.PreviewTests.test_file_selection_encoding_paging_and_resize) ... ok
 test_partial_deleted_preview_keeps_pages_after_read_error (test_preview.PreviewTests.test_partial_deleted_preview_keeps_pages_after_read_error) ... ok
 test_utf8_across_rows_and_pages (test_preview.PreviewTests.test_utf8_across_rows_and_pages) ... ok
@@ -39,6 +44,6 @@ test_stream_hash (test_workflow.WorkflowTests.test_stream_hash) ... ok
 test_unpartitioned_volume (test_workflow.WorkflowTests.test_unpartitioned_volume) ... ok
 
 ----------------------------------------------------------------------
-Ran 39 tests in 7.968s
+Ran 44 tests in 8.090s
 
 OK

@@ -1,7 +1,9 @@
 """应用控制器：协调案件模型、工作台视图和后台任务。"""
-import tkinter as tk
+import sys
 from pathlib import Path
-from tkinter import filedialog, messagebox
+
+from PySide6.QtCore import QEvent, QObject, QTimer, Qt
+from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
 from .appearance import DesktopAppearance
 from .core import Case, deleted_export_summary, display_time
@@ -11,10 +13,11 @@ from .views import NewCaseDialog
 from .workspace import WorkbenchView
 
 
-class App:
+class App(QObject):
     """保留原有操作接口，将布局、任务执行与案件逻辑委托给独立对象。"""
 
     def __init__(self, root):
+        super().__init__(root)
         self.root, self.case = root, None
         self.runner = TaskRunner()
         self._closed = False
@@ -24,7 +27,7 @@ class App:
                     ('new_case', 'open_case', 'load', 'verify', 'export', 'report', 'scan', 'filter', 'select')}
         self.view = WorkbenchView(root, self.appearance, commands)
         self.browser = self.view.browser
-        # 保留原有 App 控件访问方式，脚本与现有预览测试仍可使用。
+        # 控制器公开原生 Qt 控件，布局细节由视图管理。
         for name in ('partition', 'suffix', 'keyword', 'tree', 'preview', 'detail'):
             setattr(self, name, getattr(self.browser, name))
         for name in ('tabs', 'summary', 'status', 'progress'):
@@ -33,9 +36,11 @@ class App:
         for name, panel in self.view.panels.items():
             setattr(self, name, panel.text)
         self.set_text(self.help, HELP_TEXT)
-        self._poll_id = root.after(100, self.poll)
-        root.protocol('WM_DELETE_WINDOW', self.close)
-        root.bind('<Destroy>', self._on_destroy, add='+')
+        self._timer = QTimer(self)
+        self._timer.setInterval(100)
+        self._timer.timeout.connect(self.poll)
+        self._timer.start()
+        root.installEventFilter(self)
 
     @property
     def busy(self):
@@ -47,17 +52,14 @@ class App:
 
     @staticmethod
     def set_text(widget, value):
-        widget.configure(state='normal')
-        widget.delete('1.0', 'end')
-        widget.insert('1.0', value)
-        widget.configure(state='disabled')
+        widget.setPlainText(value)
 
     def available(self, case=True):
         if self.busy:
-            messagebox.showinfo('正在处理', '请等待当前任务完成。', parent=self.root)
+            QMessageBox.information(self.root, '正在处理', '请等待当前任务完成。')
             return False
         if case and not self.case:
-            messagebox.showinfo('提示', '请先新建或打开案件。', parent=self.root)
+            QMessageBox.information(self.root, '提示', '请先新建或打开案件。')
             return False
         return True
 
@@ -65,11 +67,10 @@ class App:
         if not self.available():
             return
         self.runner.submit(work, callback)
-        self.status.set(label + '…')
+        self.status.setText(label + '…')
         self.view.set_busy(True)
 
     def poll(self):
-        self._poll_id = None
         if self._closed:
             return
         try:
@@ -77,21 +78,19 @@ class App:
             result = self.runner.poll()
             if result is not None:
                 self.view.set_busy(False)
-                self.status.set('操作失败' if result.error else '操作完成 · 应用层只读模式')
+                self.status.setText('操作失败' if result.error else '操作完成 · 应用层只读模式')
                 if result.error:
-                    messagebox.showerror('操作失败', str(result.error), parent=self.root)
+                    QMessageBox.critical(self.root, '操作失败', str(result.error))
                 elif result.callback:
                     result.callback(result.value)
                 self.refresh()
         except Exception as error:
-            messagebox.showerror('显示失败', str(error), parent=self.root)
-        finally:
-            if not self._closed:
-                self._poll_id = self.root.after(100, self.poll)
+            self.status.setText('显示失败')
+            QMessageBox.critical(self.root, '显示失败', str(error))
 
     def new_case(self):
         if self.available(False):
-            NewCaseDialog(self.root, self.create_case)
+            NewCaseDialog(self.root, self.create_case).exec()
 
     def create_case(self, folder, number, examiner, target):
         case = Case.create(folder, number, examiner, target)
@@ -106,7 +105,9 @@ class App:
     def open_case(self):
         if not self.available(False):
             return
-        path = filedialog.askopenfilename(title='打开案件 case.json', initialdir=ROOT / 'cases', filetypes=[('案件元数据','case.json')])
+        path, _ = QFileDialog.getOpenFileName(
+            self.root, '打开案件 case.json', str(ROOT / 'cases'), '案件元数据 (case.json)',
+            options=QFileDialog.Option.DontUseNativeDialog)
         if path:
             try:
                 case = Case(Path(path).parent)
@@ -116,62 +117,70 @@ class App:
                 self.case = case
                 self.refresh(reset=True)
             except Exception as error:
-                messagebox.showerror('打开失败', str(error))
+                QMessageBox.critical(self.root, '打开失败', str(error))
 
     def load(self):
         if self.available():
-            path = filedialog.askopenfilename(title='选择案件库之外的 RAW 镜像', initialdir=ROOT / 'evidence', filetypes=[('RAW 镜像','*.dd *.raw *.img'),('所有文件','*.*')])
+            path, _ = QFileDialog.getOpenFileName(
+                self.root, '选择案件库之外的 RAW 镜像', str(ROOT / 'evidence'),
+                'RAW 镜像 (*.dd *.raw *.img);;所有文件 (*)',
+                options=QFileDialog.Option.DontUseNativeDialog)
             if path:
                 self.task('固定镜像并识别分区', lambda: self.case.load(path), lambda _: self.refresh(reset=True))
 
     def scan(self):
         if self.available():
-            index = self.partition.current()
+            index = self.partition.currentIndex()
             if index < 0:
-                messagebox.showinfo('提示', '请先加载镜像并选择分区。')
+                QMessageBox.information(self.root, '提示', '请先加载镜像并选择分区。')
                 return
             offset = self.case.data['evidence']['partitions'][index]['offset']
             self.task('读取文件系统与文件树', lambda: self.case.scan(offset), self.display)
 
     def filter(self):
         if self.available():
-            suffix, keyword = self.suffix.get(), self.keyword.get()
+            suffix, keyword = self.suffix.text(), self.keyword.text()
             self.task('筛选文件', lambda: self.case.filtered(suffix, keyword), self.display)
 
     def verify(self):
         if self.available():
-            self.task('流式校验 SHA-256', self.case.verify, lambda ok: messagebox.showinfo('完整性校验', '通过：与初始固定值一致。' if ok else '失败：原始镜像已发生变化！'))
+            self.task('流式校验 SHA-256', self.case.verify, lambda ok: QMessageBox.information(
+                self.root, '完整性校验', '通过：与初始固定值一致。' if ok else '失败：原始镜像已发生变化！'))
+
+    def selected_entry(self):
+        selected = self.tree.selectedItems()
+        return selected[0].data(0, Qt.ItemDataRole.UserRole) if selected else None
 
     def export(self):
         if not self.available():
             return
-        selected = self.tree.selection()
-        entry = self.entries.get(selected[0]) if selected else None
+        entry = self.selected_entry()
         if not entry or not can_export(entry):
-            messagebox.showinfo('导出文件', '请选择一个现存或已删除的文件。')
+            QMessageBox.information(self.root, '导出文件', '请选择一个现存或已删除的文件。')
             return
 
         def done(path):
             record = next(r for r in reversed(self.case.data['exports']) if r['path'] == str(path))
             message = '\n\n'.join(filter(None, (str(path), deleted_export_summary(record))))
             title = '部分导出' if record['size'] < entry['size'] else '导出成功'
-            messagebox.showinfo(title, message)
+            QMessageBox.information(self.root, title, message)
 
         self.task('校验并导出证据副本', lambda: self.case.export(entry), done)
 
     def report(self):
         if self.available():
-            self.task('校验并生成 Markdown 报告', self.case.report, lambda path: messagebox.showinfo('报告已生成', str(path)))
+            self.task('校验并生成 Markdown 报告', self.case.report, lambda path: QMessageBox.information(
+                self.root, '报告已生成', str(path)))
 
     def select(self, event=None):
-        selected = self.tree.selection()
-        entry = self.entries.get(selected[0]) if selected else None
+        selected = self.tree.selectedItems()
+        entry = self.selected_entry()
         if entry is None:
             self.preview.clear('请选择目录中的文件' if selected else '请选择文件')
             if selected:
-                self.detail.set(self.tree.item(selected[0], 'text'))
+                self.detail.setText(selected[0].text(0))
             return
-        self.detail.set(f'{entry["path"]}  ·  {entry_status(entry)}  ·  inode {entry["inode"] or "—"}  ·  {entry["size"]} 字节  ·  分区偏移 {entry["offset"]}')
+        self.detail.setText(f'{entry["path"]}  ·  {entry_status(entry)}  ·  inode {entry["inode"] or "—"}  ·  {entry["size"]} 字节  ·  分区偏移 {entry["offset"]}')
         if entry['directory'] or entry['mode'].startswith('V/'):
             self.preview.clear('请选择目录中的文件')
         else:
@@ -182,11 +191,15 @@ class App:
             return
         data = self.case.data
         evidence = data['evidence']
-        self.summary.set(f'案件 {data["number"]}  ·  取证人员 {data["examiner"]}  ·  对象 {data["target"]}\n' + (f'SHA-256  {evidence["sha256"]}' if evidence else '尚未加载镜像'))
+        self.summary.setText(f'案件 {data["number"]}  ·  取证人员 {data["examiner"]}  ·  对象 {data["target"]}\n' + (f'SHA-256  {evidence["sha256"]}' if evidence else '尚未加载镜像'))
         values = [f'{p["offset"]} 扇区 · {p["description"]}' for p in evidence['partitions']] if evidence else []
-        self.partition['values'] = values
-        if values and (reset or self.partition.current() < 0):
-            self.partition.current(next((i for i,p in enumerate(evidence['partitions']) if p['offset'] == data.get('offset')), 0))
+        previous = self.partition.currentIndex()
+        if values != [self.partition.itemText(i) for i in range(self.partition.count())]:
+            self.partition.clear()
+            self.partition.addItems(values)
+            self.partition.setCurrentIndex(min(previous, len(values) - 1))
+        if values and (reset or self.partition.currentIndex() < 0):
+            self.partition.setCurrentIndex(next((i for i,p in enumerate(evidence['partitions']) if p['offset'] == data.get('offset')), 0))
         if reset:
             self.display(data['inventory'])
         info_key = (id(evidence), data.get('fsstat'))
@@ -203,22 +216,26 @@ class App:
             self._timeline_inventory = data['inventory']
 
     def close(self):
-        if self.busy:
-            messagebox.showinfo('正在处理', '请等待当前取证任务完成后再退出。', parent=self.root)
+        return self.root.close()
+
+    def eventFilter(self, watched, event):
+        if watched is self.root and event.type() == QEvent.Type.Close:
+            if self.busy:
+                QMessageBox.information(self.root, '正在处理', '请等待当前取证任务完成后再退出。')
+                event.ignore()
+                return True
+            self._shutdown()
+        return super().eventFilter(watched, event)
+
+    def _shutdown(self):
+        if self._closed:
             return
+        self._closed = True
+        self._timer.stop()
         self.browser.cancel_display()
         self.preview.clear()
         if self.case:
             self.case.close()
-        self.root.destroy()
-
-    def _on_destroy(self, event):
-        if event.widget is self.root:
-            self._closed = True
-            if self._poll_id is not None:
-                self.root.after_cancel(self._poll_id)
-                self._poll_id = None
-            self.browser.cancel_display()
 
 
 HELP_TEXT = '''操作顺序
@@ -248,11 +265,20 @@ HELP_TEXT = '''操作顺序
 def main(case=None):
     from .launcher import ErrorReporter
 
-    DesktopAppearance.enable_high_dpi()
-    root = tk.Tk()
-    ErrorReporter().install(root)
-    app = App(root)
-    if case is not None:
-        app.case = case
-        app.refresh(reset=True)
-    root.mainloop()
+    qt_app = QApplication.instance() or QApplication(sys.argv)
+    qt_app.setApplicationName('TraceDesk')
+    root = QMainWindow()
+    reporter = ErrorReporter()
+    reporter.install(root)
+    app = None
+    try:
+        app = App(root)
+        if case is not None:
+            app.case = case
+            app.refresh(reset=True)
+        root.show()
+        return qt_app.exec()
+    finally:
+        if app is not None:
+            app._shutdown()
+        reporter.restore()

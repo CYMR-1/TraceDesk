@@ -1,7 +1,7 @@
 """验证应用入口能报告错误，不启动真实消息框。"""
 from pathlib import Path
 import tempfile
-from types import SimpleNamespace
+import sys
 import unittest
 from unittest.mock import Mock, patch
 
@@ -25,24 +25,40 @@ class LauncherTests(unittest.TestCase):
         main.assert_called_once_with()
         reporter.report_exception.assert_not_called()
 
-    def test_tk_callback_writes_traceback_and_shows_log_path(self):
+    def test_qt_callback_writes_traceback_and_shows_log_path(self):
         test_root = Path(__file__).resolve().parent.parent / '.test-work'
         test_root.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=test_root) as folder:
             path = Path(folder) / 'logs' / 'startup.log'
             reporter = ErrorReporter(path)
-            root = SimpleNamespace()
+            root = Mock()
+            previous_hook = sys.excepthook
             reporter.install(root)
+            self.addCleanup(reporter.restore)
             try:
                 raise ValueError('回调测试')
             except ValueError as error:
-                with patch('tkinter.messagebox.showerror') as dialog:
-                    root.report_callback_exception(type(error), error, error.__traceback__)
+                with patch('PySide6.QtWidgets.QApplication.instance', return_value=object()), \
+                        patch('PySide6.QtWidgets.QMessageBox.critical') as dialog:
+                    sys.excepthook(type(error), error, error.__traceback__)
             text = path.read_text(encoding='utf-8')
             self.assertIn('Traceback', text)
             self.assertIn('ValueError: 回调测试', text)
-            self.assertIn(str(path), dialog.call_args.args[1])
-            self.assertIs(dialog.call_args.kwargs['parent'], root)
+            self.assertIn(str(path), dialog.call_args.args[2])
+            self.assertIs(dialog.call_args.args[0], root)
+            reporter.restore()
+            self.assertIs(sys.excepthook, previous_hook)
+            self.assertIsNone(reporter.root)
+
+    def test_restore_preserves_a_new_host_exception_hook(self):
+        previous_hook = sys.excepthook
+        self.addCleanup(setattr, sys, 'excepthook', previous_hook)
+        reporter = ErrorReporter()
+        reporter.install(Mock())
+        replacement = Mock()
+        sys.excepthook = replacement
+        reporter.restore()
+        self.assertIs(sys.excepthook, replacement)
 
 
 if __name__ == '__main__':

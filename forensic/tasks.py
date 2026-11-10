@@ -13,7 +13,7 @@ class TaskResult:
 
 
 class TaskRunner:
-    """同一时刻运行一个任务，不从工作线程调用任何 Tk API。"""
+    """同一时刻运行一个任务，不从工作线程调用任何界面 API。"""
 
     def __init__(self):
         self.results = queue.Queue()
