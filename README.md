@@ -49,7 +49,7 @@ python -m venv .venv
 - 七项基本功能均实现；自动化测试真实调用 TSK，不用模拟解析器替代。
 - 扩展：审计哈希链及尾部锚点、MAC/B 时间线、路径关键词筛选、导出副本 SHA-256、导出前后原镜像校验。
 - `.\.venv\Scripts\python.exe -m unittest discover -s tests -v` 运行测试；实际记录见 `docs/test-results.txt`。
-- 设计、评分对应、限制与 AI 参与说明见 `docs/设计与验收说明.md`；录屏流程见 `docs/演示脚本.md`。
+- 设计、评分对应、限制与 AI 参与说明见 [设计与验收说明.md](docs/设计与验收说明.md)。
 - 面向对象结构：`ApplicationLauncher` 管理入口和异常报告，`App` 协调操作，`WorkbenchView` / `FileBrowserView` 管理布局和文件树，`DesktopAppearance` 管理 DPI 与主题，`TaskRunner` 管理后台任务，`FilePreview` / `PreviewReader` 分离预览显示与读取，`Case` 和 `TSK` 保留原有取证业务接口。案件格式和取证流程保持不变。
 - 代码入口 `main.py`；控制器 `forensic/gui.py`；视图 `forensic/workspace.py` 与 `forensic/views.py`；外观 `forensic/appearance.py`；后台任务 `forensic/tasks.py`；案件逻辑 `forensic/core.py`；TSK 适配 `forensic/tsk.py`。
 - 标题栏与任务栏使用原创棕金色“证据文件＋放大镜”图标，资源位于 `forensic/assets`。修改 SVG 后，可运行 `.\.venv\Scripts\python.exe scripts/make_icon.py` 重建 PNG 和多尺寸 ICO；重启程序生效。
