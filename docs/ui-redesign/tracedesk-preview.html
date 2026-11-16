@@ -8,6 +8,55 @@
 @media(min-width:601px) and (max-width:900px){#td-preview .td-nav button{font-size:11px;gap:7px;padding-left:8px;padding-right:8px;white-space:nowrap}}
 @media(max-width:600px){#td-preview .td-side-bottom{display:block;margin-top:6px;padding-top:6px;border-top:1px solid var(--td-line)}#td-preview .td-side-bottom .td-case{display:none}}
 @media(pointer:coarse){#td-preview button,#td-preview select{min-height:44px}#td-preview input{font-size:16px!important}}
+/* 文件树工作台：左侧层级树，右上结果，右下内容。 */
+#td-preview .td-body{display:block;min-height:0}
+#td-preview .td-sidebar{flex-direction:row;align-items:center;gap:12px;padding:8px 16px;border-right:0;border-bottom:1px solid var(--td-line);flex-wrap:wrap}
+#td-preview .td-navtitle,#td-preview .td-secondary-nav,#td-preview .td-case{display:none}
+#td-preview .td-nav{flex-direction:row;flex-wrap:wrap;gap:3px}
+#td-preview .td-nav button{width:auto;padding:7px 9px;font-size:12px;gap:6px;white-space:nowrap}
+#td-preview .td-side-bottom{display:block;margin:0 0 0 auto;padding:0;border:0}
+#td-preview .td-main{padding:16px;gap:12px}
+#td-preview .td-breadcrumb{margin-bottom:3px}
+#td-preview h1{font-size:19px}
+#td-preview .td-subtitle{font-size:11px}
+#td-preview .td-workspace{grid-template-columns:var(--td-tree-width,240px) minmax(0,1fr);min-height:550px}
+#td-preview .td-resultpane{min-width:0;display:flex;flex-direction:column}
+#td-preview .td-files{flex:1;min-height:278px}
+#td-preview .td-inspector{border-left:0;border-top:1px solid var(--td-line);display:grid;grid-template-columns:210px minmax(0,1fr);gap:12px 20px;padding:13px 15px}
+#td-preview .td-inspector-head{grid-column:1/-1}
+#td-preview .td-inspector .td-btn{width:auto;margin:0;padding:5px 9px;font-size:11px}
+#td-preview .td-previewmeta{display:grid;gap:10px;align-content:start}
+#td-preview .td-previewcontent{min-width:0;border-left:1px solid var(--td-line);padding-left:20px}
+#td-preview .td-previewcontent pre{font-size:12px;min-height:140px;line-height:2}
+#td-preview .td-tree-panel{border-right:1px solid var(--td-line);min-width:0;background:#fafafa;display:flex;flex-direction:column}
+#td-preview .td-tree-header{padding:12px;border-bottom:1px solid var(--td-line);display:grid;gap:8px}
+#td-preview .td-tree-header .td-btn{padding:3px 7px;font-size:11px}
+#td-preview .td-tree-header h2{font-size:13px}
+#td-preview .td-tree-body{padding:10px 5px 10px 9px;font-size:11px}
+#td-preview .td-tree-body details>summary{display:flex;align-items:center;gap:2px;list-style:none;cursor:var(--cursor-interaction,pointer);border-radius:4px;min-height:30px}
+#td-preview .td-tree-body summary::-webkit-details-marker{display:none}
+#td-preview .td-tree-body summary::before{content:'›';width:10px;flex-shrink:0;font-size:16px;display:inline-block;text-align:center;color:#777777}
+#td-preview .td-tree-body details[open]>summary::before{transform:rotate(90deg)}
+#td-preview .td-tree-children{margin-left:11px;padding-left:3px;border-left:1px solid #e3e3e3}
+#td-preview .td-tree-node{display:flex;align-items:center;gap:6px;padding:6px 4px;border:0;border-radius:4px;background:transparent;min-width:0;width:100%;text-align:left;font-size:11px;overflow-wrap:anywhere}
+#td-preview .td-tree-node svg{width:14px;height:14px;flex-shrink:0}
+#td-preview .td-tree-node span:first-of-type{min-width:0;overflow-wrap:anywhere}
+#td-preview .td-tree-node:hover{background:#f0f0f0}
+#td-preview .td-tree-node[aria-pressed=true]{background:#e8e8e8;color:#292929;font-weight:600}
+#td-preview .td-tree-leaf{padding-left:13px}
+#td-preview .td-tree-deleted{margin-left:auto;border:1px solid #d7d7d7;border-radius:3px;padding:0 3px;font-size:10px;font-weight:400;white-space:nowrap}
+#td-preview .td-tree-foot{padding:12px;margin-top:auto;border-top:1px solid var(--td-line);font-size:11px;color:var(--td-muted)}
+#td-preview .td-tree-structures{padding:10px 10px 0;border-top:1px solid var(--td-line);margin-top:10px}
+#td-preview .td-tree-structures p{font-size:10px;color:var(--td-muted);margin-bottom:5px}
+#td-preview .td-tree-structures button{padding:5px 4px;font-size:11px}
+#td-preview .td-result-table{min-width:720px}
+#td-preview .td-result-table th,#td-preview .td-result-table td{padding:8px 10px}
+#td-preview .td-result-table th:last-child,#td-preview .td-result-table td:last-child{text-align:left}
+#td-preview .td-result-table .td-filetype{width:19px;height:24px;font-size:7px}
+#td-preview .td-filepath{overflow-wrap:anywhere}
+#td-preview .td-tree-context{font-size:11px;color:var(--td-muted);padding:8px 12px;border-bottom:1px solid var(--td-line);background:#fafafa}
+@media(max-width:800px){#td-preview .td-workspace{grid-template-columns:210px minmax(0,1fr)}#td-preview .td-inspector{grid-template-columns:1fr}#td-preview .td-previewcontent{padding:12px 0 0;border-left:0;border-top:1px solid var(--td-line)}#td-preview .td-previewcontent pre{min-height:90px}#td-preview .td-side-bottom{margin-left:0}}
+@media(max-width:520px){#td-preview .td-workspace{grid-template-columns:1fr}#td-preview .td-tree-panel{border-right:0;border-bottom:1px solid var(--td-line);min-height:0}#td-preview .td-main{padding:12px}#td-preview .td-sidebar{padding:8px}#td-preview .td-inspector{display:grid}#td-preview .td-tree-foot{margin-top:10px}}
 </style>
 <div id="td-preview" aria-label="TraceDesk 浅色取证工作台设计">
   <header class="td-top">
@@ -32,22 +81,32 @@
       <div id="td-notice" class="td-toast" role="status" aria-live="polite" hidden></div>
       <section class="td-view" id="td-files-view" aria-label="文件浏览">
         <div class="td-workspace">
+          <aside class="td-tree-panel" aria-label="完整文件树">
+            <div class="td-tree-header"><div class="td-row td-spread"><h2>数据源 / 文件树</h2><i data-lucide="folder-tree" aria-hidden="true"></i></div><div class="td-row"><button class="td-btn" type="button" id="td-expand-all">全部展开</button><button class="td-btn" type="button" id="td-collapse-all">全部折叠</button></div></div>
+            <div class="td-tree-body" id="td-tree"></div>
+            <div class="td-tree-structures"><p>文件系统结构</p><button class="td-tree-node" type="button" data-structure="引导扇区"><i data-lucide="binary" aria-hidden="true"></i>引导扇区</button><button class="td-tree-node" type="button" data-structure="FAT 表"><i data-lucide="table-2" aria-hidden="true"></i>FAT 表</button><button class="td-tree-node" type="button" data-structure="根目录数据"><i data-lucide="folder-cog" aria-hidden="true"></i>根目录数据</button><button class="td-tree-node" type="button" data-structure="未分配空间"><i data-lucide="hard-drive" aria-hidden="true"></i>未分配空间</button></div>
+            <div class="td-tree-foot">1 个目录 · 5 个文件<br>含已删除条目 · 示例数据</div>
+          </aside>
+          <div class="td-resultpane">
           <div class="td-files">
-            <div class="td-toolbar"><label class="td-search"><i data-lucide="search" aria-hidden="true"></i><input id="td-search" type="search" aria-label="搜索路径或后缀" placeholder="搜索路径或后缀…"></label><select id="td-filter" aria-label="文件状态"><option value="all">全部状态</option><option value="existing">现存文件</option><option value="deleted">已删除</option></select></div>
-            <div class="td-filepath"><span>demo.dd <span style="padding:0 5px">/</span> FAT16 <span style="padding:0 5px">/</span> 全部文件</span><span>UTC+8</span></div>
-            <div class="td-tablewrap"><table aria-label="示例镜像文件"><thead><tr><th>文件名称</th><th>状态</th><th>大小</th></tr></thead><tbody id="td-file-rows"></tbody></table></div>
+            <div class="td-toolbar"><label class="td-search"><i data-lucide="search" aria-hidden="true"></i><input id="td-search" type="search" aria-label="搜索当前目录路径或后缀" placeholder="在当前目录中搜索路径或后缀…"></label><select id="td-filter" aria-label="文件状态"><option value="all">全部状态</option><option value="existing">现存文件</option><option value="deleted">已删除</option></select></div>
+            <div class="td-filepath"><span id="td-directory-path">demo.dd / FAT16 / 全部文件</span><span>时间 UTC+8 · 示例</span></div>
+            <div class="td-tablewrap"><table class="td-result-table" aria-label="当前目录文件列表"><thead><tr><th>名称 / 路径</th><th>状态</th><th>大小</th><th>inode</th><th>M · 修改</th><th>A · 访问</th><th>C · 变更</th></tr></thead><tbody id="td-file-rows"></tbody></table></div>
             <div id="td-empty" class="td-empty" hidden>没有匹配的文件</div>
             <div class="td-filecount" id="td-filecount" aria-live="polite">5 个文件 · 1 个已删除</div>
           </div>
           <aside class="td-inspector" aria-label="选中文件详情" aria-live="polite">
-            <div class="td-inspector-head td-row td-spread"><span>文件详情</span><i data-lucide="panel-right" aria-hidden="true"></i></div>
+            <div class="td-inspector-head td-row td-spread"><span>内容与元数据</span><button type="button" class="td-btn" id="td-export"><i data-lucide="download" aria-hidden="true"></i>导出所选文件</button></div>
+            <div class="td-previewmeta">
             <div class="td-filetitle"><span class="td-filetype" id="td-detail-ext">TXT</span><div><h2 id="td-detail-name">CASE.TXT</h2><div class="td-small td-muted" id="td-detail-path">/DOCS/CASE.TXT</div></div></div>
             <dl class="td-props" id="td-detail-props"></dl>
             <div class="td-divider"><h3 style="margin-bottom:9px">文件时间 <span class="td-muted" style="font-weight:400">UTC+8 · 示例</span></h3><dl class="td-props"><dt>M · 修改</dt><dd class="td-mono">2026-11-12 09:42</dd><dt>A · 访问</dt><dd class="td-mono">2026-11-12 10:03</dd><dt>C · 变更</dt><dd class="td-muted">未记录</dd></dl></div>
-            <div><div class="td-tabs" aria-label="预览格式"><button type="button" data-format="text" aria-pressed="true">文本</button><button type="button" data-format="hex" aria-pressed="false">十六进制</button></div><pre id="td-content" style="padding-top:11px"></pre></div>
+            </div>
+            <div class="td-previewcontent"><div class="td-tabs" aria-label="预览格式"><button type="button" data-format="text" aria-pressed="true">文本</button><button type="button" data-format="hex" aria-pressed="false">十六进制</button></div><pre id="td-content" style="padding-top:11px"></pre>
             <div id="td-deleted-note" class="td-callout" hidden>已删除记录。可读字节不代表文件完整，导出时需核对实际大小。</div>
-            <button type="button" class="td-btn" id="td-export"><i data-lucide="download" aria-hidden="true"></i>导出所选文件</button>
+            </div>
           </aside>
+          </div>
         </div>
       </section>
       <section class="td-view" id="td-other-view" hidden></section>
@@ -67,11 +126,19 @@
     {name:'PAYLOAD.BIN', path:'/PAYLOAD.BIN', ext:'BIN', size:'1.50 KB', inode:'6', deleted:false, text:'\u0000\u0001\u0002\u0003TRACE\u0000\u0001\u0002\u0003DATA', note:'示例字节'}
   ];
   const pages = {files:['文件浏览','从镜像中定位文件，查看内容与元数据。'],image:['镜像与文件系统','核对证据来源，选择分区并读取文件树。'],timeline:['MAC 时间线','按时间关联文件活动，区分修改、访问与元数据变更。'],audit:['审计日志','查看案件操作记录和哈希链校验状态。'],report:['报告导出','汇总案件信息、导出记录与审计过程。'],new:['新建案件','建立独立的案件目录，保存分析结果。'],open:['打开案件','选择已有案件，继续取证分析。'],help:['操作说明','按证据固定、分析、校验和导出的顺序开展工作。']};
-  const design = {density:'舒适',layout:'右侧详情'};
-  let current='files',selected='CASE.TXT',format='text';
+  const design = {density:'舒适',layout:'下方详情',treeWidth:240};
+  let current='files',selected='CASE.TXT',format='text',folder='all';
+  const directories=[...new Set(files.flatMap(f=>{const parts=f.path.split('/').filter(Boolean);parts.pop();return parts.map((_,i)=>'/'+parts.slice(0,i+1).join('/'));}))];
   function icons(){if(globalThis.lucide) globalThis.lucide.createIcons({attrs:{width:17,height:17}});}
-  function remember(){if(window.openai?.setWidgetState)window.openai.setWidgetState({modelContent:{design:'白色与浅灰工作台',...design},privateContent:{current,selected,format,search:q('#td-search').value,filter:q('#td-filter').value}}).catch(()=>{});}
+  function remember(){if(window.openai?.setWidgetState)window.openai.setWidgetState({modelContent:{design:'白灰文件树工作台',...design},privateContent:{current,selected,format,folder,collapsed:[...root.querySelectorAll('#td-tree details:not([open])')].map(d=>d.dataset.branch),search:q('#td-search').value,filter:q('#td-filter').value}}).catch(()=>{});}
   function notice(message){q('#td-notice').textContent=message;q('#td-notice').hidden=false;}
+  const parentPath=path=>path.slice(0,path.lastIndexOf('/'))||'/';
+  function makeTree(){
+    function children(path){return directories.filter(d=>parentPath(d)===path).map(d=>`<details open data-branch="${d}"><summary><button class="td-tree-node" type="button" data-folder="${d}"><i data-lucide="folder" aria-hidden="true"></i><span>${d.split('/').pop()}</span></button></summary><div class="td-tree-children">${children(d)}</div></details>`).join('')+files.filter(f=>parentPath(f.path)===path).map(f=>`<button class="td-tree-node td-tree-leaf" type="button" data-tree-file="${f.name}" aria-pressed="false"><i data-lucide="${f.deleted?'file-x':'file'}" aria-hidden="true"></i><span>${f.name}</span>${f.deleted?'<span class="td-tree-deleted">已删除</span>':''}</button>`).join('');}
+    q('#td-tree').innerHTML=`<details open data-branch="image"><summary><button class="td-tree-node" type="button" data-folder="all"><i data-lucide="hard-drive" aria-hidden="true"></i><span>demo.dd</span></button></summary><div class="td-tree-children"><details open data-branch="partition"><summary><button class="td-tree-node" type="button" data-folder="all"><i data-lucide="database" aria-hidden="true"></i><span>FAT16 · 偏移 2048</span></button></summary><div class="td-tree-children"><details open data-branch="/"><summary><button class="td-tree-node" type="button" data-folder="/"><i data-lucide="folder-open" aria-hidden="true"></i><span>/ 根目录</span></button></summary><div class="td-tree-children">${children('/')}</div></details></div></details></div></details>`;
+  }
+  function syncTree(){root.querySelectorAll('[data-tree-file]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.treeFile===selected&&!q('.td-inspector').hidden)));root.querySelectorAll('#td-tree [data-folder]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.folder===folder)));}
+  function chooseFolder(path){folder=path;selected='';q('#td-search').value='';q('#td-filter').value='all';renderRows();remember();}
   function renderFile(){
     const f=files.find(x=>x.name===selected)||files[0];
     q('#td-detail-name').textContent=f.name;q('#td-detail-path').textContent=f.path;q('#td-detail-ext').textContent=f.ext;
@@ -85,12 +152,14 @@
   }
   function renderRows(){
     const term=q('#td-search').value.toLowerCase(), filter=q('#td-filter').value;
-    const shown=files.filter(f=>f.path.toLowerCase().includes(term)&&(filter==='all'||f.deleted===(filter==='deleted')));
+    const shown=files.filter(f=>(folder==='all'||parentPath(f.path)===folder)&&f.path.toLowerCase().includes(term)&&(filter==='all'||f.deleted===(filter==='deleted')));
+    const shownDirs=filter==='all'?directories.filter(d=>(folder==='all'||parentPath(d)===folder)&&d.toLowerCase().includes(term)):[];
     if(shown.length&&!shown.some(f=>f.name===selected))selected=shown[0].name;
-    q('#td-file-rows').innerHTML=shown.map(f=>`<tr class="${f.name===selected?'td-selected':''}"><td><button type="button" class="td-filename" data-file="${f.name}" aria-pressed="${f.name===selected}"><span class="td-filetype">${f.ext}</span><span>${f.name}${f.name==='CASE.TXT'?'<span class="td-muted td-small" style="display:block">DOCS /</span>':''}</span></button></td><td><span class="td-tag ${f.deleted?'warn':'neutral'}">${f.deleted?'已删除':'现存'}</span></td><td class="td-mono td-muted">${f.size}</td></tr>`).join('');
-    q('#td-empty').hidden=shown.length!==0;q('.td-inspector').hidden=shown.length===0;
-    q('#td-filecount').textContent=`${shown.length} 个文件 · ${shown.filter(f=>f.deleted).length} 个已删除`;
-    renderFile();
+    q('#td-file-rows').innerHTML=shownDirs.map(d=>`<tr><td><button class="td-filename" type="button" data-folder="${d}"><i data-lucide="folder" aria-hidden="true"></i>${d.split('/').pop()}</button></td><td><span class="td-tag neutral">目录</span></td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>`).join('')+shown.map(f=>`<tr class="${f.name===selected?'td-selected':''}"><td><button type="button" class="td-filename" data-file="${f.name}" aria-pressed="${f.name===selected}"><span class="td-filetype">${f.ext}</span><span>${f.name}${f.name==='CASE.TXT'?'<span class="td-muted td-small" style="display:block">DOCS /</span>':''}</span></button></td><td><span class="td-tag ${f.deleted?'warn':'neutral'}">${f.deleted?'已删除':'现存'}</span></td><td class="td-mono td-muted">${f.size}</td><td class="td-mono">${f.inode}</td><td class="td-mono td-small">11-12 09:42</td><td class="td-mono td-small">11-12 10:03</td><td class="td-muted">未记录</td></tr>`).join('');
+    q('#td-empty').hidden=shown.length+shownDirs.length!==0;q('.td-inspector').hidden=shown.length===0;
+    q('#td-directory-path').textContent=`demo.dd / FAT16 / ${folder==='all'?'全部文件（含子目录）':folder==='/'?'根目录':folder.slice(1)}`;
+    q('#td-filecount').textContent=`${shownDirs.length} 个目录 · ${shown.length} 个文件 · ${shown.filter(f=>f.deleted).length} 个已删除`;
+    renderFile();syncTree();icons();
   }
   const shell = content=>`<div class="td-statusbox">${content}</div>`;
   function renderPage(){
@@ -110,8 +179,12 @@
   }
   root.addEventListener('click',e=>{
     const button=e.target.closest('button');if(!button)return;
+    if(button.dataset.folder){e.preventDefault();chooseFolder(button.dataset.folder);}
+    if(button.dataset.treeFile){const f=files.find(f=>f.name===button.dataset.treeFile);folder=parentPath(f.path);selected=f.name;q('#td-search').value='';q('#td-filter').value='all';renderRows();remember();}
+    if(button.id==='td-expand-all'||button.id==='td-collapse-all'){root.querySelectorAll('#td-tree details').forEach(d=>d.open=button.id==='td-expand-all');remember();}
+    if(button.dataset.structure)notice(`${button.dataset.structure}：正式界面将在内容区显示对应字节。当前为布局预览，未读取镜像。`);
     if(button.dataset.view){current=button.dataset.view;q('#td-notice').hidden=true;renderPage();remember();}
-    if(button.dataset.file){selected=button.dataset.file;renderRows();remember();}
+    if(button.dataset.file){selected=button.dataset.file;renderRows();const node=[...root.querySelectorAll('[data-tree-file]')].find(b=>b.dataset.treeFile===selected);let ancestor=node?.closest('details');while(ancestor){ancestor.open=true;ancestor=ancestor.parentElement.closest('details');}remember();}
     if(button.dataset.format){format=button.dataset.format;renderFile();remember();}
     if(button.id==='td-verify')notice('校验结果样式：镜像 SHA-256 与固定值一致。设计预览未读取或校验真实镜像。');
     if(button.id==='td-export')notice(`导出流程预览：校验源镜像 → 导出 ${selected} → 计算副本哈希 → 复核镜像。未写入文件。`);
@@ -123,10 +196,11 @@
   });
   root.addEventListener('submit',e=>{e.preventDefault();notice('表单已填写。正式界面将在选择案件库后创建案件；设计预览未创建目录。');});
   q('#td-search').addEventListener('input',()=>{renderRows();remember();});q('#td-filter').addEventListener('change',()=>{renderRows();remember();});
-  function applyDesign(){root.style.setProperty('--td-row',design.density==='紧凑'?'39px':'48px');q('.td-main').classList.toggle('td-bottom-detail',design.layout==='底部详情');}
-  function restore(saved){if(!saved)return;const d=saved.modelContent||{},s=saved.privateContent||{};if(['舒适','紧凑'].includes(d.density))design.density=d.density;if(['右侧详情','底部详情'].includes(d.layout))design.layout=d.layout;if(pages[s.current])current=s.current;if(files.some(f=>f.name===s.selected))selected=s.selected;if(['text','hex'].includes(s.format))format=s.format;q('#td-search').value=typeof s.search==='string'?s.search:'';q('#td-filter').value=['all','existing','deleted'].includes(s.filter)?s.filter:'all';}
-  restore(window.openai?.widgetState);applyDesign();renderRows();renderPage();
+  function applyDesign(){root.style.setProperty('--td-row',design.density==='紧凑'?'35px':'43px');root.style.setProperty('--td-tree-width',design.treeWidth+'px');}
+  function restore(saved){if(!saved)return;const d=saved.modelContent||{},s=saved.privateContent||{};if(['舒适','紧凑'].includes(d.density))design.density=d.density;if(Number.isFinite(d.treeWidth))design.treeWidth=Math.max(220,Math.min(300,d.treeWidth));if(['all','/',...directories].includes(s.folder))folder=s.folder;if(pages[s.current])current=s.current;if(files.some(f=>f.name===s.selected))selected=s.selected;if(['text','hex'].includes(s.format))format=s.format;q('#td-search').value=typeof s.search==='string'?s.search:'';q('#td-filter').value=['all','existing','deleted'].includes(s.filter)?s.filter:'all';if(Array.isArray(s.collapsed))root.querySelectorAll('#td-tree details').forEach(node=>node.open=!s.collapsed.includes(node.dataset.branch));}
+  makeTree();restore(window.openai?.widgetState);applyDesign();renderRows();renderPage();
+  q('#td-tree').addEventListener('click',e=>{if(e.target.closest('summary')&&!e.target.closest('button'))setTimeout(remember,0);});
   window.addEventListener('openai:set_globals',e=>{if(e.detail?.globals?.widgetState){restore(e.detail.globals.widgetState);applyDesign();renderRows();renderPage();}});
-  if(globalThis.Tweak){const tweak=new Tweak({container:root,onChange:()=>{applyDesign();remember();}});tweak.addSelect(design,'density',{label:'列表密度',options:['舒适','紧凑']});tweak.addSelect(design,'layout',{label:'详情位置',options:['右侧详情','底部详情']});}
+  if(globalThis.Tweak){const tweak=new Tweak({container:root,onChange:()=>{applyDesign();remember();}});tweak.addSelect(design,'density',{label:'列表密度',options:['舒适','紧凑']});tweak.addSlider(design,'treeWidth',{label:'目录树宽度',min:220,max:300,step:10,unit:'px'});}
 })();
 </script>
