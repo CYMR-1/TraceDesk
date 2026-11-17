@@ -6,12 +6,13 @@ import unittest
 from unittest.mock import Mock, patch
 
 from forensic.launcher import ApplicationLauncher, ErrorReporter
+from forensic.paths import TEST_WORK_DIR
 
 
 class LauncherTests(unittest.TestCase):
     def test_startup_failure_is_reported(self):
         reporter = Mock()
-        with patch('forensic.gui.main', side_effect=RuntimeError('初始化失败')):
+        with patch('forensic.ui.controller.main', side_effect=RuntimeError('初始化失败')):
             self.assertEqual(ApplicationLauncher(reporter).run(), 1)
         arguments = reporter.report_exception.call_args.args
         self.assertIs(arguments[0], RuntimeError)
@@ -20,13 +21,13 @@ class LauncherTests(unittest.TestCase):
 
     def test_successful_startup(self):
         reporter = Mock()
-        with patch('forensic.gui.main') as main:
+        with patch('forensic.ui.controller.main') as main:
             self.assertEqual(ApplicationLauncher(reporter).run(), 0)
         main.assert_called_once_with()
         reporter.report_exception.assert_not_called()
 
     def test_qt_callback_writes_traceback_and_shows_log_path(self):
-        test_root = Path(__file__).resolve().parent.parent / '.test-work'
+        test_root = TEST_WORK_DIR
         test_root.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=test_root) as folder:
             path = Path(folder) / 'logs' / 'startup.log'

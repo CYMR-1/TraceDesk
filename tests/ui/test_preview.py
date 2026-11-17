@@ -12,9 +12,10 @@ from unittest.mock import patch
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMainWindow, QTreeWidgetItemIterator
 
-from forensic.gui import App
-from forensic.preview import PAGE_BYTES, PreviewReader, preview_rows, preview_text
-from forensic.tsk import ROOT, TSK
+from forensic.ui.controller import App
+from forensic.ui.preview import PAGE_BYTES, PreviewReader, preview_rows, preview_text
+from forensic.engines.tsk import TSK
+from forensic.paths import ROOT
 
 
 class PreviewTests(unittest.TestCase):
@@ -94,7 +95,7 @@ class PreviewTests(unittest.TestCase):
             return [tuple(preview.rows.topLevelItem(row).text(column) for column in range(3))
                     for row in range(preview.rows.topLevelItemCount())]
 
-        with patch('forensic.preview.PAGE_BYTES', 32):
+        with patch('forensic.ui.preview.PAGE_BYTES', 32):
             select('DOCS/CASE.TXT')
             self.assertEqual(read_page()[0][2], 'Case note inside')
             select('PAYLOAD.BIN')
@@ -150,7 +151,7 @@ class PreviewTests(unittest.TestCase):
             reader.pages.put(page)
         raw = bytes(range(51))
         process = SimpleNamespace(stdout=io.BytesIO(raw), wait=lambda: 1)
-        with patch('forensic.preview.PAGE_BYTES', 32):
+        with patch('forensic.ui.preview.PAGE_BYTES', 32):
             reader._read_pages(process, io.BytesIO(b'read error'), io.BytesIO(), 100, deleted=True)
         self.assertEqual(reader.results.get_nowait()[:3], (0, raw[:35], 100))
         page, data, size, note = reader.results.get_nowait()

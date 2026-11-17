@@ -8,9 +8,9 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFrame, QHBoxLayout
                                QPushButton, QSizePolicy, QSplitter, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from .core import display_time
+from ..core.case import display_time
 from .preview import FilePreview
-from .tsk import can_export, entry_name, entry_status
+from ..engines.tsk import can_export, entry_name, entry_status
 
 
 def label(text, role=None):

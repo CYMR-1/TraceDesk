@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from .tsk import TSK, deleted_source_note, tsk_error
+from ..engines.tsk import TSK, deleted_source_note, tsk_error
 
 
 ROW_BYTES = 16

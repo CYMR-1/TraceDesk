@@ -1,0 +1,56 @@
+test_busy_task_rejects_second_submission (core.test_tasks.TaskRunnerTests.test_busy_task_rejects_second_submission) ... ok
+test_callback_runs_only_when_caller_consumes_result (core.test_tasks.TaskRunnerTests.test_callback_runs_only_when_caller_consumes_result) ... ok
+test_none_value_is_a_completed_task (core.test_tasks.TaskRunnerTests.test_none_value_is_a_completed_task) ... ok
+test_task_error_is_returned_and_next_task_can_run (core.test_tasks.TaskRunnerTests.test_task_error_is_returned_and_next_task_can_run) ... ok
+test_thread_start_failure_restores_idle_state (core.test_tasks.TaskRunnerTests.test_thread_start_failure_restores_idle_state) ... ok
+test_audit_edit_detected (core.test_workflow.WorkflowTests.test_audit_edit_detected) ... ok
+test_audit_truncation_detected (core.test_workflow.WorkflowTests.test_audit_truncation_detected) ... ok
+test_case_folder_keeps_inputs_inside_library (core.test_workflow.WorkflowTests.test_case_folder_keeps_inputs_inside_library) ... ok
+test_case_folder_name_and_collision (core.test_workflow.WorkflowTests.test_case_folder_name_and_collision) ... ok
+test_case_isolation (core.test_workflow.WorkflowTests.test_case_isolation) ... ok
+test_case_lock_and_invalid_metadata (core.test_workflow.WorkflowTests.test_case_lock_and_invalid_metadata) ... ok
+test_chinese_fls_names (core.test_workflow.WorkflowTests.test_chinese_fls_names) ... ok
+test_complete_real_tsk_workflow (core.test_workflow.WorkflowTests.test_complete_real_tsk_workflow) ... ok
+test_deleted_export_partial_and_unreadable (core.test_workflow.WorkflowTests.test_deleted_export_partial_and_unreadable) ... ok
+test_deleted_records_and_fat_regions (core.test_workflow.WorkflowTests.test_deleted_records_and_fat_regions) ... ok
+test_directory_export_rejected (core.test_workflow.WorkflowTests.test_directory_export_rejected) ... ok
+test_east_8_display_with_legacy_audit (core.test_workflow.WorkflowTests.test_east_8_display_with_legacy_audit) ... ok
+test_export_filename_windows_limits (core.test_workflow.WorkflowTests.test_export_filename_windows_limits) ... ok
+test_export_preserves_name_on_collision (core.test_workflow.WorkflowTests.test_export_preserves_name_on_collision) ... ok
+test_failed_save_preserves_state (core.test_workflow.WorkflowTests.test_failed_save_preserves_state) ... ok
+test_filter (core.test_workflow.WorkflowTests.test_filter) ... ok
+test_invalid_image_audited (core.test_workflow.WorkflowTests.test_invalid_image_audited) ... ok
+test_missing_tool_and_timeout (core.test_workflow.WorkflowTests.test_missing_tool_and_timeout) ... ok
+test_modified_image_blocks_export_and_report_marks_failure (core.test_workflow.WorkflowTests.test_modified_image_blocks_export_and_report_marks_failure) ... ok
+test_partial_export_cleanup (core.test_workflow.WorkflowTests.test_partial_export_cleanup) ... ok
+test_scan_image_changed (core.test_workflow.WorkflowTests.test_scan_image_changed) ... ok
+test_stream_hash (core.test_workflow.WorkflowTests.test_stream_hash) ... ok
+test_unpartitioned_volume (core.test_workflow.WorkflowTests.test_unpartitioned_volume) ... ok
+test_qt_callback_writes_traceback_and_shows_log_path (test_launcher.LauncherTests.test_qt_callback_writes_traceback_and_shows_log_path) ... ok
+test_restore_preserves_a_new_host_exception_hook (test_launcher.LauncherTests.test_restore_preserves_a_new_host_exception_hook) ... ok
+test_startup_failure_is_reported (test_launcher.LauncherTests.test_startup_failure_is_reported) ... ok
+test_successful_startup (test_launcher.LauncherTests.test_successful_startup) ... ok
+test_package_includes_subpackages_and_licenses_but_excludes_local_data (test_project_layout.ProjectLayoutTests.test_package_includes_subpackages_and_licenses_but_excludes_local_data) ... ok
+test_resources_and_gui_resolve_from_another_working_directory (test_project_layout.ProjectLayoutTests.test_resources_and_gui_resolve_from_another_working_directory) ... ok
+test_callback_failure_keeps_polling_and_restores_controls (ui.test_gui.ControllerTests.test_callback_failure_keeps_polling_and_restores_controls) ... ok
+test_close_during_task_keeps_case_and_window_open (ui.test_gui.ControllerTests.test_close_during_task_keeps_case_and_window_open) ... ok
+test_idle_close_stops_timers_and_releases_case_once (ui.test_gui.ControllerTests.test_idle_close_stops_timers_and_releases_case_once) ... ok
+test_native_close_event_uses_same_task_guard (ui.test_gui.ControllerTests.test_native_close_event_uses_same_task_guard) ... ok
+test_directory_filter_keeps_complete_tree_and_navigation_restores_file (ui.test_gui.FileBrowserTests.test_directory_filter_keeps_complete_tree_and_navigation_restores_file) ... ok
+test_duplicate_deleted_entries_keep_distinct_selection_and_metadata (ui.test_gui.FileBrowserTests.test_duplicate_deleted_entries_keep_distinct_selection_and_metadata) ... ok
+test_filters_during_batch_insertion_do_not_drop_tree_records (ui.test_gui.FileBrowserTests.test_filters_during_batch_insertion_do_not_drop_tree_records) ... ok
+test_inventory_refresh_replaces_pending_tree_rows (ui.test_gui.FileBrowserTests.test_inventory_refresh_replaces_pending_tree_rows) ... ok
+test_numeric_columns_keep_centered_headers_and_values (ui.test_gui.FileBrowserTests.test_numeric_columns_keep_centered_headers_and_values) ... ok
+test_result_selection_reveals_tree_and_system_regions_cannot_export (ui.test_gui.FileBrowserTests.test_result_selection_reveals_tree_and_system_regions_cannot_export) ... ok
+test_selected_partition_survives_audit_refresh (ui.test_gui.FileBrowserTests.test_selected_partition_survives_audit_refresh) ... ok
+test_creation_failure_keeps_inputs_for_retry (ui.test_gui.NewCaseDialogTests.test_creation_failure_keeps_inputs_for_retry) ... ok
+test_missing_fields_do_not_open_folder_picker (ui.test_gui.NewCaseDialogTests.test_missing_fields_do_not_open_folder_picker) ... ok
+test_file_selection_encoding_paging_and_resize (ui.test_preview.PreviewTests.test_file_selection_encoding_paging_and_resize) ... ok
+test_partial_deleted_preview_keeps_pages_after_read_error (ui.test_preview.PreviewTests.test_partial_deleted_preview_keeps_pages_after_read_error) ... ok
+test_text_preview_keeps_newlines_and_utf8_page_boundaries (ui.test_preview.PreviewTests.test_text_preview_keeps_newlines_and_utf8_page_boundaries) ... ok
+test_utf8_across_rows_and_pages (ui.test_preview.PreviewTests.test_utf8_across_rows_and_pages) ... ok
+
+----------------------------------------------------------------------
+Ran 51 tests in 11.296s
+
+OK

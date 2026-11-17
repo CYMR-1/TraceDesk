@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
-from .tsk import ROOT
+from ..paths import CASES_DIR
 
 
 class ReadOnlyTextPanel(QWidget):
@@ -69,7 +69,7 @@ class NewCaseDialog(QDialog):
             QMessageBox.warning(self, '信息不全', '请填写所有案件信息。')
             return
         folder = QFileDialog.getExistingDirectory(
-            self, '选择案件库目录', str(ROOT / 'cases'),
+            self, '选择案件库目录', str(CASES_DIR),
             QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontUseNativeDialog)
         if not folder:
             return

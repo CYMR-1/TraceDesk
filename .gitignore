@@ -11,9 +11,17 @@ logs/
 # Local assistant instructions are not project deliverables.
 AGENTS.md
 
-# Local evidence and generated machine-specific files.
-/evidence/DRF2024.dd
+# Only the four self-generated demo fixtures belong in source control.
+/evidence/*
+!/evidence/demo.dd
+!/evidence/demo.manifest.json
+!/evidence/demo_volume.dd
+!/evidence/demo_volume.manifest.json
+# Legacy runtime marker; new markers are written under logs/.
 /docs/latest-demo.txt
+desktop.ini
+Thumbs.db
+.DS_Store
 
 # The extracted TSK distribution is tracked instead.
 /tools/*.zip

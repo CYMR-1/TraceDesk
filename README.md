@@ -1,6 +1,22 @@
 # TraceDesk 电子数据取证工作台
 
-依据本目录《取证软件开发的要求和评估文档》实现的中文桌面教学原型。PySide6（Qt 6）提供桌面界面，Python 标准库负责案件、SHA-256、审计和报告，The Sleuth Kit 4.15.0 负责真实 RAW 镜像解析与文件读取。取证操作在本地执行，不上传证据。
+依据课程取证软件开发要求实现的中文桌面教学原型。PySide6（Qt 6）提供桌面界面，Python 标准库负责案件、SHA-256、审计和报告，The Sleuth Kit 4.15.0 负责真实 RAW 镜像解析与文件读取。取证操作在本地执行，不上传证据。
+
+## 目录导航
+
+| 位置 | 用途 |
+| --- | --- |
+| `main.py`、`启动取证工作台.bat` | 启动入口 |
+| `forensic/core/` | 案件、哈希、审计、导出、报告和后台任务 |
+| `forensic/engines/` | TSK 适配与 FAT 文件系统分析 |
+| `forensic/ui/` | PySide6 控制器、窗口、文件树和内容预览 |
+| `forensic/paths.py`、`forensic/assets/` | 统一资源定位与应用图标 |
+| `scripts/`、`tests/` | 开发辅助命令与对应职责的回归测试 |
+| `docs/` | 维护指南、设计说明、界面资料和验证记录 |
+| `evidence/`、`cases/`、`tools/` | 源证据输入、案件输出、官方第三方工具 |
+| `logs/`、`dist/`、`.test-work/`、`.venv/` | 本地运行、构建、测试和环境目录 |
+
+完整文件树与“改功能该去哪里”见 [目录结构与维护指南](docs/目录结构.md)；其他资料见 [文档导航](docs/README.md)。
 
 ## 启动
 
@@ -50,12 +66,12 @@ python -m venv .venv
 
 - 七项基本功能均实现；自动化测试真实调用 TSK，不用模拟解析器替代。
 - 扩展：审计哈希链及尾部锚点、MAC/B 时间线、路径关键词筛选、导出副本 SHA-256、导出前后原镜像校验。
-- `.\.venv\Scripts\python.exe -m unittest discover -s tests -v` 运行测试；实际记录见 `docs/test-results.txt`。
+- `.\.venv\Scripts\python.exe -m unittest discover -s tests -v` 运行测试；实际记录见 `docs/validation/test-results.txt`。
 - 设计、评分对应、限制与 AI 参与说明见 [设计与验收说明.md](docs/设计与验收说明.md)。
 - 面向对象结构：`ApplicationLauncher` 管理入口和异常报告，`App` 协调操作，`WorkbenchView` / `FileBrowserView` 管理布局和文件树，`DesktopAppearance` 管理 DPI 与主题，`TaskRunner` 管理后台任务，`FilePreview` / `PreviewReader` 分离预览显示与读取，`Case` 和 `TSK` 保留原有取证业务接口。案件格式和取证流程保持不变。
-- 代码入口 `main.py`；控制器 `forensic/gui.py`；窗口布局 `forensic/workspace.py`；目录树和文件视图 `forensic/browser.py`；对话框 `forensic/views.py`；外观 `forensic/appearance.py`；后台任务 `forensic/tasks.py`；案件逻辑 `forensic/core.py`；TSK 适配 `forensic/tsk.py`。
+- 代码入口 `main.py`；控制器 `forensic/ui/controller.py`；窗口布局 `forensic/ui/workspace.py`；目录树和文件视图 `forensic/ui/browser.py`；对话框 `forensic/ui/views.py`；外观 `forensic/ui/appearance.py`；后台任务 `forensic/core/tasks.py`；案件逻辑 `forensic/core/case.py`；TSK 适配 `forensic/engines/tsk.py`。
 - 标题栏与任务栏使用原创灰阶“证据文件＋放大镜”图标，资源位于 `forensic/assets`。修改 SVG 后，可运行 `.\.venv\Scripts\python.exe scripts/make_icon.py` 重建 PNG 和多尺寸 ICO；重启程序生效。
-- 本次界面改版说明与真实窗口截图见 [实施与验证](docs/ui-redesign/实施与验证.md)。
+- 本次界面改版说明与真实窗口截图见 [实施与验证](docs/ui/实施与验证.md)。
 - `.\.venv\Scripts\python.exe scripts/package.py` 生成 `dist/学号_姓名_ForensicTool.zip`，提交前将文件名中的姓名和学号替换为本人信息。包内不含本地运行案件，解压后可重新运行演示脚本。
 
 ## 证据保护边界

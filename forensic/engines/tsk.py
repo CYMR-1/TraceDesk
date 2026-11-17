@@ -7,7 +7,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from ..paths import TOOLS_DIR
 # Windows 版 TSK 按本机 ANSI 代码页输出文本，独立于启动终端的 chcp。
 TSK_TEXT_ENCODING = 'mbcs' if os.name == 'nt' else 'utf-8'
 
@@ -54,7 +54,7 @@ class TSK:
         candidates = [Path(directory)] if directory else []
         if os.environ.get('TSK_BIN'):
             candidates.append(Path(os.environ['TSK_BIN']))
-        candidates += list((ROOT / 'tools').glob('**/bin'))
+        candidates += list(TOOLS_DIR.glob('**/bin'))
         self.bin = next((p for p in candidates if (p / 'fls.exe').exists() or (p / 'fls').exists()), None)
         if not self.bin and not shutil.which('fls'):
             raise RuntimeError('未找到 Sleuth Kit。请运行 scripts/install_tsk.ps1，或设置 TSK_BIN 为 bin 目录。')

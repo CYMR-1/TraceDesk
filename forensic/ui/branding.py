@@ -1,13 +1,12 @@
 """应用图标和 Windows 任务栏身份；资源定位不依赖启动目录。"""
-from pathlib import Path
 import sys
 
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
+from ..paths import ASSET_DIR
 
 
 APP_ID = 'TraceDesk.ForensicWorkbench'
-ASSET_DIR = Path(__file__).resolve().parent / 'assets'
 
 
 def set_windows_app_id():

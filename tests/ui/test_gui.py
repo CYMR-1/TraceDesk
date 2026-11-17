@@ -7,9 +7,9 @@ from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QApplication, QDialog, QMainWindow
 
-from forensic.gui import App
-from forensic.tasks import TaskResult
-from forensic.views import NewCaseDialog
+from forensic.ui.controller import App
+from forensic.core.tasks import TaskResult
+from forensic.ui.views import NewCaseDialog
 
 
 class QtTests(unittest.TestCase):
@@ -35,7 +35,7 @@ class ControllerTests(QtTests):
         app.runner = SimpleNamespace(busy=False, poll=Mock(
             return_value=TaskResult(value='结果', callback=callback)))
         app.view.set_busy(True)
-        with patch('forensic.gui.QMessageBox.critical') as error_dialog:
+        with patch('forensic.ui.controller.QMessageBox.critical') as error_dialog:
             app.poll()
         callback.assert_called_once_with('结果')
         self.assertTrue(all(button.isEnabled() for button in app.view.buttons))
@@ -48,7 +48,7 @@ class ControllerTests(QtTests):
         app.runner.busy = True
         root.show()
         self.qt_app.processEvents()
-        with patch('forensic.gui.QMessageBox.information') as dialog:
+        with patch('forensic.ui.controller.QMessageBox.information') as dialog:
             self.assertFalse(app.close())
         dialog.assert_called_once()
         app.case.close.assert_not_called()
@@ -75,7 +75,7 @@ class ControllerTests(QtTests):
         app.case = Mock()
         app.runner.busy = True
         event = QCloseEvent()
-        with patch('forensic.gui.QMessageBox.information'):
+        with patch('forensic.ui.controller.QMessageBox.information'):
             self.assertTrue(app.eventFilter(root, event))
         self.assertFalse(event.isAccepted())
         app.case.close.assert_not_called()
@@ -205,8 +205,8 @@ class NewCaseDialogTests(QtTests):
 
     def test_missing_fields_do_not_open_folder_picker(self):
         dialog, callback = self.dialog()
-        with patch('forensic.views.QMessageBox.warning') as warning, \
-                patch('forensic.views.QFileDialog.getExistingDirectory') as picker:
+        with patch('forensic.ui.views.QMessageBox.warning') as warning, \
+                patch('forensic.ui.views.QFileDialog.getExistingDirectory') as picker:
             dialog.create()
         warning.assert_called_once()
         picker.assert_not_called()
@@ -217,14 +217,14 @@ class NewCaseDialogTests(QtTests):
         for entry, text in zip(dialog.fields, (' CASE-1 ', '测试人员', '证据镜像')):
             entry.setText(text)
         callback.side_effect = OSError('案件库不可写')
-        with patch('forensic.views.QFileDialog.getExistingDirectory', return_value='cases'), \
-                patch('forensic.views.QMessageBox.critical') as error:
+        with patch('forensic.ui.views.QFileDialog.getExistingDirectory', return_value='cases'), \
+                patch('forensic.ui.views.QMessageBox.critical') as error:
             dialog.create()
         callback.assert_called_once_with('cases', 'CASE-1', '测试人员', '证据镜像')
         self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
         self.assertIn('案件库不可写', error.call_args.args[2])
         callback.side_effect = None
-        with patch('forensic.views.QFileDialog.getExistingDirectory', return_value='cases'):
+        with patch('forensic.ui.views.QFileDialog.getExistingDirectory', return_value='cases'):
             dialog.create()
         self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
 

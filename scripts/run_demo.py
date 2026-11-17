@@ -4,7 +4,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from forensic.core import Case
+from forensic.core.case import Case
+from forensic.paths import LOGS_DIR
 from scripts.make_demo import create
 
 
@@ -23,13 +24,14 @@ def run():
     print('案件：', case.folder)
     print('导出：', exported)
     print('报告：', report)
-    (ROOT / 'docs' / 'latest-demo.txt').write_text(str(case.folder), encoding='utf-8')
+    LOGS_DIR.mkdir(exist_ok=True)
+    (LOGS_DIR / 'latest-demo.txt').write_text(str(case.folder), encoding='utf-8')
     return case
 
 
 if __name__ == '__main__':
     case = run()
     if '--gui' in sys.argv:
-        from forensic.gui import main
+        from forensic.ui.controller import main
         main(case)
     case.close()

@@ -7,9 +7,10 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBo
 
 from .appearance import DesktopAppearance
 from .branding import set_window_icon, set_windows_app_id
-from .core import Case, deleted_export_summary, display_time
-from .tasks import TaskRunner
-from .tsk import ROOT, can_export, entry_status
+from ..core.case import Case, deleted_export_summary, display_time
+from ..core.tasks import TaskRunner
+from ..engines.tsk import can_export, entry_status
+from ..paths import CASES_DIR, EVIDENCE_DIR
 from .views import NewCaseDialog
 from .workspace import WorkbenchView
 
@@ -108,7 +109,7 @@ class App(QObject):
         if not self.available(False):
             return
         path, _ = QFileDialog.getOpenFileName(
-            self.root, '打开案件 case.json', str(ROOT / 'cases'), '案件元数据 (case.json)',
+            self.root, '打开案件 case.json', str(CASES_DIR), '案件元数据 (case.json)',
             options=QFileDialog.Option.DontUseNativeDialog)
         if path:
             try:
@@ -124,7 +125,7 @@ class App(QObject):
     def load(self):
         if self.available():
             path, _ = QFileDialog.getOpenFileName(
-                self.root, '选择案件库之外的 RAW 镜像', str(ROOT / 'evidence'),
+                self.root, '选择案件库之外的 RAW 镜像', str(EVIDENCE_DIR),
                 'RAW 镜像 (*.dd *.raw *.img);;所有文件 (*)',
                 options=QFileDialog.Option.DontUseNativeDialog)
             if path:
@@ -270,7 +271,7 @@ HELP_TEXT = '''操作顺序
 
 
 def main(case=None):
-    from .launcher import ErrorReporter
+    from ..launcher import ErrorReporter
 
     set_windows_app_id()
     qt_app = QApplication.instance() or QApplication(sys.argv)

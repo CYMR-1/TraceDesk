@@ -4,7 +4,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from forensic.tasks import TaskRunner
+from forensic.core.tasks import TaskRunner
 
 
 class TaskRunnerTests(unittest.TestCase):
@@ -80,7 +80,7 @@ class TaskRunnerTests(unittest.TestCase):
 
     def test_thread_start_failure_restores_idle_state(self):
         runner = TaskRunner()
-        with patch('forensic.tasks.threading.Thread.start', side_effect=RuntimeError('无法创建线程')):
+        with patch('forensic.core.tasks.threading.Thread.start', side_effect=RuntimeError('无法创建线程')):
             with self.assertRaisesRegex(RuntimeError, '无法创建线程'):
                 runner.submit(lambda: None)
         self.assertFalse(runner.busy)

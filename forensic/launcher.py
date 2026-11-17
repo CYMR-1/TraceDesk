@@ -4,13 +4,14 @@ from pathlib import Path
 import sys
 import tempfile
 import traceback
+from .paths import LOGS_DIR
 
 
 class ErrorReporter:
     """将启动或 Qt 回调异常写入日志，并向用户显示日志位置。"""
 
     def __init__(self, log_path=None):
-        self.log_path = Path(log_path) if log_path else Path(__file__).resolve().parent.parent / 'logs' / 'startup.log'
+        self.log_path = Path(log_path) if log_path else LOGS_DIR / 'startup.log'
         self.root = None
         self._previous_hook = None
         self._hook = self.report_exception
@@ -70,7 +71,7 @@ class ApplicationLauncher:
 
     def run(self):
         try:
-            from .gui import main
+            from .ui.controller import main
             main()
             return 0
         except Exception as error:

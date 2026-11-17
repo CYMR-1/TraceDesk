@@ -12,8 +12,9 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QRectF
 from PySide6.QtGui import QGuiApplication, QImage, QPainter
 from PySide6.QtSvg import QSvgRenderer
+from forensic.paths import ASSET_DIR
 
-ASSETS = ROOT / 'forensic' / 'assets'
+ASSETS = ASSET_DIR
 SIZES = (16, 20, 24, 32, 48, 64, 128, 256)
 
 

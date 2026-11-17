@@ -6,14 +6,15 @@ import sys
 from unittest.mock import patch
 import unittest
 from pathlib import Path
-from forensic.core import Case, display_time, export_filename, sha256
-from forensic.tsk import TSK
+from forensic.core.case import Case, display_time, export_filename, sha256
+from forensic.engines.tsk import TSK
+from forensic.paths import TEST_WORK_DIR
 from scripts.make_demo import create
 
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
-        test_root = Path(__file__).resolve().parent.parent / '.test-work'
+        test_root = TEST_WORK_DIR
         test_root.mkdir(exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir=test_root)
         self.addCleanup(self.temp.cleanup)
@@ -72,7 +73,7 @@ class WorkflowTests(unittest.TestCase):
                 body = f'0|/{path}|15|r/rrwxrwxrwx|0|0|128|0|0|0|0\r\n'.encode('cp936')
                 result = subprocess.CompletedProcess([], 0, stdout=body)
                 empty = subprocess.CompletedProcess([], 0, stdout=b'')
-                with patch('forensic.tsk.TSK_TEXT_ENCODING', 'cp936'), patch.object(tool, 'run', side_effect=[result, empty]):
+                with patch('forensic.engines.tsk.TSK_TEXT_ENCODING', 'cp936'), patch.object(tool, 'run', side_effect=[result, empty]):
                     entry, = tool.files(self.image, 128)
                 self.assertEqual(entry['path'], path)
                 self.assertEqual(entry['inode'], '15')
@@ -166,7 +167,7 @@ class WorkflowTests(unittest.TestCase):
     def test_east_8_display_with_legacy_audit(self):
         historical = '2026-11-10T20:11:06.783706+00:00'
         converted = '2026-11-11T04:11:06.783706+08:00'
-        with patch('forensic.core.now', return_value=historical):
+        with patch('forensic.core.case.now', return_value=historical):
             self.case.log('TEST', '旧记录', '成功')
         record = self.case.check_audit()[-1]
         self.assertTrue(self.case.data['created'].endswith('+08:00'))
@@ -260,7 +261,7 @@ class WorkflowTests(unittest.TestCase):
             Case(self.case.folder)
 
     def test_failed_save_preserves_state(self):
-        with patch('forensic.core.save_json', side_effect=OSError('磁盘已满')):
+        with patch('forensic.core.case.save_json', side_effect=OSError('磁盘已满')):
             with self.assertRaises(OSError):
                 self.case.load(self.image)
         self.assertIsNone(self.case.data['evidence'])

@@ -10,8 +10,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from itertools import count
 from pathlib import Path
-from .fat import fat_regions
-from .tsk import TSK, can_export, deleted_source_note, entry_name, entry_status
+from ..engines.fat import fat_regions
+from ..engines.tsk import TSK, can_export, deleted_source_note, entry_name, entry_status
 
 
 EAST_8 = timezone(timedelta(hours=8))
