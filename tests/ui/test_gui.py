@@ -147,7 +147,7 @@ class FileBrowserTests(QtTests):
         self.assertTrue(browser.export_button.isEnabled())
         app.preview.open_file.assert_called_once()
 
-    def test_duplicate_deleted_entries_keep_distinct_selection_and_metadata(self):
+    def test_duplicate_deleted_entries_keep_distinct_selection_and_preview(self):
         root, app = self.controller()
         entries = [self.entry(path='DOCS/same.txt', inode=str(i), deleted=True) for i in (5, 9)]
         app.display(entries)
@@ -157,11 +157,11 @@ class FileBrowserTests(QtTests):
         for key, entry in browser.entries.items():
             browser.navigation.setCurrentItem(browser._nav_items[key])
             self.assertEqual(app.selected_entry()['inode'], entry['inode'])
-            self.assertIn(f'inode：{entry["inode"]}', browser.metadata.toPlainText())
+            self.assertIn(f'inode {entry["inode"]}', browser.detail.text())
             self.assertEqual(app.preview.open_file.call_args.args[1]['inode'], entry['inode'])
         browser.apply_filter([])
         self.assertFalse(browser.export_button.isEnabled())
-        self.assertEqual(browser.metadata.toPlainText(), '')
+        self.assertNotIn('inode', browser.detail.text())
         self.assertIsNone(app.selected_entry())
 
     def test_filters_during_batch_insertion_do_not_drop_tree_records(self):

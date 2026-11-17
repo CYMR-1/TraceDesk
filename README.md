@@ -32,7 +32,7 @@ python -m venv .venv
 
 当前工程已经包含官方 Windows TSK 程序和两份演示镜像，TSK 无需通过 pip 安装。若 TSK 文件丢失，运行 `powershell -File scripts/install_tsk.ps1`，或将环境变量 `TSK_BIN` 指向完整 TSK `bin` 目录。需要保留 DLL 与 licenses，不要只复制四个 exe。
 
-界面统一使用 PySide6 原生控件，采用白色主体、浅灰按钮与选中背景、深灰文字和图标。布局为左侧完整文件树、右上文件列表、右下内容与元数据。Qt 6 自动处理高 DPI 和逻辑像素缩放；中文优先使用微软雅黑，文本和十六进制预览使用等宽字体。树、列表与内容支持滚动，区域之间可以拖动分隔条调整大小。所有 Python 第三方依赖只安装到本项目 `.venv`，使用清华镜像：
+界面统一使用 PySide6 原生控件，采用白色主体、浅灰按钮与选中背景、深灰文字和图标。布局为左侧完整文件树、右上文件列表、右下整行内容预览。Qt 6 自动处理高 DPI 和逻辑像素缩放；中文优先使用微软雅黑，文本和十六进制预览使用等宽字体。树、列表与内容支持滚动，区域之间可以拖动分隔条调整大小。所有 Python 第三方依赖只安装到本项目 `.venv`，使用清华镜像：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt

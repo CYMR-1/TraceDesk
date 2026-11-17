@@ -72,7 +72,6 @@ class DesktopAppearance:
             QLabel[role="section"] { font-weight: 600; }
             QFrame#navigationPanel { background: #fafafa; border: 1px solid #e3e3e3; border-radius: 4px; }
             QTreeWidget#evidenceTree { background: #fafafa; border: none; }
-            QPlainTextEdit#fileMetadata { padding: 8px; }
             QLabel[role="muted"], QLabel#muted { color: #737373; }
             QLabel[role="title"] { color: #303030; }
             QLabel#sectionTitle { color: #303030; font-size: 16px; font-weight: 600; }

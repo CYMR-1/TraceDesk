@@ -4,7 +4,7 @@ from pathlib import Path
 from PySide6.QtCore import QSignalBlocker, QTimer, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFrame, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit, QPlainTextEdit,
+                               QHeaderView, QLabel, QLineEdit,
                                QPushButton, QSizePolicy, QSplitter, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
@@ -178,27 +178,14 @@ class FileBrowserView(QWidget):
         content_layout.setContentsMargins(6, 2, 0, 0)
         content_layout.setSpacing(6)
         content_header = QHBoxLayout()
-        content_header.addWidget(label('内容与元数据', 'section'))
+        content_header.addWidget(label('内容预览', 'section'))
         content_header.addStretch()
         self.export_button = self._button('导出所选文件', commands['export'])
         content_header.addWidget(self.export_button)
         content_layout.addLayout(content_header)
-        self.content_split = QSplitter(Qt.Orientation.Horizontal)
-        self.content_split.setChildrenCollapsible(False)
-        self.content_split.setHandleWidth(4)
-        self.metadata = QPlainTextEdit()
-        self.metadata.setObjectName('fileMetadata')
-        self.metadata.setReadOnly(True)
-        self.metadata.setMinimumWidth(150)
-        self.metadata.setPlaceholderText('选择文件查看属性、时间和内容')
-        self.content_split.addWidget(self.metadata)
-        self.preview = FilePreview(self.content_split)
+        self.preview = FilePreview(content)
         self.preview.setMinimumHeight(160)
-        self.content_split.addWidget(self.preview)
-        self.content_split.setStretchFactor(0, 0)
-        self.content_split.setStretchFactor(1, 1)
-        self.content_split.setSizes([225, 700])
-        content_layout.addWidget(self.content_split, 1)
+        content_layout.addWidget(self.preview, 1)
         self.split.addWidget(content)
         self.split.setStretchFactor(0, 3)
         self.split.setStretchFactor(1, 2)
@@ -227,7 +214,6 @@ class FileBrowserView(QWidget):
     def display(self, entries):
         self.cancel_display()
         self.preview.clear()
-        self.metadata.clear()
         self.detail.setText('选择目录定位文件；拖动分隔条调整树、列表和内容区域。')
         self.export_button.setEnabled(False)
         with QSignalBlocker(self.tree), QSignalBlocker(self.navigation):
@@ -355,11 +341,10 @@ class FileBrowserView(QWidget):
             self.tree.setUpdatesEnabled(True)
         self._update_counts()
         if not self.tree.selectedItems():
-            self.metadata.clear()
             self.export_button.setEnabled(False)
             self.preview.clear('没有匹配项' if not self._visible_count else '请选择文件')
             self.detail.setText('当前目录没有匹配项，左侧保留完整文件树。' if not self._visible_count
-                                else '请选择文件查看内容和元数据。')
+                                else '请选择文件查看内容。')
 
     def _update_counts(self):
         scope = '全部条目（含子目录）' if self._scope is None else '/' + self._scope
@@ -386,13 +371,12 @@ class FileBrowserView(QWidget):
                 self.tree.setCurrentItem(None)
             self.reset_filter()
             node.setExpanded(True)
-            self.detail.setText('双击右侧目录进入；选择文件查看内容和元数据。')
+            self.detail.setText('双击右侧目录进入；选择文件查看内容。')
 
     def _result_selected(self):
         selected = self.tree.selectedItems()
         entry = selected[0].data(0, Qt.ItemDataRole.UserRole) if selected else None
         if entry is None:
-            self.metadata.clear()
             self.export_button.setEnabled(False)
         else:
             node = self._nav_items[selected[0].data(0, self.ROW_ROLE)]
@@ -403,11 +387,6 @@ class FileBrowserView(QWidget):
                     parent.setExpanded(True)
                     parent = parent.parent()
                 self.navigation.scrollToItem(node)
-            dates = '\n'.join(f'{title}：{display_time(entry.get(field, 0))}' for title, field in
-                              [('M 修改', 'mtime'), ('A 访问', 'atime'), ('C 变更', 'ctime'), ('B 创建', 'crtime')])
-            self.metadata.setPlainText(f'{entry_name(entry)}\n\n路径：{entry["path"]}\n状态：{entry_status(entry)}\n'
-                                       f'记录大小：{entry["size"]} 字节\ninode：{entry["inode"] or "—"}\n'
-                                       f'分区偏移：{entry["offset"]}\n\n时间 UTC+8\n{dates}')
             self.export_button.setEnabled(not self._busy and can_export(entry))
         self.commands['select']()
 
