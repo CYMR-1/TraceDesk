@@ -16,7 +16,7 @@ python -m venv .venv
 
 当前工程已经包含官方 Windows TSK 程序和两份演示镜像，TSK 无需通过 pip 安装。若 TSK 文件丢失，运行 `powershell -File scripts/install_tsk.ps1`，或将环境变量 `TSK_BIN` 指向完整 TSK `bin` 目录。需要保留 DLL 与 licenses，不要只复制四个 exe。
 
-界面统一使用 PySide6 原生控件，采用浅色主题，以暖米白、砂岩与棕金配色。Qt 6 自动处理高 DPI 和逻辑像素缩放；中文优先使用微软雅黑，十六进制预览使用等宽字体。文件树、预览和文本页均支持横向滚动，工具栏会随窗口宽度换行。所有 Python 第三方依赖只安装到本项目 `.venv`，使用清华镜像：
+界面统一使用 PySide6 原生控件，采用白色主体、浅灰按钮与选中背景、深灰文字和图标。布局为左侧完整文件树、右上文件列表、右下内容与元数据。Qt 6 自动处理高 DPI 和逻辑像素缩放；中文优先使用微软雅黑，文本和十六进制预览使用等宽字体。树、列表与内容支持滚动，区域之间可以拖动分隔条调整大小。所有 Python 第三方依赖只安装到本项目 `.venv`，使用清华镜像：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
@@ -34,7 +34,9 @@ python -m venv .venv
 6. 在“审计日志”“MAC 时间线”中查看过程；点击“生成 Markdown 报告”，在案件 `reports` 中查看 `.md` 文件。
 7. 重启后通过“打开案件”选择该案件 `case.json`。
 
-“读取文件树”会刷新所选分区的清单。同名删除记录按 inode 分行显示，可按后缀或路径筛选。选中已删除文件可预览并导出镜像中仍可读的字节，支持十六进制、ASCII 和 UTF-8。预览栏会提示部分读取、inode 重分配或扫描时发现的 FAT 起始簇占用。导出记录保留目录记录大小、实际写入字节数和副本哈希；遇到短读时只保存可读部分。FAT 分区还可查看根目录数据、FAT 表、引导扇区，以及按簇计算的未分配空间和已分配但未关联的空间。
+“读取文件树”会刷新所选分区的清单，左侧保留本次扫描的全部目录、文件、删除记录和系统区域。点击目录更新右上列表，双击列表中的目录进入，点击镜像或分区节点返回全部条目。“全部展开/全部折叠”控制树的层级；后缀、路径和状态筛选只作用于当前目录的结果列表，不裁剪左侧完整树。切换目录或点击“重置”清除筛选。
+
+同名删除记录按 inode 独立保留。选中文件后，下方显示完整路径、大小、inode、MAC/B 时间；“文本/十六进制”标签支持 ASCII 和 UTF-8 编码及分页。选中已删除文件可预览并导出镜像中仍可读的字节。预览栏会提示部分读取、inode 重分配或扫描时发现的 FAT 起始簇占用。导出记录保留目录记录大小、实际写入字节数和副本哈希；遇到短读时只保存可读部分。FAT 分区还可查看根目录数据、FAT 表、引导扇区，以及按簇计算的未分配空间和已分配但未关联的空间。
 
 快速生成一个保留在 `cases` 的完整演示案件并打开界面：
 
@@ -51,8 +53,9 @@ python -m venv .venv
 - `.\.venv\Scripts\python.exe -m unittest discover -s tests -v` 运行测试；实际记录见 `docs/test-results.txt`。
 - 设计、评分对应、限制与 AI 参与说明见 [设计与验收说明.md](docs/设计与验收说明.md)。
 - 面向对象结构：`ApplicationLauncher` 管理入口和异常报告，`App` 协调操作，`WorkbenchView` / `FileBrowserView` 管理布局和文件树，`DesktopAppearance` 管理 DPI 与主题，`TaskRunner` 管理后台任务，`FilePreview` / `PreviewReader` 分离预览显示与读取，`Case` 和 `TSK` 保留原有取证业务接口。案件格式和取证流程保持不变。
-- 代码入口 `main.py`；控制器 `forensic/gui.py`；视图 `forensic/workspace.py` 与 `forensic/views.py`；外观 `forensic/appearance.py`；后台任务 `forensic/tasks.py`；案件逻辑 `forensic/core.py`；TSK 适配 `forensic/tsk.py`。
-- 标题栏与任务栏使用原创棕金色“证据文件＋放大镜”图标，资源位于 `forensic/assets`。修改 SVG 后，可运行 `.\.venv\Scripts\python.exe scripts/make_icon.py` 重建 PNG 和多尺寸 ICO；重启程序生效。
+- 代码入口 `main.py`；控制器 `forensic/gui.py`；窗口布局 `forensic/workspace.py`；目录树和文件视图 `forensic/browser.py`；对话框 `forensic/views.py`；外观 `forensic/appearance.py`；后台任务 `forensic/tasks.py`；案件逻辑 `forensic/core.py`；TSK 适配 `forensic/tsk.py`。
+- 标题栏与任务栏使用原创灰阶“证据文件＋放大镜”图标，资源位于 `forensic/assets`。修改 SVG 后，可运行 `.\.venv\Scripts\python.exe scripts/make_icon.py` 重建 PNG 和多尺寸 ICO；重启程序生效。
+- 本次界面改版说明与真实窗口截图见 [实施与验证](docs/ui-redesign/实施与验证.md)。
 - `.\.venv\Scripts\python.exe scripts/package.py` 生成 `dist/学号_姓名_ForensicTool.zip`，提交前将文件名中的姓名和学号替换为本人信息。包内不含本地运行案件，解压后可重新运行演示脚本。
 
 ## 证据保护边界

@@ -142,7 +142,7 @@ class App(QObject):
     def filter(self):
         if self.available():
             suffix, keyword = self.suffix.text(), self.keyword.text()
-            self.task('筛选文件', lambda: self.case.filtered(suffix, keyword), self.display)
+            self.task('筛选文件', lambda: self.case.filtered(suffix, keyword), self.browser.apply_filter)
 
     def verify(self):
         if self.available():
@@ -193,7 +193,8 @@ class App(QObject):
             return
         data = self.case.data
         evidence = data['evidence']
-        self.summary.setText(f'案件 {data["number"]}  ·  取证人员 {data["examiner"]}  ·  对象 {data["target"]}\n' + (f'SHA-256  {evidence["sha256"]}' if evidence else '尚未加载镜像'))
+        self.summary.setText(f'案件 {data["number"]}  ·  取证人员 {data["examiner"]}  ·  对象 {data["target"]}\n' + (f'证据 {Path(evidence["path"]).name}  ·  已固定 SHA-256（完整摘要见“镜像与文件系统”）' if evidence else '尚未加载镜像'))
+        self.summary.setToolTip(f'SHA-256：{evidence["sha256"]}' if evidence else '')
         values = [f'{p["offset"]} 扇区 · {p["description"]}' for p in evidence['partitions']] if evidence else []
         previous = self.partition.currentIndex()
         if values != [self.partition.itemText(i) for i in range(self.partition.count())]:
@@ -204,6 +205,7 @@ class App(QObject):
             self.partition.setCurrentIndex(next((i for i,p in enumerate(evidence['partitions']) if p['offset'] == data.get('offset')), 0))
         if reset:
             self.display(data['inventory'])
+        self.browser.set_context(evidence, data.get('offset'))
         info_key = (id(evidence), data.get('fsstat'))
         if reset or getattr(self, '_info_key', None) != info_key:
             self._info_key = info_key
@@ -249,7 +251,10 @@ HELP_TEXT = '''操作顺序
 5. 查看审计日志、MAC 时间线，生成 Markdown 报告。
 
 界面操作
-拖动文件树和预览之间的分隔条可调整区域大小。
+左侧完整文件树保留目录、文件、删除记录与系统区域。点击目录更新右上文件列表，点击文件查看下方内容。
+双击右侧目录进入，点击镜像或分区节点返回全部条目。筛选只影响右侧列表；切换目录或点击“重置”清除筛选。
+通过“全部展开/全部折叠”控制目录树；拖动左右、上下分隔条可调整区域大小。
+下方“文本/十六进制”标签切换内容表示，字符编码支持 ASCII 与 UTF-8。
 表格底部可横向滚动，查看全部时间列或十六进制内容。
 双击“启动取证工作台.bat”启动；脚本使用本项目虚拟环境，保留终端窗口，运行失败时暂停。
 

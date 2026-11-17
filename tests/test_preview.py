@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMainWindow, QTreeWidgetItemIterator
 
 from forensic.gui import App
-from forensic.preview import PAGE_BYTES, PreviewReader, preview_rows
+from forensic.preview import PAGE_BYTES, PreviewReader, preview_rows, preview_text
 from forensic.tsk import ROOT, TSK
 
 
@@ -30,6 +30,13 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(first[1][2], 'b' * 14)
         self.assertEqual(first[-1][2], 'b' * 15 + '🙂')
         self.assertEqual(second, [('00001000', '9F 99 82 FF 0D 0A', '�··')])
+
+    def test_text_preview_keeps_newlines_and_utf8_page_boundaries(self):
+        raw = b'a' * (PAGE_BYTES - 1) + '取证\n\t'.encode() + b'\xff\x00'
+        head = preview_text(raw[:PAGE_BYTES + 3], 0, len(raw), 'UTF-8')
+        tail = preview_text(raw[PAGE_BYTES - 3:], PAGE_BYTES, len(raw), 'UTF-8')
+        self.assertEqual(head + tail, 'a' * (PAGE_BYTES - 1) + '取证\n\t�·')
+        self.assertEqual(preview_text(b'A\r\n\x00', 0, 4, 'ASCII'), 'A\r\n·')
 
     def test_file_selection_encoding_paging_and_resize(self):
         test_root = ROOT / '.test-work'

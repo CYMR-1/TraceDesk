@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontDatabase, QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QGridLayout, QHeaderView, QLabel,
-    QMessageBox, QPushButton, QSizePolicy, QTreeWidget, QTreeWidgetItem,
+    QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -20,6 +20,22 @@ from .tsk import TSK, deleted_source_note, tsk_error
 
 ROW_BYTES = 16
 PAGE_BYTES = 4096
+
+
+def preview_text(window, start, size, encoding):
+    """按字符起始字节归属页面，保留文本换行且不重复跨页 UTF-8 字符。"""
+    prefix = min(3, start)
+    length = min(PAGE_BYTES, max(0, size - start))
+    if encoding == 'ASCII':
+        return ''.join(chr(b) if 32 <= b < 127 or b in (9, 10, 13) else '·'
+                       for b in window[prefix:prefix + length])
+    result, index = [], -prefix
+    for char in window.decode('utf-8', errors='surrogateescape'):
+        if 0 <= index < length:
+            result.append(char if char.isprintable() or char in '\r\n\t' else
+                          '�' if 0xDC80 <= ord(char) <= 0xDCFF else '·')
+        index += len(char.encode('utf-8', errors='surrogateescape'))
+    return ''.join(result)
 
 
 def preview_rows(window, start, size, encoding):
@@ -169,25 +185,22 @@ class FilePreview(QWidget):
         bar = QGridLayout()
         bar.setContentsMargins(0, 0, 0, 0)
         bar.setHorizontalSpacing(8)
-        title = QLabel('文件内容')
-        title.setProperty('role', 'section')
-        bar.addWidget(title, 0, 0)
-        bar.addWidget(QLabel('字符编码'), 0, 1)
+        bar.addWidget(QLabel('编码'), 0, 0)
         self.encoding = QComboBox()
         self.encoding.addItems(('ASCII', 'UTF-8'))
         self.encoding.currentTextChanged.connect(self.render)
-        bar.addWidget(self.encoding, 0, 2)
-        bar.setColumnStretch(3, 1)
+        bar.addWidget(self.encoding, 0, 1)
+        bar.setColumnStretch(2, 1)
         self.previous = QPushButton('上一页')
         self.previous.clicked.connect(lambda: self.turn(-1))
         self.next = QPushButton('下一页')
         self.next.clicked.connect(lambda: self.turn(1))
-        bar.addWidget(self.previous, 0, 4)
-        bar.addWidget(self.next, 0, 5)
+        bar.addWidget(self.previous, 0, 3)
+        bar.addWidget(self.next, 0, 4)
         self.status_details = QPushButton('状态详情')
         self.status_details.setFlat(True)
         self.status_details.clicked.connect(self._show_status)
-        bar.addWidget(self.status_details, 0, 6)
+        bar.addWidget(self.status_details, 0, 5)
         # 单独的弹性状态行保留完整文字，长提示不会挤走翻页控件。
         self.status = QLabel()
         self.status.setProperty('role', 'muted')
@@ -226,7 +239,15 @@ class FilePreview(QWidget):
             self.rows.setColumnWidth(column, metrics.horizontalAdvance('0') * characters + 20)
         self.vertical = self.rows.verticalScrollBar()
         self.horizontal = self.rows.horizontalScrollBar()
-        self._layout.addWidget(self.rows, 1)
+        self.text = QPlainTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setFont(fixed)
+        self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.formats = QTabWidget()
+        self.formats.setDocumentMode(True)
+        self.formats.addTab(self.text, '文本')
+        self.formats.addTab(self.rows, '十六进制')
+        self._layout.addWidget(self.formats, 1)
 
     def clear(self, message='请选择文件'):
         if self.reader:
@@ -236,6 +257,7 @@ class FilePreview(QWidget):
         self.window = b''
         self.source_note = ''
         self.rows.clear()
+        self.text.clear()
         self._set_status(message)
         self.previous.setEnabled(False)
         self.next.setEnabled(False)
@@ -271,6 +293,7 @@ class FilePreview(QWidget):
         self.page, self.window, self.size = page, value, size
         self.render()
         self.vertical.setValue(0)
+        self.text.verticalScrollBar().setValue(0)
         count = (self.size + PAGE_BYTES - 1) // PAGE_BYTES
         self._set_status(' · '.join(filter(None, (f'第 {page + 1} / {count} 页', self.source_note, note))))
         self.previous.setEnabled(page > 0)
@@ -283,4 +306,5 @@ class FilePreview(QWidget):
             QTreeWidgetItem(values)
             for values in preview_rows(self.window, self.page * PAGE_BYTES, self.size, self.encoding.currentText())
         ])
+        self.text.setPlainText(preview_text(self.window, self.page * PAGE_BYTES, self.size, self.encoding.currentText()))
         self.vertical.setValue(position)

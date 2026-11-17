@@ -123,6 +123,77 @@ class FileBrowserTests(QtTests):
         app.refresh()
         self.assertEqual(app.partition.currentIndex(), 1)
 
+    def test_directory_filter_keeps_complete_tree_and_navigation_restores_file(self):
+        root, app = self.controller()
+        entries = [self.entry(path='DOCS', directory=True, mode='d/d'),
+                   self.entry(path='DOCS/a.txt', inode='2'), self.entry(path='root.bin', inode='3')]
+        app.display(entries)
+        browser = app.browser
+        app.preview.open_file = Mock()
+        app.case = SimpleNamespace(image=lambda: 'demo.dd', close=lambda: None)
+        nodes = dict(browser._nav_items)
+        browser.navigation.setCurrentItem(browser._nodes['DOCS'])
+        self.assertEqual([e['path'] for k, e in browser.entries.items() if not browser._items[k].isHidden()],
+                         ['DOCS/a.txt'])
+        browser.apply_filter([])
+        self.assertEqual(browser._visible_count, 0)
+        self.assertEqual(browser._nav_items, nodes)
+        self.assertTrue(all(not n.isHidden() for n in nodes.values()))
+        key = next(k for k, e in browser.entries.items() if e['path'] == 'root.bin')
+        browser.navigation.setCurrentItem(nodes[key])
+        self.assertEqual(app.selected_entry()['path'], 'root.bin')
+        self.assertEqual(browser._scope, '')
+        self.assertIsNone(browser._allowed)
+        self.assertTrue(browser.export_button.isEnabled())
+        app.preview.open_file.assert_called_once()
+
+    def test_duplicate_deleted_entries_keep_distinct_selection_and_metadata(self):
+        root, app = self.controller()
+        entries = [self.entry(path='DOCS/same.txt', inode=str(i), deleted=True) for i in (5, 9)]
+        app.display(entries)
+        app.case = SimpleNamespace(image=lambda: 'demo.dd', close=lambda: None)
+        app.preview.open_file = Mock()
+        browser = app.browser
+        for key, entry in browser.entries.items():
+            browser.navigation.setCurrentItem(browser._nav_items[key])
+            self.assertEqual(app.selected_entry()['inode'], entry['inode'])
+            self.assertIn(f'inode：{entry["inode"]}', browser.metadata.toPlainText())
+            self.assertEqual(app.preview.open_file.call_args.args[1]['inode'], entry['inode'])
+        browser.apply_filter([])
+        self.assertFalse(browser.export_button.isEnabled())
+        self.assertEqual(browser.metadata.toPlainText(), '')
+        self.assertIsNone(app.selected_entry())
+
+    def test_filters_during_batch_insertion_do_not_drop_tree_records(self):
+        root, app = self.controller()
+        entries = [self.entry(path=f'DOCS/f{i}.txt', inode=str(i + 1), deleted=i % 2 == 0)
+                   for i in range(450)]
+        app.display(entries)
+        browser = app.browser
+        browser.apply_filter(entries[-10:])
+        browser.status_filter.setCurrentIndex(2)
+        while browser._batch_timer.isActive():
+            self.qt_app.processEvents()
+        self.assertEqual(len(browser._nav_items), 450)
+        self.assertEqual(browser._visible_count, 5)
+        self.assertEqual(browser.tree.topLevelItemCount(), 450)
+
+    def test_result_selection_reveals_tree_and_system_regions_cannot_export(self):
+        root, app = self.controller()
+        app.display([self.entry(path='A/B/region', mode='v/v', extents=[[0, 10]])])
+        app.case = SimpleNamespace(image=lambda: 'demo.dd', close=lambda: None)
+        app.preview.open_file = Mock()
+        browser = app.browser
+        browser.navigation.collapseAll()
+        app.tree.setCurrentItem(app.tree.topLevelItem(0))
+        node = browser.navigation.currentItem()
+        self.assertEqual(node.text(0), 'region')
+        while node.parent() is not None:
+            node = node.parent()
+            self.assertTrue(node.isExpanded())
+        self.assertFalse(browser.export_button.isEnabled())
+        app.preview.open_file.assert_called_once()
+
 
 class NewCaseDialogTests(QtTests):
     def dialog(self):
