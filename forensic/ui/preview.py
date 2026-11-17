@@ -10,8 +10,8 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontDatabase, QFontMetrics
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QGridLayout, QHeaderView, QLabel,
-    QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
+    QPlainTextEdit, QPushButton, QSizePolicy, QTabWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -177,42 +177,38 @@ class FilePreview(QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 4, 0, 0)
         self._layout.setSpacing(6)
-        self._build_toolbar()
         self._build_rows()
+        self._build_controls()
         self.clear()
 
-    def _build_toolbar(self):
-        bar = QGridLayout()
-        bar.setContentsMargins(0, 0, 0, 0)
-        bar.setHorizontalSpacing(8)
-        bar.addWidget(QLabel('编码'), 0, 0)
+    def _build_controls(self):
+        self.encoding_controls = QWidget(self.formats)
+        encoding_layout = QHBoxLayout(self.encoding_controls)
+        encoding_layout.setContentsMargins(8, 0, 0, 0)
+        encoding_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        encoding_layout.addWidget(QLabel('编码'))
         self.encoding = QComboBox()
         self.encoding.addItems(('ASCII', 'UTF-8'))
         self.encoding.currentTextChanged.connect(self.render)
-        bar.addWidget(self.encoding, 0, 1)
-        bar.setColumnStretch(2, 1)
-        self.previous = QPushButton('上一页')
-        self.previous.clicked.connect(lambda: self.turn(-1))
-        self.next = QPushButton('下一页')
-        self.next.clicked.connect(lambda: self.turn(1))
-        bar.addWidget(self.previous, 0, 3)
-        bar.addWidget(self.next, 0, 4)
-        self.status_details = QPushButton('状态详情')
-        self.status_details.setFlat(True)
-        self.status_details.clicked.connect(self._show_status)
-        bar.addWidget(self.status_details, 0, 5)
-        # 单独的弹性状态行保留完整文字，长提示不会挤走翻页控件。
+        encoding_layout.addWidget(self.encoding)
+        self.formats.setCornerWidget(self.encoding_controls, Qt.Corner.TopRightCorner)
+
+        bar = QHBoxLayout()
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.setSpacing(8)
         self.status = QLabel()
         self.status.setProperty('role', 'muted')
         self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        bar.addWidget(self.status, 1, 0, 1, 7)
+        bar.addWidget(self.status, 1)
+        self.previous = QPushButton('上一页')
+        self.previous.clicked.connect(lambda: self.turn(-1))
+        self.next = QPushButton('下一页')
+        self.next.clicked.connect(lambda: self.turn(1))
+        bar.addWidget(self.previous)
+        bar.addWidget(self.next)
         self._layout.addLayout(bar)
-
-    def _show_status(self):
-        if self.status.text():
-            QMessageBox.information(self, '文件预览状态', self.status.text())
 
     def _set_status(self, message):
         self.status.setText(message)
