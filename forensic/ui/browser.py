@@ -67,13 +67,8 @@ class FileBrowserView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 8)
         layout.setSpacing(8)
-        controls = QHBoxLayout()
-        controls.addStretch()
         self.load_button = self._button('加载 RAW 镜像', commands['load'])
         self.verify_button = self._button('校验完整性', commands['verify'])
-        for button in (self.load_button, self.verify_button):
-            controls.addWidget(button)
-        layout.addLayout(controls)
         self.horizontal_split = QSplitter(Qt.Orientation.Horizontal)
         self.horizontal_split.setChildrenCollapsible(False)
         self.horizontal_split.setHandleWidth(5)

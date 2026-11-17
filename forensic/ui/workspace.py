@@ -1,5 +1,5 @@
 """顶部案件工具、模块导航与工作台布局。"""
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QHBoxLayout, QProgressBar, QPushButton, QTabWidget,
                                QVBoxLayout, QWidget)
@@ -46,6 +46,13 @@ class WorkbenchView(QObject):
         layout.addWidget(self.tabs, 1)
         self.browser = FileBrowserView(self.tabs, appearance, commands)
         self.tabs.addTab(self.browser, '文件浏览')
+        self.image_actions = QWidget(self.tabs)
+        actions_layout = QHBoxLayout(self.image_actions)
+        actions_layout.setContentsMargins(10, 0, 10, 0)
+        actions_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        actions_layout.addWidget(self.browser.load_button)
+        actions_layout.addWidget(self.browser.verify_button)
+        self.tabs.setCornerWidget(self.image_actions, Qt.Corner.TopRightCorner)
         self.panels = {}
         for key, title in [('info', '镜像与文件系统'), ('timeview', 'MAC 时间线'),
                             ('audit', '审计日志'), ('help', '操作说明')]:
