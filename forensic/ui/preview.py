@@ -217,7 +217,9 @@ class FilePreview(QWidget):
 
     def _build_rows(self):
         fixed = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-        fixed.setPointSize(11)
+        if 'Consolas' in QFontDatabase.families():
+            fixed.setFamily('Consolas')
+        fixed.setPointSizeF(10.5)
         metrics = QFontMetrics(fixed)
         self.rows = QTreeWidget()
         self.rows.setObjectName('hexPreview')
@@ -241,6 +243,7 @@ class FilePreview(QWidget):
         self.text.setFont(fixed)
         self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.formats = TabbedView()
+        self.formats.layout().setSpacing(7)
         self.formats.addTab(self.text, '文本')
         self.formats.addTab(self.rows, '十六进制')
         self._layout.addWidget(self.formats, 1)

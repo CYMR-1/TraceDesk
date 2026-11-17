@@ -1,8 +1,8 @@
 """完整文件树、当前目录列表与内容区；不负责证据读写。"""
 from pathlib import Path
 
-from PySide6.QtCore import QSignalBlocker, QTimer, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QSignalBlocker, QSize, QTimer, Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFrame, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit,
                                QPushButton, QSplitter, QTreeWidget,
@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFrame, QHBoxLayout
 
 from ..core.case import display_time
 from .preview import FilePreview
+from .icons import entry_icon_kind, outline_icon
 from ..engines.tsk import can_export, entry_name, entry_status
 
 
@@ -19,29 +20,6 @@ def label(text, role=None):
     if role:
         widget.setProperty('role', role)
     return widget
-
-
-def outline_icon(kind):
-    pixmap = QPixmap(32, 32)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.setPen(QPen(QColor('#666666'), 2))
-    if kind == 'folder':
-        painter.drawRoundedRect(3, 9, 26, 19, 3, 3)
-        painter.drawLine(4, 9, 4, 5)
-        painter.drawLine(4, 5, 14, 5)
-        painter.drawLine(14, 5, 19, 9)
-    elif kind == 'disk':
-        painter.drawRoundedRect(3, 6, 26, 22, 4, 4)
-        painter.drawLine(4, 20, 28, 20)
-        painter.drawPoint(23, 24)
-    else:
-        painter.drawRoundedRect(7, 3, 19, 26, 2, 2)
-        painter.drawLine(12, 12, 21, 12)
-        painter.drawLine(12, 18, 21, 18)
-    painter.end()
-    return QIcon(pixmap)
 
 
 class FileBrowserView(QWidget):
@@ -60,29 +38,32 @@ class FileBrowserView(QWidget):
         self._image_name = '尚未加载镜像'
         self._evidence, self._scans = None, {}
         self.partition_nodes = {}
-        self._icons = {name: outline_icon(name) for name in ('file', 'folder', 'disk')}
+        self._icons = {name: outline_icon(name) for name in ('file', 'folder', 'disk', 'image', 'table', 'system')}
         self._batch_timer = QTimer(self)
         self._batch_timer.setSingleShot(True)
         self._batch_timer.timeout.connect(self._insert_batch)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 8)
+        layout.setContentsMargins(0, 12, 0, 0)
         layout.setSpacing(8)
         self.load_button = self._button('加载 RAW 镜像', commands['load'])
+        self.load_button.setProperty('role', 'accent')
         self.verify_button = self._button('校验完整性', commands['verify'])
         self.horizontal_split = QSplitter(Qt.Orientation.Horizontal)
         self.horizontal_split.setChildrenCollapsible(False)
-        self.horizontal_split.setHandleWidth(5)
+        self.horizontal_split.setHandleWidth(10)
         layout.addWidget(self.horizontal_split, 1)
         nav_panel = QFrame()
         nav_panel.setObjectName('navigationPanel')
         nav_panel.setMinimumWidth(190)
         nav_layout = QVBoxLayout(nav_panel)
-        nav_layout.setContentsMargins(8, 10, 8, 8)
+        nav_layout.setContentsMargins(10, 14, 10, 10)
+        nav_layout.setSpacing(10)
         nav_layout.addWidget(label('数据源 / 完整文件树', 'section'))
         self.navigation = QTreeWidget()
         self.navigation.setObjectName('evidenceTree')
         self.navigation.setHeaderHidden(True)
         self.navigation.setUniformRowHeights(True)
+        self.navigation.setIconSize(QSize(18, 18))
         self.navigation.setIndentation(16)
         self.navigation.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.navigation.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -103,16 +84,17 @@ class FileBrowserView(QWidget):
         self.horizontal_split.addWidget(nav_panel)
         self.split = QSplitter(Qt.Orientation.Vertical)
         self.split.setChildrenCollapsible(False)
-        self.split.setHandleWidth(5)
+        self.split.setHandleWidth(10)
         self.split.setMinimumWidth(500)
         self.horizontal_split.addWidget(self.split)
         self.horizontal_split.setStretchFactor(0, 0)
         self.horizontal_split.setStretchFactor(1, 1)
         self.horizontal_split.setSizes([270, 1000])
-        results = QWidget()
+        results = QFrame()
+        results.setObjectName('resultsPanel')
         result_layout = QVBoxLayout(results)
-        result_layout.setContentsMargins(6, 0, 0, 0)
-        result_layout.setSpacing(7)
+        result_layout.setContentsMargins(12, 12, 12, 9)
+        result_layout.setSpacing(8)
         filters = QHBoxLayout()
         self.suffix = QLineEdit()
         self.suffix.setPlaceholderText('后缀，如 .txt')
@@ -132,11 +114,13 @@ class FileBrowserView(QWidget):
         self.status_filter.currentIndexChanged.connect(self._apply_visibility)
         filters.addWidget(self.status_filter)
         self.filter_button = self._button('筛选', commands['filter'])
+        self.filter_button.setProperty('role', 'soft')
         self.reset_button = self._button('重置', self.reset_filter)
         filters.addWidget(self.filter_button)
         filters.addWidget(self.reset_button)
         result_layout.addLayout(filters)
         self.breadcrumb = label('加载镜像后自动展示所有分区', 'muted')
+        self.breadcrumb.setObjectName('breadcrumb')
         self.breadcrumb.setWordWrap(True)
         result_layout.addWidget(self.breadcrumb)
         self.tree = QTreeWidget()
@@ -146,6 +130,8 @@ class FileBrowserView(QWidget):
         self.tree.setHeaderLabels(['文件名称 / 镜像内路径', '状态', '字节数', 'inode',
                                    'M 修改 (UTC+8)', 'A 访问 (UTC+8)', 'C 变更 (UTC+8)', '分区偏移（扇区）'])
         self.tree.setUniformRowHeights(True)
+        self.tree.setIconSize(QSize(18, 18))
+        self.tree.setAlternatingRowColors(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tree.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -164,14 +150,16 @@ class FileBrowserView(QWidget):
         self.result_count = label('0 项', 'muted')
         result_layout.addWidget(self.result_count)
         self.split.addWidget(results)
-        content = QWidget()
+        content = QFrame()
+        content.setObjectName('previewPanel')
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(6, 2, 0, 0)
-        content_layout.setSpacing(6)
+        content_layout.setContentsMargins(12, 10, 12, 10)
+        content_layout.setSpacing(8)
         content_header = QHBoxLayout()
         content_header.addWidget(label('内容预览', 'section'))
         content_header.addStretch()
         self.export_button = self._button('导出所选文件', commands['export'])
+        self.export_button.setProperty('role', 'soft')
         content_header.addWidget(self.export_button)
         content_layout.addLayout(content_header)
         self.preview = FilePreview(content)
@@ -286,8 +274,12 @@ class FileBrowserView(QWidget):
         item.setToolTip(0, f'{entry["path"]}\n分区偏移 {entry["offset"]} 扇区')
         for column in (2, 3):
             item.setTextAlignment(column, Qt.AlignmentFlag.AlignCenter)
-        icon = self._icons['folder' if entry['directory'] else 'file']
+        icon = self._icons[entry_icon_kind(entry)]
         item.setIcon(0, icon)
+        if entry.get('deleted'):
+            item.setForeground(1, QColor(self.appearance.DELETED))
+        elif entry['mode'].lower().startswith('v/'):
+            item.setForeground(1, QColor('#7352b8'))
         nav_name = entry_name(entry) or '/'
         if entry.get('deleted'):
             nav_name += f'  [已删除 · {entry["inode"] or "—"}]'
