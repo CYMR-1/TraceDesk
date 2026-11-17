@@ -120,6 +120,13 @@ class DesktopAppearance:
             QPushButton[role="violet"]:disabled, QPushButton[role="soft"]:disabled {
                 background: #f7f9f8; color: #98a29d; border-color: #e8ece9;
             }
+            QPushButton#exportOk {
+                background: #1671d9; color: #ffffff; border-color: #1671d9;
+                font-weight: 600; min-width: 54px;
+            }
+            QPushButton#exportOk:hover { background: #1261bf; border-color: #1261bf; }
+            QPushButton#exportOk:pressed { background: #0e50a1; border-color: #0e50a1; }
+            QPushButton#exportOk:focus { border-color: #09396f; }
             QLineEdit, QComboBox {
                 background: #ffffff; color: #24332f; border: 1px solid #d8e0db;
                 border-radius: 7px; padding: 6px 9px; min-height: 20px;

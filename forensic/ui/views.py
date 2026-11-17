@@ -1,8 +1,11 @@
 """原生 Qt 桌面组件；组件处理显示和输入，不承担取证业务。"""
-from PySide6.QtCore import Qt
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QLabel, QLineEdit,
-    QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
+    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+    QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QStyle, QVBoxLayout, QWidget,
 )
 
 from ..paths import CASES_DIR
@@ -14,7 +17,7 @@ class ReadOnlyTextPanel(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 12, 0, 0)
+        layout.setContentsMargins(0, 6, 0, 0)
         self.text = QPlainTextEdit(self)
         self.text.setReadOnly(True)
         self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
@@ -22,6 +25,62 @@ class ReadOnlyTextPanel(QWidget):
 
     def set_text(self, value):
         self.text.setPlainText(value)
+
+
+class ExportResultDialog(QDialog):
+    """展示实际导出结果，并通过系统默认程序打开副本或所在目录。"""
+
+    def __init__(self, parent, path, title='导出成功', note=''):
+        super().__init__(parent)
+        self.path = Path(path).absolute()
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(520)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 16)
+        layout.setSpacing(18)
+        content = QHBoxLayout()
+        content.setSpacing(14)
+        icon = QLabel()
+        icon.setPixmap(self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation).pixmap(40, 40))
+        content.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
+        self.message = QLabel('\n\n'.join(filter(None, (str(self.path), note))))
+        self.message.setTextFormat(Qt.TextFormat.PlainText)
+        self.message.setWordWrap(True)
+        self.message.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        self.message.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse
+                                             | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        self.message.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        content.addWidget(self.message, 1)
+        layout.addLayout(content)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        self.open_file_button = QPushButton('打开文件')
+        self.open_folder_button = QPushButton('打开文件所在文件夹')
+        for button in (self.open_file_button, self.open_folder_button):
+            button.setAutoDefault(False)
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        self.open_file_button.clicked.connect(lambda: self._open_target(folder=False))
+        self.open_folder_button.clicked.connect(lambda: self._open_target(folder=True))
+        self.ok_button = QPushButton('OK')
+        self.ok_button.setObjectName('exportOk')
+        self.ok_button.setDefault(True)
+        self.ok_button.clicked.connect(self.accept)
+        buttons.addWidget(self.ok_button)
+        layout.addLayout(buttons)
+        self.ok_button.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.ensurePolished()
+        self.resize(self.minimumWidth(), layout.totalHeightForWidth(self.minimumWidth()))
+
+    def _open_target(self, *, folder):
+        target = self.path.parent if folder else self.path
+        kind = '文件夹' if folder else '文件'
+        if not (target.is_dir() if folder else target.is_file()):
+            QMessageBox.warning(self, '无法打开', f'{kind}不存在或已被移动：\n{target}')
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(target))):
+            QMessageBox.warning(self, '无法打开', f'系统未能打开此{kind}：\n{target}')
 
 
 class NewCaseDialog(QDialog):

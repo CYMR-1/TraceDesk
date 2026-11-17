@@ -11,7 +11,7 @@ from ..core.case import Case, deleted_export_summary, display_time
 from ..core.tasks import TaskRunner
 from ..engines.tsk import can_export, entry_status
 from ..paths import CASES_DIR, EVIDENCE_DIR
-from .views import NewCaseDialog
+from .views import ExportResultDialog, NewCaseDialog
 from .workspace import WorkbenchView
 
 
@@ -171,9 +171,8 @@ class App(QObject):
 
         def done(path):
             record = next(r for r in reversed(self.case.data['exports']) if r['path'] == str(path))
-            message = '\n\n'.join(filter(None, (str(path), deleted_export_summary(record))))
             title = '部分导出' if record['size'] < entry['size'] else '导出成功'
-            QMessageBox.information(self.root, title, message)
+            ExportResultDialog(self.root, path, title, deleted_export_summary(record)).exec()
 
         self.task('校验并导出证据副本', lambda: self.case.export(entry), done)
 

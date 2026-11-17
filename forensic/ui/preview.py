@@ -176,8 +176,8 @@ class FilePreview(QWidget):
         self.window = b''
         self.size = self.page = 0
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(0, 4, 0, 0)
-        self._layout.setSpacing(6)
+        self._layout.setContentsMargins(0, 2, 0, 0)
+        self._layout.setSpacing(4)
         self._build_rows()
         self._build_controls()
         self.clear()
@@ -243,7 +243,7 @@ class FilePreview(QWidget):
         self.text.setFont(fixed)
         self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.formats = TabbedView()
-        self.formats.layout().setSpacing(7)
+        self.formats.layout().setSpacing(4)
         self.formats.addTab(self.text, '文本')
         self.formats.addTab(self.rows, '十六进制')
         self._layout.addWidget(self.formats, 1)
