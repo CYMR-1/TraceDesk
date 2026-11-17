@@ -11,11 +11,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontDatabase, QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
-    QPlainTextEdit, QPushButton, QSizePolicy, QTabWidget, QTreeWidget, QTreeWidgetItem,
+    QPlainTextEdit, QPushButton, QSizePolicy, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 
 from ..engines.tsk import TSK, deleted_source_note, tsk_error
+from .tabs import TabbedView
 
 
 ROW_BYTES = 16
@@ -191,7 +192,7 @@ class FilePreview(QWidget):
         self.encoding.addItems(('ASCII', 'UTF-8'))
         self.encoding.currentTextChanged.connect(self.render)
         encoding_layout.addWidget(self.encoding)
-        self.formats.setCornerWidget(self.encoding_controls, Qt.Corner.TopRightCorner)
+        self.formats.set_actions(self.encoding_controls, (self.encoding,))
 
         bar = QHBoxLayout()
         bar.setContentsMargins(0, 0, 0, 0)
@@ -239,8 +240,7 @@ class FilePreview(QWidget):
         self.text.setReadOnly(True)
         self.text.setFont(fixed)
         self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.formats = QTabWidget()
-        self.formats.setDocumentMode(True)
+        self.formats = TabbedView()
         self.formats.addTab(self.text, '文本')
         self.formats.addTab(self.rows, '十六进制')
         self._layout.addWidget(self.formats, 1)

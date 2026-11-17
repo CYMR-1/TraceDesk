@@ -106,7 +106,6 @@ class DesktopAppearance:
                 background: #ffffff; color: #303030; border: 1px solid #d7d7d7;
                 selection-background-color: #e8e8e8; selection-color: #303030;
             }
-            QTabWidget::pane { border: 1px solid #e3e3e3; background: #ffffff; }
             QTabBar::tab {
                 background: #f7f7f7; color: #737373; padding: 7px 14px;
                 border: 1px solid #e3e3e3; border-bottom: 2px solid #e3e3e3;

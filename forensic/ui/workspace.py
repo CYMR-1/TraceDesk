@@ -1,10 +1,11 @@
 """顶部案件工具、模块导航与工作台布局。"""
 from PySide6.QtCore import QObject, Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QHBoxLayout, QProgressBar, QPushButton, QTabWidget,
+from PySide6.QtWidgets import (QHBoxLayout, QProgressBar, QPushButton,
                                QVBoxLayout, QWidget)
 
 from .browser import FileBrowserView, label
+from .tabs import TabbedView
 from .views import ReadOnlyTextPanel
 
 
@@ -40,9 +41,7 @@ class WorkbenchView(QObject):
         self.summary = label('尚未打开案件。新建案件并加载镜像，或打开已有案件继续分析。', 'muted')
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-        self.tabs.setUsesScrollButtons(True)
+        self.tabs = TabbedView()
         layout.addWidget(self.tabs, 1)
         self.browser = FileBrowserView(self.tabs, appearance, commands)
         self.tabs.addTab(self.browser, '文件浏览')
@@ -52,7 +51,7 @@ class WorkbenchView(QObject):
         actions_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         actions_layout.addWidget(self.browser.load_button)
         actions_layout.addWidget(self.browser.verify_button)
-        self.tabs.setCornerWidget(self.image_actions, Qt.Corner.TopRightCorner)
+        self.tabs.set_actions(self.image_actions, (self.browser.load_button, self.browser.verify_button))
         self.panels = {}
         for key, title in [('info', '镜像与文件系统'), ('timeview', 'MAC 时间线'),
                             ('audit', '审计日志'), ('help', '操作说明')]:
