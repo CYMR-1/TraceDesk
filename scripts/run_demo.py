@@ -15,7 +15,7 @@ def run():
         create(image)
     case = Case.create(ROOT / 'cases', 'DEMO-2026-001', '演示取证人员', '自建 FAT16 测试镜像')
     case.load(image)
-    entries = case.scan(2048)
+    entries = case.scan_all()
     assert case.verify(), '原镜像哈希不一致'
     entry = next(e for e in entries if e['path'] == 'DOCS/CASE.TXT')
     exported = case.export(entry)

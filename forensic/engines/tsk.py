@@ -88,7 +88,8 @@ class TSK:
             raw = self.text('mmls', ['-i', 'raw', image])
             offsets = []
             for line in raw.splitlines():
-                m = re.match(r'^\s*\d+:\s+\d+:\d+\s+(\d+)\s+\d+\s+\d+\s+(.+)', line)
+                # DOS 使用 000:000 槽位，GPT 使用 000；Meta/------- 行不是数据分区。
+                m = re.match(r'^\s*\d+:\s+\d+(?::\d+)?\s+(\d+)\s+\d+\s+\d+\s+(.+)', line)
                 if m and not any(s in m[2].lower() for s in ('unallocated', 'extended')):
                     offsets.append({'offset': int(m[1]), 'description': m[2]})
             if not offsets:

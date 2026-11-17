@@ -5,7 +5,7 @@ from PySide6.QtCore import QSignalBlocker, QTimer, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFrame, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit,
-                               QPushButton, QSizePolicy, QSplitter, QTreeWidget,
+                               QPushButton, QSplitter, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..core.case import display_time
@@ -47,16 +47,19 @@ def outline_icon(kind):
 class FileBrowserView(QWidget):
     ROW_ROLE = Qt.ItemDataRole.UserRole + 1
     SCOPE_ROLE = Qt.ItemDataRole.UserRole + 2
+    OFFSET_ROLE = Qt.ItemDataRole.UserRole + 3
 
     def __init__(self, parent, appearance, commands):
         super().__init__(parent)
         self.appearance, self.commands = appearance, commands
         self.entries, self._items, self._nav_items, self._nodes = {}, {}, {}, {}
-        self._scope, self._allowed = None, None
+        self._scope, self._scope_offset, self._allowed = None, None, None
         self._remaining = iter(())
         self._total = self._visible_count = 0
         self._busy = False
-        self._context = ('尚未加载镜像', '尚未读取分区')
+        self._image_name = '尚未加载镜像'
+        self._evidence, self._scans = None, {}
+        self.partition_nodes = {}
         self._icons = {name: outline_icon(name) for name in ('file', 'folder', 'disk')}
         self._batch_timer = QTimer(self)
         self._batch_timer.setSingleShot(True)
@@ -65,17 +68,10 @@ class FileBrowserView(QWidget):
         layout.setContentsMargins(10, 10, 10, 8)
         layout.setSpacing(8)
         controls = QHBoxLayout()
-        controls.addWidget(label('分析分区'))
-        self.partition = QComboBox()
-        self.partition.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.partition.setMinimumContentsLength(12)
-        self.partition.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        controls.addWidget(self.partition, 1)
-        self.scan_button = self._button('读取文件树', commands['scan'])
-        self.scan_button.setProperty('role', 'accent')
+        controls.addStretch()
         self.load_button = self._button('加载 RAW 镜像', commands['load'])
         self.verify_button = self._button('校验完整性', commands['verify'])
-        for button in (self.scan_button, self.load_button, self.verify_button):
+        for button in (self.load_button, self.verify_button):
             controls.addWidget(button)
         layout.addLayout(controls)
         self.horizontal_split = QSplitter(Qt.Orientation.Horizontal)
@@ -145,15 +141,15 @@ class FileBrowserView(QWidget):
         filters.addWidget(self.filter_button)
         filters.addWidget(self.reset_button)
         result_layout.addLayout(filters)
-        self.breadcrumb = label('请选择镜像并读取文件树', 'muted')
+        self.breadcrumb = label('加载镜像后自动展示所有分区', 'muted')
         self.breadcrumb.setWordWrap(True)
         result_layout.addWidget(self.breadcrumb)
         self.tree = QTreeWidget()
         self.tree.setObjectName('fileResults')
         self.tree.setRootIsDecorated(False)
-        self.tree.setColumnCount(7)
+        self.tree.setColumnCount(8)
         self.tree.setHeaderLabels(['文件名称 / 镜像内路径', '状态', '字节数', 'inode',
-                                   'M 修改 (UTC+8)', 'A 访问 (UTC+8)', 'C 变更 (UTC+8)'])
+                                   'M 修改 (UTC+8)', 'A 访问 (UTC+8)', 'C 变更 (UTC+8)', '分区偏移（扇区）'])
         self.tree.setUniformRowHeights(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -162,7 +158,7 @@ class FileBrowserView(QWidget):
         header = self.tree.header()
         header.setStretchLastSection(False)
         header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        for column, width in enumerate((260, 120, 120, 120, 170, 170, 170)):
+        for column, width in enumerate((260, 120, 120, 120, 170, 170, 170, 140)):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
             self.tree.setColumnWidth(column, width)
         for column in (2, 3):
@@ -203,13 +199,27 @@ class FileBrowserView(QWidget):
         button.clicked.connect(callback)
         return button
 
-    def set_context(self, evidence, offset=None):
-        self._context = (Path(evidence['path']).name if evidence else '尚未加载镜像',
-                         f'已读取分区 · 偏移 {offset} 扇区' if offset is not None else '尚未读取分区')
-        self.image_node.setText(0, self._context[0])
+    def set_context(self, evidence, scans=()):
+        self._evidence = evidence
+        self._scans = {p['offset']: p for p in scans}
+        self._image_name = Path(evidence['path']).name if evidence else '尚未加载镜像'
+        self.image_node.setText(0, self._image_name)
         self.image_node.setToolTip(0, evidence['path'] if evidence else '')
-        self.partition_node.setText(0, self._context[1])
+        for offset in self.partition_nodes:
+            self._update_partition(offset)
         self._update_counts()
+
+    def _update_partition(self, offset):
+        node = self.partition_nodes[offset]
+        scan = self._scans.get(offset)
+        state = (f'已读取 {scan["count"]} 项' if scan['status'] == 'ready'
+                 else '无法读取') if scan else '待读取'
+        index = list(self.partition_nodes).index(offset) + 1
+        node.setText(0, f'分区 {index} · 偏移 {offset} · {state}')
+        partition = next((p for p in (self._evidence or {}).get('partitions', [])
+                          if p['offset'] == offset), {})
+        node.setToolTip(0, f'{partition.get("description", "")}\n偏移 {offset} 扇区\n'
+                       + (scan.get('error', state) if scan else state))
 
     def display(self, entries):
         self.cancel_display()
@@ -219,39 +229,52 @@ class FileBrowserView(QWidget):
         with QSignalBlocker(self.tree), QSignalBlocker(self.navigation):
             self.tree.clear()
             self.navigation.clear()
-            self.image_node = QTreeWidgetItem(self.navigation, [self._context[0]])
+            self.image_node = QTreeWidgetItem(self.navigation, [self._image_name])
             self.image_node.setIcon(0, self._icons['disk'])
-            self.partition_node = QTreeWidgetItem(self.image_node, [self._context[1]])
-            self.partition_node.setIcon(0, self._icons['disk'])
-            self.root_node = QTreeWidgetItem(self.partition_node, ['/ 根目录'])
-            self.root_node.setIcon(0, self._icons['folder'])
-            self.root_node.setData(0, self.SCOPE_ROLE, '')
-            for node in (self.image_node, self.partition_node, self.root_node):
+            self.image_node.setToolTip(0, self._evidence['path'] if self._evidence else '')
+            self.image_node.setExpanded(True)
+            self.partition_nodes, self._nodes = {}, {}
+            offsets = list(dict.fromkeys([p['offset'] for p in (self._evidence or {}).get('partitions', [])]
+                                         + [e['offset'] for e in entries]))
+            for offset in offsets:
+                node = QTreeWidgetItem(self.image_node)
+                node.setIcon(0, self._icons['disk'])
+                node.setData(0, self.OFFSET_ROLE, offset)
                 node.setExpanded(True)
+                self.partition_nodes[offset] = node
+                self._update_partition(offset)
+                if self._scans.get(offset, {}).get('status') != 'error':
+                    root = QTreeWidgetItem(node, ['/ 根目录'])
+                    root.setIcon(0, self._icons['folder'])
+                    root.setData(0, self.SCOPE_ROLE, '')
+                    root.setData(0, self.OFFSET_ROLE, offset)
+                    root.setExpanded(True)
+                    self._nodes[(offset, '')] = root
         self.entries, self._items, self._nav_items = {}, {}, {}
-        self._nodes = {'': self.root_node}
-        self._scope, self._allowed = None, None
+        self._scope, self._scope_offset, self._allowed = None, None, None
         self.suffix.clear()
         self.keyword.clear()
         with QSignalBlocker(self.status_filter):
             self.status_filter.setCurrentIndex(0)
-        ordered = sorted(entries, key=lambda e: (e['path'].count('/'), e['mode'].lower().startswith('v/'),
+        ordered = sorted(entries, key=lambda e: (e['offset'], e['path'].count('/'), e['mode'].lower().startswith('v/'),
                                                  not e['directory'], e['path'], e.get('deleted', False)))
         self._total, self._visible_count = len(ordered), 0
         self._remaining = iter(ordered)
         self._insert_batch()
 
-    def _parent_node(self, path):
+    def _parent_node(self, offset, path):
         if not path or path == '.':
-            return self.root_node
-        if path not in self._nodes:
+            return self._nodes[(offset, '')]
+        key = (offset, path)
+        if key not in self._nodes:
             parent, _, name = path.rpartition('/')
-            node = QTreeWidgetItem(self._parent_node(parent), [name])
+            node = QTreeWidgetItem(self._parent_node(offset, parent), [name])
             node.setData(0, self.SCOPE_ROLE, path)
+            node.setData(0, self.OFFSET_ROLE, offset)
             node.setIcon(0, self._icons['folder'])
             node.setExpanded(True)
-            self._nodes[path] = node
-        return self._nodes[path]
+            self._nodes[key] = node
+        return self._nodes[key]
 
     @staticmethod
     def _path(entry):
@@ -261,11 +284,11 @@ class FileBrowserView(QWidget):
         path = self._path(entry)
         dates = [display_time(entry[key], compact=True) for key in ('mtime', 'atime', 'ctime')]
         item = QTreeWidgetItem(self.tree, [entry_name(entry) or '/', entry_status(entry),
-                                          str(entry['size']), str(entry['inode'] or '—'), *dates])
+                                          str(entry['size']), str(entry['inode'] or '—'), *dates, str(entry['offset'])])
         key = id(item)
         item.setData(0, Qt.ItemDataRole.UserRole, entry)
         item.setData(0, self.ROW_ROLE, key)
-        item.setToolTip(0, entry['path'])
+        item.setToolTip(0, f'{entry["path"]}\n分区偏移 {entry["offset"]} 扇区')
         for column in (2, 3):
             item.setTextAlignment(column, Qt.AlignmentFlag.AlignCenter)
         icon = self._icons['folder' if entry['directory'] else 'file']
@@ -273,13 +296,14 @@ class FileBrowserView(QWidget):
         nav_name = entry_name(entry) or '/'
         if entry.get('deleted'):
             nav_name += f'  [已删除 · {entry["inode"] or "—"}]'
-        node = QTreeWidgetItem(self._parent_node(path.rpartition('/')[0]), [nav_name])
+        node = QTreeWidgetItem(self._parent_node(entry['offset'], path.rpartition('/')[0]), [nav_name])
         node.setIcon(0, icon)
         node.setToolTip(0, f'{entry["path"]}\n{entry_status(entry)} · inode {entry["inode"] or "—"}')
         node.setData(0, self.ROW_ROLE, key)
+        node.setData(0, self.OFFSET_ROLE, entry['offset'])
         if entry['directory']:
             node.setData(0, self.SCOPE_ROLE, path)
-            self._nodes.setdefault(path, node)
+            self._nodes.setdefault((entry['offset'], path), node)
         node.setExpanded(True)
         self.entries[key], self._items[key], self._nav_items[key] = entry, item, node
         visible = self._matches(entry)
@@ -302,6 +326,8 @@ class FileBrowserView(QWidget):
             self._update_counts()
 
     def _matches(self, entry):
+        if self._scope_offset is not None and entry['offset'] != self._scope_offset:
+            return False
         if self._scope is not None and self._path(entry).rpartition('/')[0] != self._scope:
             return False
         if self._allowed is not None and id(entry) not in self._allowed:
@@ -348,15 +374,17 @@ class FileBrowserView(QWidget):
 
     def _update_counts(self):
         scope = '全部条目（含子目录）' if self._scope is None else '/' + self._scope
-        self.breadcrumb.setText(f'{self._context[0]}  /  {scope}')
-        self.result_count.setText(f'当前目录 {self._visible_count} 项 · 完整清单 {self._total} 项 · 时间 UTC+8')
-        self.tree_count.setText(f'完整清单 {len(self.entries)} / {self._total} 项\n含目录、删除记录与系统区域')
+        partition = '所有分区' if self._scope_offset is None else f'分区偏移 {self._scope_offset}'
+        self.breadcrumb.setText(f'{self._image_name}  /  {partition}  /  {scope}')
+        self.result_count.setText(f'当前范围 {self._visible_count} 项 · 完整清单 {self._total} 项 · 时间 UTC+8')
+        self.tree_count.setText(f'{len(self.partition_nodes)} 个分区 · 完整清单 {len(self.entries)} / {self._total} 项\n含目录、删除记录与系统区域')
 
     def _navigation_selected(self):
         selected = self.navigation.selectedItems()
         if not selected:
             return
         node = selected[0]
+        self._scope_offset = node.data(0, self.OFFSET_ROLE)
         key = node.data(0, self.ROW_ROLE)
         entry = self.entries.get(key)
         if entry is not None and not entry['directory']:
@@ -372,6 +400,11 @@ class FileBrowserView(QWidget):
             self.reset_filter()
             node.setExpanded(True)
             self.detail.setText('双击右侧目录进入；选择文件查看内容。')
+            scan = self._scans.get(self._scope_offset, {})
+            if scan.get('status') == 'error':
+                message = f'此分区无法读取：{scan["error"]}'
+                self.detail.setText(message)
+                self.preview.clear(message)
 
     def _result_selected(self):
         selected = self.tree.selectedItems()
@@ -393,6 +426,7 @@ class FileBrowserView(QWidget):
     def _open_directory(self, item, _column):
         entry = item.data(0, Qt.ItemDataRole.UserRole)
         if entry and entry['directory']:
+            self._scope_offset = entry['offset']
             self._scope = self._path(entry)
             with QSignalBlocker(self.tree):
                 self.tree.clearSelection()
@@ -405,8 +439,8 @@ class FileBrowserView(QWidget):
 
     def set_busy(self, busy):
         self._busy = busy
-        for widget in (self.scan_button, self.filter_button, self.load_button, self.verify_button,
-                       self.reset_button, self.partition, self.suffix, self.keyword, self.status_filter,
+        for widget in (self.filter_button, self.load_button, self.verify_button,
+                       self.reset_button, self.suffix, self.keyword, self.status_filter,
                        self.navigation, self.tree, self.expand_button, self.collapse_button):
             widget.setEnabled(not busy)
         selected = self.tree.selectedItems()

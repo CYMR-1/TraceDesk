@@ -27,11 +27,11 @@ class App(QObject):
         self.appearance.configure()
         set_window_icon(root)
         commands = {name: getattr(self, name) for name in
-                    ('new_case', 'open_case', 'load', 'verify', 'export', 'report', 'scan', 'filter', 'select')}
+                    ('new_case', 'open_case', 'load', 'verify', 'export', 'report', 'filter', 'select')}
         self.view = WorkbenchView(root, self.appearance, commands)
         self.browser = self.view.browser
         # 控制器公开原生 Qt 控件，布局细节由视图管理。
-        for name in ('partition', 'suffix', 'keyword', 'tree', 'preview', 'detail'):
+        for name in ('suffix', 'keyword', 'tree', 'preview', 'detail'):
             setattr(self, name, getattr(self.browser, name))
         for name in ('tabs', 'summary', 'status', 'progress'):
             setattr(self, name, getattr(self.view, name))
@@ -86,7 +86,8 @@ class App(QObject):
                     QMessageBox.critical(self.root, '操作失败', str(result.error))
                 elif result.callback:
                     result.callback(result.value)
-                self.refresh()
+                if not self.busy:
+                    self.refresh()
         except Exception as error:
             self.status.setText('显示失败')
             QMessageBox.critical(self.root, '显示失败', str(error))
@@ -119,6 +120,7 @@ class App(QObject):
                     self.case.close()
                 self.case = case
                 self.refresh(reset=True)
+                self.resume_partitions()
             except Exception as error:
                 QMessageBox.critical(self.root, '打开失败', str(error))
 
@@ -129,16 +131,21 @@ class App(QObject):
                 'RAW 镜像 (*.dd *.raw *.img);;所有文件 (*)',
                 options=QFileDialog.Option.DontUseNativeDialog)
             if path:
-                self.task('固定镜像并识别分区', lambda: self.case.load(path), lambda _: self.refresh(reset=True))
+                self.task('固定镜像并识别分区', lambda: self.case.load(path), self._image_loaded)
+
+    def _image_loaded(self, _):
+        self.refresh(reset=True)
+        self.scan()
+
+    def resume_partitions(self):
+        if self.case.needs_partition_scan():
+            self.scan()
 
     def scan(self):
         if self.available():
-            index = self.partition.currentIndex()
-            if index < 0:
-                QMessageBox.information(self.root, '提示', '请先加载镜像并选择分区。')
+            if not self.case.data['evidence']:
                 return
-            offset = self.case.data['evidence']['partitions'][index]['offset']
-            self.task('读取文件系统与文件树', lambda: self.case.scan(offset), self.display)
+            self.task('自动读取所有分区与文件树', self.case.scan_all, lambda _: self.refresh(reset=True))
 
     def filter(self):
         if self.available():
@@ -196,17 +203,9 @@ class App(QObject):
         evidence = data['evidence']
         self.summary.setText(f'案件 {data["number"]}  ·  取证人员 {data["examiner"]}  ·  对象 {data["target"]}\n' + (f'证据 {Path(evidence["path"]).name}  ·  已固定 SHA-256（完整摘要见“镜像与文件系统”）' if evidence else '尚未加载镜像'))
         self.summary.setToolTip(f'SHA-256：{evidence["sha256"]}' if evidence else '')
-        values = [f'{p["offset"]} 扇区 · {p["description"]}' for p in evidence['partitions']] if evidence else []
-        previous = self.partition.currentIndex()
-        if values != [self.partition.itemText(i) for i in range(self.partition.count())]:
-            self.partition.clear()
-            self.partition.addItems(values)
-            self.partition.setCurrentIndex(min(previous, len(values) - 1))
-        if values and (reset or self.partition.currentIndex() < 0):
-            self.partition.setCurrentIndex(next((i for i,p in enumerate(evidence['partitions']) if p['offset'] == data.get('offset')), 0))
+        self.browser.set_context(evidence, data.get('partition_scans', []))
         if reset:
             self.display(data['inventory'])
-        self.browser.set_context(evidence, data.get('offset'))
         info_key = (id(evidence), data.get('fsstat'))
         if reset or getattr(self, '_info_key', None) != info_key:
             self._info_key = info_key
@@ -217,7 +216,7 @@ class App(QObject):
         if getattr(self, '_timeline_inventory', None) is not data['inventory']:
             events = self.case.timeline_events()
             self.set_text(self.timeview, 'MAC/B 时间线 · 东八区（UTC+8）\n\n' + '\n'.join(
-                f"{row['time']}  {row['event']}  {row['path']}  ·  {row['status']}  ·  inode {row['inode']}" for row in events))
+                f"{row['time']}  {row['event']}  {row['path']}  ·  分区偏移 {row['offset']}  ·  {row['status']}  ·  inode {row['inode']}" for row in events))
             self._timeline_inventory = data['inventory']
 
     def close(self):
@@ -246,14 +245,15 @@ class App(QObject):
 HELP_TEXT = '''操作顺序
 
 1. 新建案件：填写编号、取证人员、对象，选择案件库。
-2. 加载 RAW 镜像：镜像必须放在案件库之外。自动流式计算 SHA-256 并读取分区。
-3. 选择分区，读取文件树；支持后缀及路径关键词筛选。
+2. 加载 RAW 镜像：镜像必须放在案件库之外。自动固定 SHA-256，识别并读取所有分区。
+3. 左侧按分区展示完整文件树，点击分区或目录浏览；支持后缀及路径关键词筛选。
 4. 校验完整性；选择现存或已删除的文件导出。导出前后自动校验原镜像。
 5. 查看审计日志、MAC 时间线，生成 Markdown 报告。
 
 界面操作
 左侧完整文件树保留目录、文件、删除记录与系统区域。点击目录更新右上文件列表，点击文件查看下方内容。
-双击右侧目录进入，点击镜像或分区节点返回全部条目。筛选只影响右侧列表；切换目录或点击“重置”清除筛选。
+双击右侧目录进入，点击镜像查看所有分区条目，点击分区仅查看该分区。无法读取的分区保留节点并显示原因。
+筛选只影响右侧列表；切换目录或点击“重置”清除筛选。打开旧案件时自动补齐尚未扫描的分区。
 通过“全部展开/全部折叠”控制目录树；拖动左右、上下分隔条可调整区域大小。
 下方“文本/十六进制”标签切换内容表示，字符编码支持 ASCII 与 UTF-8。
 表格底部可横向滚动，查看全部时间列或十六进制内容。
@@ -285,6 +285,7 @@ def main(case=None):
         if case is not None:
             app.case = case
             app.refresh(reset=True)
+            app.resume_partitions()
         root.show()
         return qt_app.exec()
     finally:

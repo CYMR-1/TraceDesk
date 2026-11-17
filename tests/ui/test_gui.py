@@ -28,6 +28,23 @@ class QtTests(unittest.TestCase):
 
 
 class ControllerTests(QtTests):
+    def test_chained_scan_keeps_busy_controls_and_defers_refresh(self):
+        root, app = self.controller()
+        app.case = Mock()
+        app.refresh = Mock()
+        # 加载完成回调立即开始自动扫描，此时不能边读审计文件边刷新。
+        def start_scan(_):
+            app.runner.busy = True
+            app.view.set_busy(True)
+            app.status.setText('自动读取所有分区与文件树…')
+        app.runner = SimpleNamespace(busy=False, poll=Mock(
+            return_value=TaskResult(callback=start_scan)))
+        app.poll()
+        app.refresh.assert_not_called()
+        self.assertFalse(app.browser.load_button.isEnabled())
+        self.assertIn('自动读取所有分区', app.status.text())
+        app.runner.busy = False
+
     def test_callback_failure_keeps_polling_and_restores_controls(self):
         root, app = self.controller()
         app.case = Mock()
@@ -119,9 +136,11 @@ class FileBrowserTests(QtTests):
         app.case = SimpleNamespace(data=data, check_audit=lambda: [],
                                    timeline_events=lambda: [], close=lambda: None)
         app.refresh(reset=True)
-        app.partition.setCurrentIndex(1)
+        node = app.browser.partition_nodes[2048]
+        app.browser.navigation.setCurrentItem(node)
         app.refresh()
-        self.assertEqual(app.partition.currentIndex(), 1)
+        self.assertIs(app.browser.navigation.currentItem(), node)
+        self.assertEqual(app.browser._scope_offset, 2048)
 
     def test_directory_filter_keeps_complete_tree_and_navigation_restores_file(self):
         root, app = self.controller()
@@ -132,7 +151,7 @@ class FileBrowserTests(QtTests):
         app.preview.open_file = Mock()
         app.case = SimpleNamespace(image=lambda: 'demo.dd', close=lambda: None)
         nodes = dict(browser._nav_items)
-        browser.navigation.setCurrentItem(browser._nodes['DOCS'])
+        browser.navigation.setCurrentItem(browser._nodes[(0, 'DOCS')])
         self.assertEqual([e['path'] for k, e in browser.entries.items() if not browser._items[k].isHidden()],
                          ['DOCS/a.txt'])
         browser.apply_filter([])
@@ -163,6 +182,47 @@ class FileBrowserTests(QtTests):
         self.assertFalse(browser.export_button.isEnabled())
         self.assertNotIn('inode', browser.detail.text())
         self.assertIsNone(app.selected_entry())
+
+    def test_same_paths_and_inodes_in_different_partitions_stay_separate(self):
+        root, app = self.controller()
+        entries = [self.entry(path=path, offset=offset, directory=path == 'DOCS',
+                              mode='d/d' if path == 'DOCS' else 'r/r')
+                   for offset in (2048, 20480) for path in ('DOCS', 'DOCS/same.txt')]
+        app.display(entries)
+        app.case = SimpleNamespace(image=lambda: 'demo.dd', close=lambda: None)
+        app.preview.open_file = Mock()
+        browser = app.browser
+        self.assertEqual(len(browser.partition_nodes), 2)
+        for offset in (2048, 20480):
+            browser.navigation.setCurrentItem(browser.partition_nodes[offset])
+            self.assertEqual(browser._visible_count, 2)
+            browser.navigation.setCurrentItem(browser._nodes[(offset, 'DOCS')])
+            visible = [item for item in browser._items.values() if not item.isHidden()]
+            self.assertEqual(len(visible), 1)
+            browser.tree.setCurrentItem(visible[0])
+            self.assertEqual(app.selected_entry()['offset'], offset)
+            self.assertEqual(app.preview.open_file.call_args.args[1]['offset'], offset)
+            self.assertEqual(browser.navigation.currentItem().parent(), browser._nodes[(offset, 'DOCS')])
+        browser.navigation.setCurrentItem(browser.image_node)
+        self.assertEqual(browser._visible_count, 4)
+        # 从跨分区结果双击目录，也只能进入该分区的目录。
+        item = next(item for key, item in browser._items.items()
+                    if browser.entries[key]['directory'] and browser.entries[key]['offset'] == 20480)
+        browser._open_directory(item, 0)
+        self.assertEqual(browser._scope_offset, 20480)
+        self.assertEqual(browser._visible_count, 1)
+
+    def test_unreadable_partition_remains_visible_with_reason(self):
+        root, app = self.controller()
+        browser = app.browser
+        browser.set_context(dict(path='disk.dd', partitions=[dict(offset=2048, description='未知文件系统')]),
+                            [dict(offset=2048, status='error', count=0, error='无法识别文件系统')])
+        app.display([])
+        node = browser.partition_nodes[2048]
+        self.assertIn('无法读取', node.text(0))
+        browser.navigation.setCurrentItem(node)
+        self.assertIn('无法识别文件系统', browser.detail.text())
+        self.assertFalse(browser.export_button.isEnabled())
 
     def test_filters_during_batch_insertion_do_not_drop_tree_records(self):
         root, app = self.controller()

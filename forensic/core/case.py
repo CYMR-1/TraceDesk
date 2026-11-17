@@ -246,19 +246,65 @@ class Case:
             if not self.verify():
                 raise RuntimeError('镜像校验失败，禁止扫描')
             tool = tsk or TSK()
-            info = tool.text('fsstat', ['-i', 'raw', '-o', offset, self.image()])
-            entries = tool.files(self.image(), offset)
-            try:
-                entries.extend(fat_regions(self.image(), offset, info, entries))
-            except (ValueError, OSError, OverflowError) as error:
-                info += f'\nFAT 空间区域未能映射：{error}'
+            info, entries = self._read_partition(tool, offset)
             if not self.verify():
                 raise RuntimeError('扫描期间镜像变化，文件清单未保存')
-            self.save(inventory=entries, fsstat=info, offset=offset)
+            self.save(inventory=entries, fsstat=info, offset=offset,
+                      partition_scans=[dict(offset=offset, status='ready', count=len(entries))])
             self.log('FILE_BROWSE', f'{self.image()}@{offset}', '成功', count=len(entries))
             return entries
         except Exception as error:
             self.log('FILE_BROWSE', str(offset), '失败', error=str(error))
+            raise
+
+    def _read_partition(self, tool, offset):
+        info = tool.text('fsstat', ['-i', 'raw', '-o', offset, self.image()])
+        entries = tool.files(self.image(), offset)
+        try:
+            entries.extend(fat_regions(self.image(), offset, info, entries))
+        except (ValueError, OSError, OverflowError) as error:
+            info += f'\nFAT 空间区域未能映射：{error}'
+        return info, entries
+
+    def needs_partition_scan(self):
+        evidence = self.data['evidence']
+        if not evidence:
+            return False
+        expected = {p['offset'] for p in evidence['partitions']}
+        scanned = {p['offset'] for p in self.data.get('partition_scans', [])}
+        return expected != scanned
+
+    def scan_all(self, tsk=None):
+        """汇总全部分区；单个分区不可读时保留失败状态，不影响其他分区。"""
+        image = self.image()
+        try:
+            if not self.verify():
+                raise RuntimeError('镜像校验失败，禁止扫描')
+            tool = tsk or TSK()
+            inventory, scans, sections = [], [], []
+            for partition in self.data['evidence']['partitions']:
+                offset = partition['offset']
+                try:
+                    info, entries = self._read_partition(tool, offset)
+                except (RuntimeError, OSError, ValueError, OverflowError) as error:
+                    scans.append(dict(offset=offset, status='error', count=0, error=str(error)))
+                    info = f'无法读取此分区：{error}'
+                    self.log('FILE_BROWSE', f'{image}@{offset}', '失败', error=str(error))
+                else:
+                    inventory.extend(entries)
+                    scans.append(dict(offset=offset, status='ready', count=len(entries)))
+                    self.log('FILE_BROWSE', f'{image}@{offset}', '成功', count=len(entries))
+                sections.append(f'分区偏移 {offset} 扇区 · {partition["description"]}\n{info}')
+            if not self.verify():
+                raise RuntimeError('扫描期间镜像变化，文件清单未保存')
+            self.save(inventory=inventory, partition_scans=scans, offset=None,
+                      fsstat='\n\n'.join(sections))
+            failed = sum(p['status'] == 'error' for p in scans)
+            self.log('PARTITIONS_SCAN', image, '部分分区不可读' if failed else '成功',
+                     partitions=len(scans), failed=failed, count=len(inventory))
+            return inventory
+        except Exception as error:
+            self.log('PARTITIONS_SCAN', image, '失败', error=str(error))
             raise
 
     def filtered(self, suffix='', keyword=''):
@@ -333,12 +379,13 @@ class Case:
             for field, label in [('mtime','M 内容修改'), ('atime','A 访问'), ('ctime','C 元数据变更'), ('crtime','B 创建')]:
                 if entry[field] > 0:
                     events.append(dict(time=display_time(entry[field]),
-                                       event=label, path=entry['path'], inode=entry['inode'], status=entry_status(entry)))
+                                       event=label, path=entry['path'], inode=entry['inode'],
+                                       offset=entry['offset'], status=entry_status(entry)))
         return sorted(events, key=lambda row: row['time'])
 
     def timeline(self):
         events = self.timeline_events()
-        self.log('TIMELINE', self.data.get('offset', ''), '成功', count=len(events))
+        self.log('TIMELINE', self.image(), '成功', count=len(events))
         return events
 
     def report(self):
@@ -365,14 +412,21 @@ class Case:
         lines += ['', '## 原始证据与完整性', '', f'- 路径：{cell(e["path"])}', f'- 字节数：{e["size"]}',
                   f'- 初始 SHA-256：`{e["sha256"]}`', f'- 当前 SHA-256：`{self.data["verification"]["actual"]}`',
                   f'- 校验结论：{conclusion}', '', '## 文件清单摘要', '',
-                  f'当前分区偏移：{self.data.get("offset", "未浏览")}；共 {len(self.data["inventory"])} 项（最多列出 200 项）。', '',
-                  '| 路径 | 状态 | inode | 字节数 | M (UTC+8) | A (UTC+8) | C (UTC+8) |', '| --- | --- | --- | ---: | --- | --- | --- |']
+                  f'已识别 {len(e["partitions"])} 个分区；当前清单共 {len(self.data["inventory"])} 项（最多列出 200 项）。', '']
+        scans = {p['offset']: p for p in self.data.get('partition_scans', [])}
+        for partition in e['partitions']:
+            scan = scans.get(partition['offset'])
+            state = (f'已读取 {scan["count"]} 项' if scan['status'] == 'ready'
+                     else f'无法读取：{scan["error"]}') if scan else '未完成全部分区读取'
+            lines.append(f'- 分区偏移 {partition["offset"]}：{cell(partition["description"])}；{cell(state)}')
+        lines += ['', '| 分区偏移 | 路径 | 状态 | inode | 字节数 | M (UTC+8) | A (UTC+8) | C (UTC+8) |',
+                  '| ---: | --- | --- | --- | ---: | --- | --- | --- |']
         for row in self.data['inventory'][:200]:
             dates = [display_time(row[k]) for k in ('mtime','atime','ctime')]
-            lines.append('| ' + ' | '.join(map(cell, [row['path'], entry_status(row), row['inode'], row['size'], *dates])) + ' |')
+            lines.append('| ' + ' | '.join(map(cell, [row['offset'], row['path'], entry_status(row), row['inode'], row['size'], *dates])) + ' |')
         lines += ['', '## 导出副本', '']
         for row in self.data['exports']:
-            lines.append(f'- {cell(row["source"])} → {cell(row["path"])}；SHA-256：`{row["sha256"]}`')
+            lines.append(f'- 分区偏移 {row["offset"]} · {cell(row["source"])} → {cell(row["path"])}；SHA-256：`{row["sha256"]}`')
             if row.get('deleted'):
                 lines.append('  ' + cell(deleted_export_summary(row)))
         lines += ['', '## 审计日志摘要', '', f'审计链验证通过；当前 {len(records)} 条；锚点：`{records[-1]["hash"]}`。', '',
