@@ -36,6 +36,12 @@ test_startup_failure_is_reported (test_launcher.LauncherTests.test_startup_failu
 test_successful_startup (test_launcher.LauncherTests.test_successful_startup) ... ok
 test_package_includes_subpackages_and_licenses_but_excludes_local_data (test_project_layout.ProjectLayoutTests.test_package_includes_subpackages_and_licenses_but_excludes_local_data) ... ok
 test_resources_and_gui_resolve_from_another_working_directory (test_project_layout.ProjectLayoutTests.test_resources_and_gui_resolve_from_another_working_directory) ... ok
+test_export_callback_uses_exported_path_and_preserves_partial_note (ui.test_export_dialog.ExportDialogTests.test_export_callback_uses_exported_path_and_preserves_partial_note) ... ok
+test_missing_file_reports_error_but_folder_can_still_open (ui.test_export_dialog.ExportDialogTests.test_missing_file_reports_error_but_folder_can_still_open) ... ok
+test_open_actions_pass_local_urls_and_keep_dialog_open (ui.test_export_dialog.ExportDialogTests.test_open_actions_pass_local_urls_and_keep_dialog_open) ... ok
+test_system_open_failure_reports_target_and_keeps_dialog_open (ui.test_export_dialog.ExportDialogTests.test_system_open_failure_reports_target_and_keeps_dialog_open) ... ok
+test_added_feature_mounts_page_and_dispatches_button_without_controller_changes (ui.test_features.FeatureAssemblyTests.test_added_feature_mounts_page_and_dispatches_button_without_controller_changes) ... ok
+test_omitted_features_have_no_controls_or_refresh_hooks (ui.test_features.FeatureAssemblyTests.test_omitted_features_have_no_controls_or_refresh_hooks) ... ok
 test_callback_failure_keeps_polling_and_restores_controls (ui.test_gui.ControllerTests.test_callback_failure_keeps_polling_and_restores_controls) ... ok
 test_chained_scan_keeps_busy_controls_and_defers_refresh (ui.test_gui.ControllerTests.test_chained_scan_keeps_busy_controls_and_defers_refresh) ... ok
 test_close_during_task_keeps_case_and_window_open (ui.test_gui.ControllerTests.test_close_during_task_keeps_case_and_window_open) ... ok
@@ -60,6 +66,6 @@ test_text_preview_keeps_newlines_and_utf8_page_boundaries (ui.test_preview.Previ
 test_utf8_across_rows_and_pages (ui.test_preview.PreviewTests.test_utf8_across_rows_and_pages) ... ok
 
 ----------------------------------------------------------------------
-Ran 60 tests in 18.436s
+Ran 66 tests in 12.119s
 
 OK

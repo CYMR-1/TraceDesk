@@ -75,16 +75,12 @@ class DesktopAppearance:
             QLabel { background: transparent; }
             QLabel[role="section"] { color: #30483e; font-weight: 600; }
             QFrame#navigationPanel, QFrame#resultsPanel, QFrame#previewPanel {
-                background: #ffffff; border: 1px solid #e2e7e5; border-radius: 10px;
+                background: #ffffff; border: 1px solid #e2e7e5; border-radius: 6px;
             }
             QTreeWidget#evidenceTree { background: #ffffff; border: none; }
             QTreeWidget#evidenceTree::item { padding: 5px 3px; }
             QLabel[role="muted"], QLabel#muted { color: #687570; }
             QLabel[role="title"] { color: #1e3b33; }
-            QLabel#brandMark {
-                background: #087f6b; color: white; border-radius: 11px;
-                font-size: 22px; font-weight: 700;
-            }
             QLabel#caseSummary {
                 background: #edf4f1; color: #48635a; border: 1px solid #dce9e2;
                 border-radius: 8px; padding: 8px 12px;

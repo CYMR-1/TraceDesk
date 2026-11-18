@@ -78,7 +78,7 @@ class ExportDialogTests(QtTests):
                 record = dict(path=str(path), size=size, recorded_size=10, deleted=True,
                               inode='7', read_note='簇链读取说明')
                 app.case.data = dict(exports=[record])
-                with patch('forensic.ui.controller.ExportResultDialog') as result_dialog:
+                with patch('forensic.features.export.ExportResultDialog') as result_dialog:
                     app.export()
                     _, work, callback = app.task.call_args.args
                     self.assertEqual(work(), path)

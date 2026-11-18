@@ -8,6 +8,7 @@
 | --- | --- |
 | `main.py`、`启动取证工作台.bat` | 启动入口 |
 | `forensic/core/` | 案件、哈希、审计、导出、报告和后台任务 |
+| `forensic/features/` | 启用清单、功能命令、按钮和页面 |
 | `forensic/engines/` | TSK 适配与 FAT 文件系统分析 |
 | `forensic/ui/` | PySide6 控制器、窗口、文件树和内容预览 |
 | `forensic/paths.py`、`forensic/assets/` | 统一资源定位与应用图标 |
@@ -32,7 +33,7 @@ python -m venv .venv
 
 当前工程已经包含官方 Windows TSK 程序和两份演示镜像，TSK 无需通过 pip 安装。若 TSK 文件丢失，运行 `powershell -File scripts/install_tsk.ps1`，或将环境变量 `TSK_BIN` 指向完整 TSK `bin` 目录。需要保留 DLL 与 licenses，不要只复制四个 exe。
 
-界面统一使用 PySide6 原生控件，采用白色主体、浅灰按钮与选中背景、深灰文字和图标。布局为左侧完整文件树、右上文件列表、右下整行内容预览。Qt 6 自动处理高 DPI 和逻辑像素缩放；中文优先使用微软雅黑，文本和十六进制预览使用等宽字体。树、列表与内容支持滚动，区域之间可以拖动分隔条调整大小。所有 Python 第三方依赖只安装到本项目 `.venv`，使用清华镜像：
+界面统一使用 PySide6 原生控件，采用白色主体、浅灰背景、翠绿主操作和多彩文件图标。布局为左侧完整文件树、右上文件列表、右下整行内容预览。Qt 6 自动处理高 DPI 和逻辑像素缩放；中文优先使用微软雅黑，文本和十六进制预览使用等宽字体。树、列表与内容支持滚动，区域之间可以拖动分隔条调整大小。所有 Python 第三方依赖只安装到本项目 `.venv`，使用清华镜像：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
@@ -70,7 +71,7 @@ python -m venv .venv
 - 设计、评分对应、限制与 AI 参与说明见 [设计与验收说明.md](docs/设计与验收说明.md)。
 - 面向对象结构：`ApplicationLauncher` 管理入口和异常报告，`App` 协调操作，`WorkbenchView` / `FileBrowserView` 管理布局和文件树，`DesktopAppearance` 管理 DPI 与主题，`TaskRunner` 管理后台任务，`FilePreview` / `PreviewReader` 分离预览显示与读取，`Case` 和 `TSK` 保留原有取证业务接口。案件格式和取证流程保持不变。
 - 代码入口 `main.py`；控制器 `forensic/ui/controller.py`；窗口布局 `forensic/ui/workspace.py`；目录树和文件视图 `forensic/ui/browser.py`；对话框 `forensic/ui/views.py`；外观 `forensic/ui/appearance.py`；后台任务 `forensic/core/tasks.py`；案件逻辑 `forensic/core/case.py`；TSK 适配 `forensic/engines/tsk.py`。
-- 标题栏与任务栏使用原创灰阶“证据文件＋放大镜”图标，资源位于 `forensic/assets`。修改 SVG 后，可运行 `.\.venv\Scripts\python.exe scripts/make_icon.py` 重建 PNG 和多尺寸 ICO；重启程序生效。
+- 标题栏、任务栏和工作台左上角使用翠绿底、紫色镜框的“证据文件＋放大镜”图标，资源位于 `forensic/assets`。修改 SVG 后，可运行 `.\.venv\Scripts\python.exe scripts/make_icon.py` 重建 PNG 和多尺寸 ICO；重启程序生效。
 - 本次界面改版说明与真实窗口截图见 [实施与验证](docs/ui/实施与验证.md)。
 - `.\.venv\Scripts\python.exe scripts/package.py` 生成 `dist/学号_姓名_ForensicTool.zip`，提交前将文件名中的姓名和学号替换为本人信息。包内不含本地运行案件，解压后可重新运行演示脚本。
 

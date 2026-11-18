@@ -8,10 +8,11 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFrame, QHBoxLayout
                                QPushButton, QSplitter, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from ..core.case import display_time
+from ..core.formatting import display_time
 from .preview import FilePreview
 from .icons import entry_icon_kind, outline_icon
-from ..engines.tsk import can_export, entry_name, entry_status
+from .metrics import CONTROL_GAP, PANEL_GAP, PANEL_PADDING, SECTION_GAP
+from ..engines.tsk import entry_name, entry_status
 
 
 def label(text, role=None):
@@ -27,7 +28,7 @@ class FileBrowserView(QWidget):
     SCOPE_ROLE = Qt.ItemDataRole.UserRole + 2
     OFFSET_ROLE = Qt.ItemDataRole.UserRole + 3
 
-    def __init__(self, parent, appearance, commands):
+    def __init__(self, parent, appearance, commands, preview_actions=()):
         super().__init__(parent)
         self.appearance, self.commands = appearance, commands
         self.entries, self._items, self._nav_items, self._nodes = {}, {}, {}, {}
@@ -43,21 +44,18 @@ class FileBrowserView(QWidget):
         self._batch_timer.setSingleShot(True)
         self._batch_timer.timeout.connect(self._insert_batch)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 6, 0, 0)
-        layout.setSpacing(4)
-        self.load_button = self._button('加载 RAW 镜像', commands['load'])
-        self.load_button.setProperty('role', 'accent')
-        self.verify_button = self._button('校验完整性', commands['verify'])
+        layout.setContentsMargins(0, SECTION_GAP, 0, 0)
+        layout.setSpacing(SECTION_GAP)
         self.horizontal_split = QSplitter(Qt.Orientation.Horizontal)
         self.horizontal_split.setChildrenCollapsible(False)
-        self.horizontal_split.setHandleWidth(4)
+        self.horizontal_split.setHandleWidth(PANEL_GAP)
         layout.addWidget(self.horizontal_split, 1)
         nav_panel = QFrame()
         nav_panel.setObjectName('navigationPanel')
         nav_panel.setMinimumWidth(190)
         nav_layout = QVBoxLayout(nav_panel)
-        nav_layout.setContentsMargins(8, 10, 8, 8)
-        nav_layout.setSpacing(6)
+        nav_layout.setContentsMargins(PANEL_PADDING, PANEL_PADDING, PANEL_PADDING, PANEL_PADDING)
+        nav_layout.setSpacing(SECTION_GAP)
         nav_layout.addWidget(label('数据源 / 完整文件树', 'section'))
         self.navigation = QTreeWidget()
         self.navigation.setObjectName('evidenceTree')
@@ -84,7 +82,7 @@ class FileBrowserView(QWidget):
         self.horizontal_split.addWidget(nav_panel)
         self.split = QSplitter(Qt.Orientation.Vertical)
         self.split.setChildrenCollapsible(False)
-        self.split.setHandleWidth(4)
+        self.split.setHandleWidth(PANEL_GAP)
         self.split.setMinimumWidth(500)
         self.horizontal_split.addWidget(self.split)
         self.horizontal_split.setStretchFactor(0, 0)
@@ -93,8 +91,8 @@ class FileBrowserView(QWidget):
         results = QFrame()
         results.setObjectName('resultsPanel')
         result_layout = QVBoxLayout(results)
-        result_layout.setContentsMargins(8, 8, 8, 6)
-        result_layout.setSpacing(6)
+        result_layout.setContentsMargins(PANEL_PADDING, PANEL_PADDING, PANEL_PADDING, SECTION_GAP)
+        result_layout.setSpacing(SECTION_GAP)
         filters = QHBoxLayout()
         self.suffix = QLineEdit()
         self.suffix.setPlaceholderText('后缀，如 .txt')
@@ -153,14 +151,21 @@ class FileBrowserView(QWidget):
         content = QFrame()
         content.setObjectName('previewPanel')
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(8, 8, 8, 8)
-        content_layout.setSpacing(6)
+        content_layout.setContentsMargins(PANEL_PADDING, PANEL_PADDING, PANEL_PADDING, PANEL_PADDING)
+        content_layout.setSpacing(SECTION_GAP)
         content_header = QHBoxLayout()
         content_header.addWidget(label('内容预览', 'section'))
         content_header.addStretch()
-        self.export_button = self._button('导出所选文件', commands['export'])
-        self.export_button.setProperty('role', 'soft')
-        content_header.addWidget(self.export_button)
+        content_header.setSpacing(CONTROL_GAP)
+        self.preview_actions = preview_actions
+        self.file_action_buttons = {}
+        for action in preview_actions:
+            button = self._button(action.title, commands[action.key])
+            if action.role:
+                button.setProperty('role', action.role)
+            self.file_action_buttons[action.key] = button
+            content_header.addWidget(button)
+        self.export_button = self.file_action_buttons.get('export')
         content_layout.addLayout(content_header)
         self.preview = FilePreview(content)
         self.preview.setMinimumHeight(160)
@@ -179,8 +184,14 @@ class FileBrowserView(QWidget):
     @staticmethod
     def _button(text, callback):
         button = QPushButton(text)
-        button.clicked.connect(callback)
+        button.clicked.connect(lambda checked=False: callback())
         return button
+
+    def _update_file_actions(self, entry=None):
+        for action in self.preview_actions:
+            enabled = (not self._busy and entry is not None
+                       and (action.accepts_entry is None or action.accepts_entry(entry)))
+            self.file_action_buttons[action.key].setEnabled(enabled)
 
     def set_context(self, evidence, scans=()):
         self._evidence = evidence
@@ -208,7 +219,7 @@ class FileBrowserView(QWidget):
         self.cancel_display()
         self.preview.clear()
         self.detail.setText('选择目录定位文件；拖动分隔条调整树、列表和内容区域。')
-        self.export_button.setEnabled(False)
+        self._update_file_actions()
         with QSignalBlocker(self.tree), QSignalBlocker(self.navigation):
             self.tree.clear()
             self.navigation.clear()
@@ -354,7 +365,7 @@ class FileBrowserView(QWidget):
             self.tree.setUpdatesEnabled(True)
         self._update_counts()
         if not self.tree.selectedItems():
-            self.export_button.setEnabled(False)
+            self._update_file_actions()
             self.preview.clear('没有匹配项' if not self._visible_count else '请选择文件')
             self.detail.setText('当前目录没有匹配项，左侧保留完整文件树。' if not self._visible_count
                                 else '请选择文件查看内容。')
@@ -397,7 +408,7 @@ class FileBrowserView(QWidget):
         selected = self.tree.selectedItems()
         entry = selected[0].data(0, Qt.ItemDataRole.UserRole) if selected else None
         if entry is None:
-            self.export_button.setEnabled(False)
+            self._update_file_actions()
         else:
             node = self._nav_items[selected[0].data(0, self.ROW_ROLE)]
             with QSignalBlocker(self.navigation):
@@ -407,7 +418,7 @@ class FileBrowserView(QWidget):
                     parent.setExpanded(True)
                     parent = parent.parent()
                 self.navigation.scrollToItem(node)
-            self.export_button.setEnabled(not self._busy and can_export(entry))
+            self._update_file_actions(entry)
         self.commands['select']()
 
     def _open_directory(self, item, _column):
@@ -426,10 +437,10 @@ class FileBrowserView(QWidget):
 
     def set_busy(self, busy):
         self._busy = busy
-        for widget in (self.filter_button, self.load_button, self.verify_button,
+        for widget in (self.filter_button,
                        self.reset_button, self.suffix, self.keyword, self.status_filter,
                        self.navigation, self.tree, self.expand_button, self.collapse_button):
             widget.setEnabled(not busy)
         selected = self.tree.selectedItems()
         entry = selected[0].data(0, Qt.ItemDataRole.UserRole) if selected else None
-        self.export_button.setEnabled(not busy and entry is not None and can_export(entry))
+        self._update_file_actions(entry)

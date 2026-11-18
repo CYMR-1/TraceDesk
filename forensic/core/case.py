@@ -7,41 +7,12 @@ import os
 import re
 import threading
 import uuid
-from datetime import datetime, timedelta, timezone
 from itertools import count
 from pathlib import Path
+from .formatting import EAST_8, now, display_time, deleted_export_summary
+from .reporting import render_report
 from ..engines.fat import fat_regions
-from ..engines.tsk import TSK, can_export, deleted_source_note, entry_name, entry_status
-
-
-EAST_8 = timezone(timedelta(hours=8))
-
-
-def now():
-    return datetime.now(EAST_8).isoformat()
-
-
-def deleted_export_summary(record):
-    if not record.get('deleted'):
-        return ''
-    result = '部分导出' if record['size'] < record['recorded_size'] else '已导出'
-    size = f"{result} {record['size']} / {record['recorded_size']} 字节"
-    return ' · '.join(filter(None, (deleted_source_note(record), f"inode {record['inode']}",
-                                   size, record.get('read_note'))))
-
-
-def display_time(value, *, compact=False):
-    """将案件里的 ISO 时间或文件系统的 Unix 时间戳显示为东八区时间。"""
-    if isinstance(value, str):
-        stamp = datetime.fromisoformat(value)
-        if stamp.tzinfo is None:
-            stamp = stamp.replace(tzinfo=timezone.utc)
-        stamp = stamp.astimezone(EAST_8)
-    else:
-        if value <= 0:
-            return '未记录'
-        stamp = datetime.fromtimestamp(value, EAST_8)
-    return stamp.strftime('%Y-%m-%d %H:%M:%S') if compact else stamp.isoformat()
+from ..engines.tsk import TSK, can_export, entry_name, entry_status
 
 
 def canonical(value):
@@ -402,44 +373,8 @@ class Case:
             conclusion = '通过：本次报告生成时镜像 SHA-256 与初始固定值一致。'
         self.log('REPORT_GENERATE', 'Markdown', '开始')
         records = self.check_audit()
-        e = self.data['evidence']
-        def cell(value):
-            return str(value).replace('|', '\\|').replace('\n', ' ').replace('\r', ' ').replace('<', '&lt;').replace('>', '&gt;')
-        lines = ['# 电子数据取证报告', '', f'生成时间（东八区）：{now()}', '', '## 案件信息', '']
-        for label, key in [('案件编号','number'), ('取证人员','examiner'), ('取证对象','target')]:
-            lines.append(f'- {label}：{cell(self.data[key])}')
-        lines.append(f'- 建立时间：{display_time(self.data["created"])}')
-        lines += ['', '## 原始证据与完整性', '', f'- 路径：{cell(e["path"])}', f'- 字节数：{e["size"]}',
-                  f'- 初始 SHA-256：`{e["sha256"]}`', f'- 当前 SHA-256：`{self.data["verification"]["actual"]}`',
-                  f'- 校验结论：{conclusion}', '', '## 文件清单摘要', '',
-                  f'已识别 {len(e["partitions"])} 个分区；当前清单共 {len(self.data["inventory"])} 项（最多列出 200 项）。', '']
-        scans = {p['offset']: p for p in self.data.get('partition_scans', [])}
-        for partition in e['partitions']:
-            scan = scans.get(partition['offset'])
-            state = (f'已读取 {scan["count"]} 项' if scan['status'] == 'ready'
-                     else f'无法读取：{scan["error"]}') if scan else '未完成全部分区读取'
-            lines.append(f'- 分区偏移 {partition["offset"]}：{cell(partition["description"])}；{cell(state)}')
-        lines += ['', '| 分区偏移 | 路径 | 状态 | inode | 字节数 | M (UTC+8) | A (UTC+8) | C (UTC+8) |',
-                  '| ---: | --- | --- | --- | ---: | --- | --- | --- |']
-        for row in self.data['inventory'][:200]:
-            dates = [display_time(row[k]) for k in ('mtime','atime','ctime')]
-            lines.append('| ' + ' | '.join(map(cell, [row['offset'], row['path'], entry_status(row), row['inode'], row['size'], *dates])) + ' |')
-        lines += ['', '## 导出副本', '']
-        for row in self.data['exports']:
-            lines.append(f'- 分区偏移 {row["offset"]} · {cell(row["source"])} → {cell(row["path"])}；SHA-256：`{row["sha256"]}`')
-            if row.get('deleted'):
-                lines.append('  ' + cell(deleted_export_summary(row)))
-        lines += ['', '## 审计日志摘要', '', f'审计链验证通过；当前 {len(records)} 条；锚点：`{records[-1]["hash"]}`。', '',
-                  '| 时间 (UTC+8) | 主体 | 操作 | 对象 | 结果 |', '| --- | --- | --- | --- | --- |']
-        for row in records[-100:]:
-            fields = [display_time(row['timestamp']), row['actor'], row['action'], row['subject'], row['result']]
-            lines.append('| ' + ' | '.join(map(cell, fields)) + ' |')
-        lines += ['', '## 取证人员确认', '', '确认人：________________    日期：________________', '',
-                  '## 适用边界', '', '本工具为教学原型，实施应用层只读约束，不替代硬件写保护器或法定资质认证。',
-                  'MAC 时间来自文件系统元数据，可能被修改；C 表示元数据变更时间，并非通用的创建时间。',
-                  '日志哈希链和本地锚点可发现意外修改或单独截断，不能抵抗同时重写全部案件数据的攻击者。',
-                  '案件库与镜像位于独立目录；若要求不同物理介质，需由操作人员另行安排。', '']
+        content = render_report(self.data, records, conclusion)
         destination = self.folder / 'reports' / ('report_' + uuid.uuid4().hex[:12] + '.md')
-        destination.write_text('\n'.join(lines), encoding='utf-8')
+        destination.write_text(content, encoding='utf-8')
         self.log('REPORT_GENERATE', destination, '成功', sha256=sha256(destination))
         return destination

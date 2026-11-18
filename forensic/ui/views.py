@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..paths import CASES_DIR
+from .metrics import SECTION_GAP
 
 
 class ReadOnlyTextPanel(QWidget):
@@ -17,7 +18,7 @@ class ReadOnlyTextPanel(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 6, 0, 0)
+        layout.setContentsMargins(0, SECTION_GAP, 0, 0)
         self.text = QPlainTextEdit(self)
         self.text.setReadOnly(True)
         self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)

@@ -146,13 +146,13 @@ class PreviewTests(unittest.TestCase):
 
     def test_partial_deleted_preview_keeps_pages_after_read_error(self):
         reader = PreviewReader.__new__(PreviewReader)
+        reader.page_bytes = 32
         reader.pages, reader.results, reader.closed = queue.Queue(), queue.Queue(), threading.Event()
         for page in (0, 1, 0, None):
             reader.pages.put(page)
         raw = bytes(range(51))
         process = SimpleNamespace(stdout=io.BytesIO(raw), wait=lambda: 1)
-        with patch('forensic.ui.preview.PAGE_BYTES', 32):
-            reader._read_pages(process, io.BytesIO(b'read error'), io.BytesIO(), 100, deleted=True)
+        reader._read_pages(process, io.BytesIO(b'read error'), io.BytesIO(), 100, deleted=True)
         self.assertEqual(reader.results.get_nowait()[:3], (0, raw[:35], 100))
         page, data, size, note = reader.results.get_nowait()
         self.assertEqual((page, data, size), (1, raw[29:], 51))

@@ -1,0 +1,7 @@
+"""工作台统一尺寸，单位为 Qt 逻辑像素。"""
+
+WINDOW_MARGIN = 6
+PANEL_GAP = 2
+PANEL_PADDING = 6
+SECTION_GAP = 3
+CONTROL_GAP = 6
