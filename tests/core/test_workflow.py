@@ -53,6 +53,22 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(reopened.data['exports']), len(self.manifest))
         self.assertEqual(sha256(self.image), json.loads(self.image.with_suffix('.manifest.json').read_text())['image_sha256'])
 
+    def test_file_hash_compare_and_note(self):
+        from forensic.core.file_tools import examine, record_note
+        entries = self.load_scan()
+        entry = next(e for e in entries if e['path'] == 'README.TXT')
+        result, details = examine(self.case, entry)
+        self.assertEqual(result, '成功')
+        self.assertEqual(details['sha256'], self.manifest['README.TXT']['sha256'])
+        copy = self.case.export(entry)
+        self.assertEqual(examine(self.case, entry, copy)[0], '一致')
+        copy.write_bytes(b'changed')
+        self.assertEqual(examine(self.case, entry, copy)[0], '不一致')
+        record_note(self.case, entry, '比对发现内容有变化')
+        record = self.case.check_audit()[-1]
+        self.assertEqual(record['details']['note'], '比对发现内容有变化')
+        self.assertEqual(record['details']['offset'], 2048)
+
     def test_unpartitioned_volume(self):
         image = self.root / 'volume.dd'
         create(image, False)

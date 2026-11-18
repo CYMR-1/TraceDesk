@@ -52,7 +52,8 @@ class WorkbenchView(QObject):
         self.tabs = TabbedView()
         self.tabs.tabBar().setObjectName('moduleTabs')
         layout.addWidget(self.tabs, 1)
-        self.browser = FileBrowserView(self.tabs, appearance, commands, features.actions_at('preview'))
+        self.browser = FileBrowserView(self.tabs, appearance, commands, features.actions_at('preview'),
+                                       features.actions_at('file_menu'))
         self.tabs.addTab(self.browser, '文件浏览')
         self.image_actions = QWidget(self.tabs)
         actions_layout = QHBoxLayout(self.image_actions)

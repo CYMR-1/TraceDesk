@@ -8,6 +8,7 @@ MODULES = {
     'cases': 'forensic.features.cases',
     'evidence': 'forensic.features.evidence',
     'files': 'forensic.features.files',
+    'file_tools': 'forensic.features.file_tools',
     'export': 'forensic.features.export',
     'report': 'forensic.features.report',
     'timeline': 'forensic.features.timeline',

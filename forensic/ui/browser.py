@@ -4,7 +4,7 @@ from pathlib import Path
 from PySide6.QtCore import QSignalBlocker, QSize, QTimer, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFrame, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit,
+                               QHeaderView, QLabel, QLineEdit, QMenu,
                                QPushButton, QSplitter, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
@@ -28,7 +28,7 @@ class FileBrowserView(QWidget):
     SCOPE_ROLE = Qt.ItemDataRole.UserRole + 2
     OFFSET_ROLE = Qt.ItemDataRole.UserRole + 3
 
-    def __init__(self, parent, appearance, commands, preview_actions=()):
+    def __init__(self, parent, appearance, commands, preview_actions=(), menu_actions=()):
         super().__init__(parent)
         self.appearance, self.commands = appearance, commands
         self.entries, self._items, self._nav_items, self._nodes = {}, {}, {}, {}
@@ -178,6 +178,10 @@ class FileBrowserView(QWidget):
         self.detail.setWordWrap(True)
         self.detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.detail)
+        self.menu_actions = (*preview_actions, *menu_actions)
+        for view in (self.navigation, self.tree):
+            view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            view.customContextMenuRequested.connect(lambda pos, view=view: self._file_menu(view, pos))
         self.detail_label = self.detail
         self.display([])
 
@@ -192,6 +196,22 @@ class FileBrowserView(QWidget):
             enabled = (not self._busy and entry is not None
                        and (action.accepts_entry is None or action.accepts_entry(entry)))
             self.file_action_buttons[action.key].setEnabled(enabled)
+
+    def _file_menu(self, view, pos):
+        item = view.itemAt(pos)
+        if self._busy or item is None:
+            return
+        entry = self.entries.get(item.data(0, self.ROW_ROLE))
+        if entry is None or entry['directory']:
+            return
+        view.setCurrentItem(item)
+        menu = QMenu(self)
+        for action in self.menu_actions:
+            if action.accepts_entry is None or action.accepts_entry(entry):
+                menu.addAction(action.title, lambda checked=False, key=action.key: self.commands[key]())
+        if menu.actions():
+            menu.exec(view.viewport().mapToGlobal(pos))
+        menu.deleteLater()
 
     def set_context(self, evidence, scans=()):
         self._evidence = evidence
