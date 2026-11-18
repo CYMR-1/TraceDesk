@@ -71,7 +71,7 @@ class WorkbenchView(QObject):
         self.browser.verify_button = self.action_buttons['verify']
         self.panels = {}
         for spec in features.panels.values():
-            panel = ReadOnlyTextPanel(self.tabs)
+            panel = (spec.widget_factory or ReadOnlyTextPanel)(self.tabs)
             self.panels[spec.key] = panel
             self.tabs.addTab(panel, spec.title)
         footer = QHBoxLayout()

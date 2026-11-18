@@ -32,6 +32,7 @@ class Panel:
     title: str
     render: Callable
     cache_key: Callable | None = None
+    widget_factory: Callable | None = None
 
 
 @dataclass(frozen=True)
