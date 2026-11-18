@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtGui import QCloseEvent
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QMainWindow
 
 from forensic.ui.controller import App
@@ -125,6 +126,41 @@ class FileBrowserTests(QtTests):
             alignment = app.tree.topLevelItem(0).textAlignment(column)
             self.assertTrue(alignment & Qt.AlignmentFlag.AlignHCenter)
             self.assertGreaterEqual(app.tree.columnWidth(column), 120)
+
+    def test_tree_locates_unvisited_file_on_later_page(self):
+        window, app = self.controller()
+        rows = [self.entry(path=f'深层/目录/{i:04d}.txt') for i in range(1150)]
+        app.display(rows)
+        browser = app.browser
+        branch = browser._nodes[(0, '深层')]
+        branch.setExpanded(True)
+        folder = browser._nodes[(0, '深层/目录')]
+        folder.setExpanded(True)
+        self.assertEqual(folder.childCount(), len(rows))
+        with patch.dict(browser.commands, select=lambda: None):
+            browser.navigation.setCurrentItem(folder.child(1111))
+        self.assertEqual(browser._page, 11)
+        self.assertEqual(app.selected_entry()['path'], rows[1111]['path'])
+
+    def test_timeline_number_detail_and_page_jump(self):
+        window, app = self.controller()
+        panel = app.view.panels['timeview']
+        records = [dict(time=1700000000, event='修改', status='现存', offset=0,
+                        inode=str(i), path=f'{i}.txt') for i in range(215)]
+        panel.set_text(('时间线', records))
+        with patch('forensic.ui.pagination.QInputDialog.getInt', return_value=(3, True)):
+            QTest.mouseDClick(panel.page_label, Qt.MouseButton.LeftButton)
+        item = panel.table.topLevelItem(14)
+        self.assertEqual(item.text(0), '215')
+        panel.table.setCurrentItem(item)
+        self.assertIn('215', panel.selection.text())
+        self.assertTrue(panel.text.isHidden())
+        panel.table.itemDoubleClicked.emit(item, 1)
+        self.assertFalse(panel.text.isHidden())
+        self.assertIn('214.txt', panel.text.toPlainText())
+        panel.search.setText('214.txt')
+        panel._search()
+        self.assertEqual(panel.table.topLevelItem(0).text(0), '215')
 
     def test_large_inventory_can_find_entries_beyond_first_page(self):
         root, app = self.controller()

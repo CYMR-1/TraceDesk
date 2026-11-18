@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 from ..engines.tsk import deleted_source_note
 from ..core.preview import PAGE_BYTES, PreviewReader, preview_rows, preview_text
 from .tabs import TabbedView
+from .pagination import PageLabel
 from .metrics import CONTROL_GAP, SECTION_GAP
 
 
@@ -87,7 +88,7 @@ class FilePreview(QWidget):
         bar = QHBoxLayout()
         bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(CONTROL_GAP)
-        self.status = QLabel()
+        self.status = PageLabel(lambda index: self.turn(index - self.page))
         self.status.setProperty('role', 'muted')
         self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.status.setTextFormat(Qt.TextFormat.PlainText)
@@ -105,7 +106,7 @@ class FilePreview(QWidget):
 
     def _set_status(self, message):
         self.status.setText(message)
-        self.status.setToolTip(message)
+        self.status.setToolTip(message + (' · 双击页码跳转' if self.status.total > 1 else ''))
 
     def _build_rows(self):
         fixed = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
@@ -154,6 +155,7 @@ class FilePreview(QWidget):
             self.reader.close()
             self.reader = None
         self.page = self.size = 0
+        self.status.set_pages(1, 1, show_text=False)
         self.window = b''
         self.source_note = ''
         self._image_checked = False
@@ -202,6 +204,7 @@ class FilePreview(QWidget):
         self.previous.setEnabled(False)
         self.next.setEnabled(False)
         self._set_status('正在读取…')
+        self.status.set_pages(1, 1, show_text=False)
         self._page_status = self.status.text()
         self.reader.pages.put(self.page + direction)
 
@@ -238,6 +241,8 @@ class FilePreview(QWidget):
         self.encoding_controls.setVisible(not showing_image)
         self.previous.setVisible(self._has_file and not showing_image)
         self.next.setVisible(self._has_file and not showing_image)
+        count = (self.size + PAGE_BYTES - 1) // PAGE_BYTES
+        self.status.set_pages(self.page + 1, count if not showing_image and self._page_status.startswith('第 ') else 1, show_text=False)
         self._set_status(self._image_status if showing_image else self._page_status)
 
     @staticmethod

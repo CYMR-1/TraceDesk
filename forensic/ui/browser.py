@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFrame, QHBoxLayout
 
 from ..core.formatting import display_time
 from .preview import FilePreview
+from .pagination import PageLabel
 from .icons import entry_icon_kind, outline_icon
 from .metrics import CONTROL_GAP, PANEL_GAP, PANEL_PADDING, SECTION_GAP
 from ..engines.tsk import entry_name, entry_status
@@ -73,8 +74,9 @@ class FileBrowserView(QWidget):
         self.navigation.header().setStretchLastSection(False)
         self.navigation.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.navigation.itemSelectionChanged.connect(self._navigation_selected)
+        self.navigation.itemExpanded.connect(self._expand_branch)
         nav_buttons = QHBoxLayout()
-        self.expand_button = self._button('全部展开', self.navigation.expandAll)
+        self.expand_button = self._button('全部展开', self._expand_all)
         self.collapse_button = self._button('全部折叠', self.navigation.collapseAll)
         nav_buttons.addWidget(self.expand_button)
         nav_buttons.addWidget(self.collapse_button)
@@ -156,6 +158,8 @@ class FileBrowserView(QWidget):
         self.previous_page = self._button('上一页', lambda: self._show_page(self._page - 1))
         self.next_page = self._button('下一页', lambda: self._show_page(self._page + 1))
         footer.addWidget(self.previous_page)
+        self.page_label = PageLabel(self._show_page)
+        footer.addWidget(self.page_label)
         footer.addWidget(self.next_page)
         result_layout.addLayout(footer)
         self.split.addWidget(results)
@@ -211,7 +215,8 @@ class FileBrowserView(QWidget):
         item = view.itemAt(pos)
         if self._busy or item is None:
             return
-        entry = self.entries.get(item.data(0, self.ROW_ROLE))
+        key = item.data(0, self.ROW_ROLE)
+        entry = self._inventory_by_id.get(key) if self._paged else self.entries.get(key)
         if entry is None or entry['directory']:
             return
         view.setCurrentItem(item)
@@ -296,14 +301,74 @@ class FileBrowserView(QWidget):
         self._paged = self._total > self.PAGING_THRESHOLD
         self.previous_page.setVisible(self._paged)
         self.next_page.setVisible(self._paged)
+        self.page_label.setVisible(self._paged)
         self._ordered = ordered if self._paged else []
         self._matching = []
+        self._branches, self._inventory_by_id, self._tree_by_id = {}, {}, {}
         if self._paged:
+            self._build_branches(ordered)
             self._matching = ordered
             self._show_page(0)
             return
         self._remaining = iter(ordered)
         self._insert_batch()
+
+    def _build_branches(self, ordered):
+        directories = {(row['offset'], self._path(row)) for row in ordered if row['directory']}
+        for row in ordered:
+            offset, path = row['offset'], self._path(row)
+            self._inventory_by_id[id(row)] = row
+            parent = path.rpartition('/')[0]
+            self._branches.setdefault((offset, parent), []).append((path, row))
+            while parent and (offset, parent) not in directories:
+                directories.add((offset, parent))
+                ancestor = parent.rpartition('/')[0]
+                self._branches.setdefault((offset, ancestor), []).append((parent, None))
+                parent = ancestor
+        for (offset, path), node in list(self._nodes.items()):
+            self._expand_branch(node)
+
+    def _expand_branch(self, node):
+        if not getattr(self, '_paged', False):
+            return
+        offset, scope = node.data(0, self.OFFSET_ROLE), node.data(0, self.SCOPE_ROLE)
+        if self._nodes.get((offset, scope)) is not node:
+            return
+        for path, row in self._branches.pop((offset, scope), ()):
+            directory = row is None or row['directory']
+            name = entry_name(row) if row else path.rpartition('/')[2]
+            if row and row.get('deleted'):
+                name += f'  [已删除 · {row["inode"] or "—"}]'
+            child = QTreeWidgetItem(node, [name or '/'])
+            child.setIcon(0, self._icons[entry_icon_kind(row) if row else 'folder'])
+            child.setData(0, self.OFFSET_ROLE, offset)
+            child.setToolTip(0, path)
+            if row:
+                child.setData(0, self.ROW_ROLE, id(row))
+                self._tree_by_id[id(row)] = child
+            if directory:
+                child.setData(0, self.SCOPE_ROLE, path)
+                owner = self._nodes.setdefault((offset, path), child)
+                if owner is child and (offset, path) in self._branches:
+                    child.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+
+    def _expand_all(self):
+        if self._paged:
+            pending = list(self._nodes.values())
+            while pending:
+                node = pending.pop()
+                self._expand_branch(node)
+                pending.extend(node.child(i) for i in range(node.childCount()) if node.child(i).data(0, self.SCOPE_ROLE) is not None)
+        self.navigation.expandAll()
+
+    def _locate_entry(self, entry):
+        offset = entry['offset']
+        parent = ''
+        for part in self._path(entry).split('/')[:-1]:
+            self._expand_branch(self._nodes[(offset, parent)])
+            parent = f'{parent}/{part}' if parent else part
+        self._expand_branch(self._nodes[(offset, parent)])
+        return self._tree_by_id[id(entry)]
 
     def _parent_node(self, offset, path):
         if not path or path == '.':
@@ -331,7 +396,7 @@ class FileBrowserView(QWidget):
             dates[2] = '不支持（' + filesystem + '）'
         item = QTreeWidgetItem(self.tree, [entry_name(entry) or '/', entry_status(entry),
                                           str(entry['size']), str(entry['inode'] or '—'), *dates, str(entry['offset'])])
-        key = id(item)
+        key = id(entry) if self._paged else id(item)
         item.setData(0, Qt.ItemDataRole.UserRole, entry)
         item.setData(0, self.ROW_ROLE, key)
         item.setToolTip(0, f'{entry["path"]}\n分区偏移 {entry["offset"]} 扇区')
@@ -344,9 +409,7 @@ class FileBrowserView(QWidget):
         elif entry['mode'].lower().startswith('v/'):
             item.setForeground(1, QColor('#7352b8'))
         if self._paged:
-            scope = path if entry['directory'] else path.rpartition('/')[0]
-            node = self._parent_node(entry['offset'], scope)
-            self.entries[key], self._items[key], self._nav_items[key] = entry, item, node
+            self.entries[key], self._items[key] = entry, item
             return
         nav_name = entry_name(entry) or '/'
         if entry.get('deleted'):
@@ -457,8 +520,8 @@ class FileBrowserView(QWidget):
         self.tree_count.setText(f'{len(self.partition_nodes)} 个分区 · 完整清单 {len(self.entries)} / {self._total} 项\n含目录、删除记录与系统区域')
         if self._paged:
             pages = max(1, (self._visible_count + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
-            self.result_count.setText(self.result_count.text() + f' · 第 {self._page + 1}/{pages} 页')
-            self.tree_count.setText('大清单分页浏览 · 左侧按浏览位置补充目录')
+            self.page_label.set_pages(self._page + 1, pages)
+            self.tree_count.setText(f'{len(self.partition_nodes)} 个分区 · 完整清单 {self._total} 项\n展开目录可查看全部子项')
 
     def _navigation_selected(self):
         selected = self.navigation.selectedItems()
@@ -467,10 +530,13 @@ class FileBrowserView(QWidget):
         node = selected[0]
         self._scope_offset = node.data(0, self.OFFSET_ROLE)
         key = node.data(0, self.ROW_ROLE)
-        entry = self.entries.get(key)
+        entry = self._inventory_by_id.get(key) if self._paged else self.entries.get(key)
         if entry is not None and not entry['directory']:
             self._scope = self._path(entry).rpartition('/')[0]
             self.reset_filter()
+            if self._paged and key not in self._items:
+                position = next(i for i, row in enumerate(self._matching) if row is entry)
+                self._show_page(position // self.PAGE_SIZE)
             self.tree.setCurrentItem(self._items[key])
             self.tree.scrollToItem(self._items[key])
         else:
@@ -493,7 +559,8 @@ class FileBrowserView(QWidget):
         if entry is None:
             self._update_file_actions()
         else:
-            node = self._nav_items[selected[0].data(0, self.ROW_ROLE)]
+            key = selected[0].data(0, self.ROW_ROLE)
+            node = self._locate_entry(self.entries[key]) if self._paged else self._nav_items[key]
             with QSignalBlocker(self.navigation):
                 self.navigation.setCurrentItem(node)
                 parent = node.parent()

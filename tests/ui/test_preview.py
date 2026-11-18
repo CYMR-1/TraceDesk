@@ -307,7 +307,7 @@ class PreviewTests(unittest.TestCase):
         reader = PreviewReader.__new__(PreviewReader)
         reader.page_bytes = 32
         reader.pages, reader.results, reader.closed = queue.Queue(), queue.Queue(), threading.Event()
-        for page in (0, 1, 0, None):
+        for page in (0, 3, 0, None):
             reader.pages.put(page)
         raw = bytes(range(51))
         process = SimpleNamespace(stdout=io.BytesIO(raw), wait=lambda: 1)

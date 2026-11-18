@@ -5,6 +5,7 @@ from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QLabel, QLineEdit, QPlainTextEdit, QSplitter, QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 from ..core.formatting import display_time
 from ..core.findings import OPERATIONS
+from .pagination import PageLabel
 
 
 def page(title, subtitle, sections):
@@ -79,17 +80,25 @@ class RecordsPanel(QWidget):
 
 class TimelinePanel(RecordsPanel):
     def __init__(self, parent):
-        super().__init__(parent, ['时间（UTC+8）', '事件', '状态', '分区偏移', 'inode', '镜像内路径'], [175, 150, 120, 100, 100], '搜索时间、事件、路径、状态或分区')
+        super().__init__(parent, ['序号', '时间（UTC+8）', '事件', '状态', '分区偏移', 'inode', '镜像内路径'], [78, 175, 150, 120, 100, 100], '搜索时间、事件、路径、状态或分区')
         self.search.textChanged.disconnect(self._populate)
         self.search.setPlaceholderText('输入时间、事件、路径、状态或分区，按回车搜索')
         self.search.returnPressed.connect(self._search)
         controls = QHBoxLayout()
+        self.layout().removeWidget(self.status)
+        controls.addWidget(self.status)
+        self.selection = QLabel('当前记录：—')
+        controls.addWidget(self.selection)
+        controls.addStretch(1)
         self.build = QPushButton('生成时间线')
         self.back = QPushButton('上一页')
         self.forward = QPushButton('下一页')
-        for button in (self.build, self.back, self.forward):
+        self.page_label = PageLabel(self._jump)
+        for button in (self.build, self.back, self.page_label, self.forward):
             controls.addWidget(button)
-        self.layout().insertLayout(1, controls)
+        self.layout().insertLayout(0, controls)
+        self.text.hide()
+        self.table.itemDoubleClicked.connect(self._open_detail)
         self.build.clicked.connect(lambda: self._start(self.set_text))
         self.back.clicked.connect(lambda: self._move(-1))
         self.forward.clicked.connect(lambda: self._move(1))
@@ -104,31 +113,56 @@ class TimelinePanel(RecordsPanel):
         if self._start:
             result = ('大清单 · 点击生成时间线，在后台整理事件。', [])
         self._title, self._matches = result
+        self._numbers = {id(row): number for number, row in enumerate(self._matches, 1)}
+        self.selection.setText('当前记录：—')
         super().set_text(result)
 
     def _search(self):
         query = self.search.text().strip().casefold()
         self._matches = ([r for r in self.records if query in str(r).casefold() or
-                          query in r['time'].replace('T', ' ').casefold()] if query else self.records)
+                          query in str(r['time']).replace('T', ' ').casefold()] if query else self.records)
         self._offset = 0
         self._populate()
 
     def _move(self, pages):
-        self._offset += pages * 100
+        self._jump(self._offset // 100 + pages)
+
+    def _jump(self, index):
+        self._offset = index * 100
         self._populate()
+
+    def _populate(self):
+        self.table.clear()
+        self.text.hide()
+        super()._populate()
+
+    def _detail(self, item, previous):
+        if item is not None:
+            self.selection.setText('当前记录：' + item.text(0))
+            self.text.hide()
+
+    def _open_detail(self, item, column):
+        self.selection.setText('当前记录：' + item.text(0))
+        self.text.setHtml(self.details(item.data(0, Qt.ItemDataRole.UserRole)))
+        self.text.show()
+        height = max(200, self.split.height())
+        self.split.setSizes([height * 2 // 3, height // 3])
 
     def page_records(self, query):
         count = len(self._matches)
+        self.page_label.set_pages(self._offset // 100 + 1, (count + 99) // 100)
         self.back.setEnabled(self._offset > 0)
         self.forward.setEnabled(self._offset + 100 < count)
         self.status.setText(self._title + (f' · 当前 {self._offset + 1}–{min(self._offset + 100, count)} / {count}' if count else ''))
         return self._matches[self._offset:self._offset + 100]
 
     def columns(self, r):
-        return [display_time(r['time'], compact=True), r['event'], r['status'], str(r['offset']), str(r['inode']), r['path']]
+        return [str(self._numbers[id(r)]), display_time(r['time'], compact=True), r['event'], r['status'], str(r['offset']), str(r['inode']), r['path']]
 
     def details(self, r):
-        return page(r['path'], '文件系统时间 · UTC+8', [('事件详情', list(zip(['时间', '事件', '状态', '分区偏移（扇区）', 'inode', '路径'], self.columns(r))))])
+        fields = [('时间', display_time(r['time'], compact=True)), ('事件', r['event']), ('状态', r['status']),
+                  ('分区偏移（扇区）', r['offset']), ('inode', r['inode']), ('路径', r['path'])]
+        return page(r['path'], '文件系统时间 · UTC+8', [('事件详情', fields)])
 
 
 class FindingsPanel(RecordsPanel):

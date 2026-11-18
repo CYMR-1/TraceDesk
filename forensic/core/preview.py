@@ -129,10 +129,12 @@ class PreviewReader:
             start = page * self.page_bytes
             left = max(0, start - 3)
             right = min(size, start + self.page_bytes + 3)
-            if right > cached:
+            while right > cached:
+                if self.closed.is_set():
+                    return
                 # 最后一页多读一个字节以确认 EOF 和 icat 的退出状态。
-                expected = right - cached
-                requested = expected + int(right == size)
+                expected = min(right - cached, 1024 * 1024)
+                requested = expected + int(cached + expected == size)
                 chunk = process.stdout.read(requested)
                 if len(chunk) < requested and process.wait():
                     errors.seek(0)
@@ -154,6 +156,10 @@ class PreviewReader:
                         process.kill()
                 cache.seek(cached)
                 cache.write(chunk)
-                cached = right
+                cached += len(chunk)
+            if start >= size and size:
+                page = (size - 1) // self.page_bytes
+                left = max(0, page * self.page_bytes - 3)
+                right = size
             cache.seek(left)
             self.results.put((page, cache.read(right - left), size, note))
