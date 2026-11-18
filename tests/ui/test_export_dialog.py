@@ -65,6 +65,20 @@ class ExportDialogTests(QtTests):
             self.assertIn(str(path), warning.call_args.args[2])
             self.assertTrue(dialog.isVisible())
 
+    def test_report_callback_shows_generated_path_in_export_result_dialog(self):
+        root, app = self.controller()
+        path = ROOT / '.test-work' / '取证报告.md'
+        app.case = Mock()
+        app.case.report.return_value = path
+        app.task = Mock()
+        with patch('forensic.features.report.ExportResultDialog') as result_dialog:
+            app.report()
+            _, work, callback = app.task.call_args.args
+            result_dialog.assert_not_called()
+            callback(work())
+            result_dialog.assert_called_once_with(root, path, '报告已生成')
+            result_dialog.return_value.exec.assert_called_once()
+
     def test_export_callback_uses_exported_path_and_preserves_partial_note(self):
         root, app = self.controller()
         path = ROOT / '.test-work' / '导出副本.txt'
