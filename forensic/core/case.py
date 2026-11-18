@@ -62,6 +62,15 @@ def export_filename(source_path):
     return windows_filename(source_path.rsplit('/', 1)[-1])
 
 
+def case_folder_name(*fields):
+    parts = [field.strip() for field in fields]
+    name = '-'.join(parts)
+    if len(name.encode('utf-16-le')) > 510:
+        # 超长时为三个字段分别分配空间，每段最多 84 个 UTF-16 码元。
+        name = '-'.join(p.encode('utf-16-le')[:168].decode('utf-16-le', 'ignore') for p in parts)
+    return windows_filename(name)
+
+
 class Case:
     def __init__(self, folder, actor=None):
         self.folder = Path(folder).resolve()
@@ -102,17 +111,15 @@ class Case:
         self._lease.close()
 
     @classmethod
-    def create(cls, root, number, examiner, target):
+    def create(cls, root, number, examiner, target, *, folder_name=None):
         fields = (number, examiner, target)
         if not all(isinstance(field, str) and field.strip() for field in fields):
             raise ValueError('案件编号、取证人员和取证对象不能为空')
         root = Path(root).resolve()
         root.mkdir(parents=True, exist_ok=True)
-        parts = [field.strip() for field in fields]
-        name = '-'.join(parts)
-        if len(name.encode('utf-16-le')) > 510:
-            # 超长时为三个字段分别分配空间，每段最多 84 个 UTF-16 码元。
-            name = '-'.join(p.encode('utf-16-le')[:168].decode('utf-16-le', 'ignore') for p in parts)
+        name = folder_name if folder_name is not None else case_folder_name(*fields)
+        if not name or name != windows_filename(name):
+            raise ValueError('案件文件夹名称含有无效字符')
         for index in count(1):
             suffix = '' if index == 1 else f' ({index})'
             folder = root / (windows_filename(name, 255 - len(suffix)) + suffix)

@@ -1,4 +1,5 @@
 """Qt 控制器、窗口生命周期及文件树刷新回归。"""
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -266,7 +267,7 @@ class NewCaseDialogTests(QtTests):
     def test_missing_fields_do_not_open_folder_picker(self):
         dialog, callback = self.dialog()
         with patch('forensic.ui.views.QMessageBox.warning') as warning, \
-                patch('forensic.ui.views.QFileDialog.getExistingDirectory') as picker:
+                patch('forensic.ui.views.choose_case_directory') as picker:
             dialog.create()
         warning.assert_called_once()
         picker.assert_not_called()
@@ -277,14 +278,14 @@ class NewCaseDialogTests(QtTests):
         for entry, text in zip(dialog.fields, (' CASE-1 ', '测试人员', '证据镜像')):
             entry.setText(text)
         callback.side_effect = OSError('案件库不可写')
-        with patch('forensic.ui.views.QFileDialog.getExistingDirectory', return_value='cases'), \
+        with patch('forensic.ui.views.choose_case_directory', return_value=Path('cases/自定义目录')), \
                 patch('forensic.ui.views.QMessageBox.critical') as error:
             dialog.create()
-        callback.assert_called_once_with('cases', 'CASE-1', '测试人员', '证据镜像')
+        callback.assert_called_once_with(Path('cases'), 'CASE-1', '测试人员', '证据镜像', folder_name='自定义目录')
         self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
         self.assertIn('案件库不可写', error.call_args.args[2])
         callback.side_effect = None
-        with patch('forensic.ui.views.QFileDialog.getExistingDirectory', return_value='cases'):
+        with patch('forensic.ui.views.choose_case_directory', return_value=Path('cases/自定义目录')):
             dialog.create()
         self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
 

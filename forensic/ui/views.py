@@ -8,6 +8,8 @@ from PySide6.QtWidgets import (
     QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QStyle, QVBoxLayout, QWidget,
 )
 
+from ..core.case import case_folder_name
+from .case_directory import choose_case_directory
 from ..paths import CASES_DIR
 from .metrics import SECTION_GAP
 
@@ -99,7 +101,7 @@ class NewCaseDialog(QDialog):
         title = QLabel('填写案件信息', self)
         title.setObjectName('sectionTitle')
         content.addWidget(title)
-        subtitle = QLabel('选择案件库，用于保存导出副本、日志和报告。', self)
+        subtitle = QLabel('下一步可选择位置并修改案件文件夹名称。', self)
         subtitle.setObjectName('muted')
         subtitle.setWordWrap(True)
         content.addWidget(subtitle)
@@ -114,7 +116,7 @@ class NewCaseDialog(QDialog):
         content.addLayout(form)
         buttons = QDialogButtonBox(self)
         cancel = buttons.addButton('取消', QDialogButtonBox.ButtonRole.RejectRole)
-        create = QPushButton('选择案件库并创建', self)
+        create = QPushButton('选择案件目录', self)
         create.setProperty('accent', True)
         create.setDefault(True)
         buttons.addButton(create, QDialogButtonBox.ButtonRole.AcceptRole)
@@ -128,13 +130,11 @@ class NewCaseDialog(QDialog):
         if not all(values):
             QMessageBox.warning(self, '信息不全', '请填写所有案件信息。')
             return
-        folder = QFileDialog.getExistingDirectory(
-            self, '选择案件库目录', str(CASES_DIR),
-            QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontUseNativeDialog)
-        if not folder:
+        folder = choose_case_directory(self, CASES_DIR / case_folder_name(*values))
+        if folder is None:
             return
         try:
-            self.on_create(folder, *values)
+            self.on_create(folder.parent, *values, folder_name=folder.name)
         except Exception as error:
             QMessageBox.critical(self, '创建失败', str(error))
             return

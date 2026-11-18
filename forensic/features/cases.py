@@ -10,8 +10,8 @@ from ..ui.views import NewCaseDialog
 from .api import Action, Feature
 
 
-def create_case(context, folder, number, examiner, target):
-    context.replace_case(Case.create(folder, number, examiner, target))
+def create_case(context, folder, number, examiner, target, *, folder_name=None):
+    context.replace_case(Case.create(folder, number, examiner, target, folder_name=folder_name))
 
 
 def new_case(context):
