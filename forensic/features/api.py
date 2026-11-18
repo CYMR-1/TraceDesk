@@ -14,6 +14,7 @@ class FeatureContext:
     refresh: Callable
     replace_case: Callable
     selected_entry: Callable
+    progress: Callable
 
 
 @dataclass(frozen=True)

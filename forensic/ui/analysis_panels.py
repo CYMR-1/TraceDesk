@@ -2,7 +2,7 @@
 from html import escape
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontDatabase
-from PySide6.QtWidgets import QLabel, QLineEdit, QPlainTextEdit, QSplitter, QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QPushButton, QLabel, QLineEdit, QPlainTextEdit, QSplitter, QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 from ..core.formatting import display_time
 from ..core.findings import OPERATIONS
 
@@ -56,16 +56,19 @@ class RecordsPanel(QWidget):
         self.table.clear()
         self.text.clear()
         query = self.search.text().strip().casefold()
-        for record in self.records:
+        for record in self.page_records(query):
             columns = self.columns(record)
-            if query and query not in (' '.join(columns) + ' ' + str(record)).casefold():
-                continue
             item = QTreeWidgetItem(self.table, columns)
             item.setData(0, Qt.ItemDataRole.UserRole, record)
             if record == selected:
                 self.table.setCurrentItem(item)
         if self.table.currentItem() is None:
             self.text.setHtml(page('选择一条记录查看详情', f'当前显示 {self.table.topLevelItemCount()} 条', []))
+
+    def page_records(self, query):
+        if not query:
+            return self.records
+        return (record for record in self.records if query in (' '.join(self.columns(record)) + ' ' + str(record)).casefold())
 
     def _detail(self, item, previous):
         if item is None:
@@ -77,6 +80,49 @@ class RecordsPanel(QWidget):
 class TimelinePanel(RecordsPanel):
     def __init__(self, parent):
         super().__init__(parent, ['时间（UTC+8）', '事件', '状态', '分区偏移', 'inode', '镜像内路径'], [175, 150, 120, 100, 100], '搜索时间、事件、路径、状态或分区')
+        self.search.textChanged.disconnect(self._populate)
+        self.search.setPlaceholderText('输入时间、事件、路径、状态或分区，按回车搜索')
+        self.search.returnPressed.connect(self._search)
+        controls = QHBoxLayout()
+        self.build = QPushButton('生成时间线')
+        self.back = QPushButton('上一页')
+        self.forward = QPushButton('下一页')
+        for button in (self.build, self.back, self.forward):
+            controls.addWidget(button)
+        self.layout().insertLayout(1, controls)
+        self.build.clicked.connect(lambda: self._start(self.set_text))
+        self.back.clicked.connect(lambda: self._move(-1))
+        self.forward.clicked.connect(lambda: self._move(1))
+        self._matches = []
+        self._offset = 0
+
+    def set_text(self, result):
+        self._start = result if callable(result) else None
+        self.build.setVisible(self._start is not None)
+        self.search.clear()
+        self._offset = 0
+        if self._start:
+            result = ('大清单 · 点击生成时间线，在后台整理事件。', [])
+        self._title, self._matches = result
+        super().set_text(result)
+
+    def _search(self):
+        query = self.search.text().strip().casefold()
+        self._matches = ([r for r in self.records if query in str(r).casefold() or
+                          query in r['time'].replace('T', ' ').casefold()] if query else self.records)
+        self._offset = 0
+        self._populate()
+
+    def _move(self, pages):
+        self._offset += pages * 100
+        self._populate()
+
+    def page_records(self, query):
+        count = len(self._matches)
+        self.back.setEnabled(self._offset > 0)
+        self.forward.setEnabled(self._offset + 100 < count)
+        self.status.setText(self._title + (f' · 当前 {self._offset + 1}–{min(self._offset + 100, count)} / {count}' if count else ''))
+        return self._matches[self._offset:self._offset + 100]
 
     def columns(self, r):
         return [display_time(r['time'], compact=True), r['event'], r['status'], str(r['offset']), str(r['inode']), r['path']]

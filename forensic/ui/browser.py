@@ -25,6 +25,8 @@ def label(text, role=None):
 
 
 class FileBrowserView(QWidget):
+    PAGE_SIZE = 100
+    PAGING_THRESHOLD = 1000
     ROW_ROLE = Qt.ItemDataRole.UserRole + 1
     SCOPE_ROLE = Qt.ItemDataRole.UserRole + 2
     OFFSET_ROLE = Qt.ItemDataRole.UserRole + 3
@@ -149,7 +151,13 @@ class FileBrowserView(QWidget):
         self.tree.itemDoubleClicked.connect(self._open_directory)
         result_layout.addWidget(self.tree, 1)
         self.result_count = label('0 项', 'muted')
-        result_layout.addWidget(self.result_count)
+        footer = QHBoxLayout()
+        footer.addWidget(self.result_count, 1)
+        self.previous_page = self._button('上一页', lambda: self._show_page(self._page - 1))
+        self.next_page = self._button('下一页', lambda: self._show_page(self._page + 1))
+        footer.addWidget(self.previous_page)
+        footer.addWidget(self.next_page)
+        result_layout.addLayout(footer)
         self.split.addWidget(results)
         content = QFrame()
         content.setObjectName('previewPanel')
@@ -285,6 +293,15 @@ class FileBrowserView(QWidget):
         ordered = sorted(entries, key=lambda e: (e['offset'], e['path'].count('/'), e['mode'].lower().startswith('v/'),
                                                  not e['directory'], e['path'], e.get('deleted', False)))
         self._total, self._visible_count = len(ordered), 0
+        self._paged = self._total > self.PAGING_THRESHOLD
+        self.previous_page.setVisible(self._paged)
+        self.next_page.setVisible(self._paged)
+        self._ordered = ordered if self._paged else []
+        self._matching = []
+        if self._paged:
+            self._matching = ordered
+            self._show_page(0)
+            return
         self._remaining = iter(ordered)
         self._insert_batch()
 
@@ -326,6 +343,11 @@ class FileBrowserView(QWidget):
             item.setForeground(1, QColor(self.appearance.DELETED))
         elif entry['mode'].lower().startswith('v/'):
             item.setForeground(1, QColor('#7352b8'))
+        if self._paged:
+            scope = path if entry['directory'] else path.rpartition('/')[0]
+            node = self._parent_node(entry['offset'], scope)
+            self.entries[key], self._items[key], self._nav_items[key] = entry, item, node
+            return
         nav_name = entry_name(entry) or '/'
         if entry.get('deleted'):
             nav_name += f'  [已删除 · {entry["inode"] or "—"}]'
@@ -384,6 +406,10 @@ class FileBrowserView(QWidget):
         self._apply_visibility()
 
     def _apply_visibility(self, *_):
+        if self._paged:
+            self._matching = [entry for entry in self._ordered if self._matches(entry)]
+            self._show_page(0)
+            return
         self._visible_count = 0
         self.tree.setUpdatesEnabled(False)
         try:
@@ -405,12 +431,34 @@ class FileBrowserView(QWidget):
             self.detail.setText('当前目录没有匹配项，左侧保留完整文件树。' if not self._visible_count
                                 else '请选择文件查看内容。')
 
+    def _show_page(self, page):
+        self._page = max(0, min(page, (len(self._matching) - 1) // self.PAGE_SIZE))
+        start = self._page * self.PAGE_SIZE
+        with QSignalBlocker(self.tree), QSignalBlocker(self.navigation):
+            self.tree.clear()
+            self.entries.clear()
+            self._items.clear()
+            self._nav_items.clear()
+            for entry in self._matching[start:start + self.PAGE_SIZE]:
+                self._insert_entry(entry)
+        self._visible_count = len(self._matching)
+        self.preview.clear('请选择文件' if self._matching else '没有匹配项')
+        self.detail.setText('双击目录进入；筛选会搜索当前范围的所有页。')
+        self._update_file_actions()
+        self._update_counts()
+        self.previous_page.setEnabled(self._page > 0)
+        self.next_page.setEnabled(start + self.PAGE_SIZE < self._visible_count)
+
     def _update_counts(self):
         scope = '全部条目（含子目录）' if self._scope is None else '/' + self._scope
         partition = '所有分区' if self._scope_offset is None else f'分区偏移 {self._scope_offset}'
         self.breadcrumb.setText(f'{self._image_name}  /  {partition}  /  {scope}')
         self.result_count.setText(f'当前范围 {self._visible_count} 项 · 完整清单 {self._total} 项 · 时间 UTC+8')
         self.tree_count.setText(f'{len(self.partition_nodes)} 个分区 · 完整清单 {len(self.entries)} / {self._total} 项\n含目录、删除记录与系统区域')
+        if self._paged:
+            pages = max(1, (self._visible_count + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+            self.result_count.setText(self.result_count.text() + f' · 第 {self._page + 1}/{pages} 页')
+            self.tree_count.setText('大清单分页浏览 · 左侧按浏览位置补充目录')
 
     def _navigation_selected(self):
         selected = self.navigation.selectedItems()

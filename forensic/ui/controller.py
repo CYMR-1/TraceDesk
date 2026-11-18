@@ -20,6 +20,7 @@ class App(QObject):
         super().__init__(root)
         self.root, self.case = root, None
         self.runner = TaskRunner()
+        self._work_progress = None
         self._closed = False
         self.appearance = DesktopAppearance(root)
         self.appearance.configure()
@@ -30,6 +31,7 @@ class App(QObject):
             task=lambda *args: self.task(*args),
             refresh=lambda **kwargs: self.refresh(**kwargs),
             replace_case=self._replace_case, selected_entry=lambda: self.selected_entry(),
+            progress=self._report_progress,
         )
         self.features = FeatureRegistry(load_features() if features is None else features, context)
         self.view = WorkbenchView(root, self.appearance, self.features)
@@ -70,12 +72,16 @@ class App(QObject):
             return False
         return True
 
-    def task(self, label, work, callback=None):
-        if not self.available():
+    def task(self, label, work, callback=None, requires_case=True):
+        if not self.available(requires_case):
             return
+        self._work_progress = None
         self.runner.submit(work, callback)
         self.status.setText(label + '…')
         self.view.set_busy(True)
+
+    def _report_progress(self, stage, done, total):
+        self._work_progress = stage, done, total
 
     def poll(self):
         if self._closed:
@@ -83,6 +89,13 @@ class App(QObject):
         try:
             self.preview.poll()
             result = self.runner.poll()
+            progress = self._work_progress
+            if result is None and self.busy and progress:
+                stage, done, total = progress
+                percent = 100 * done // total if total else 0
+                self.progress.setRange(0, 100 if total else 0)
+                self.progress.setValue(percent)
+                self.status.setText(f'{stage} · {percent}%' if total else stage + '…')
             if result is not None:
                 self.view.set_busy(False)
                 self.status.setText('操作失败' if result.error else '操作完成 · 应用层只读模式')

@@ -2,6 +2,7 @@
 import msvcrt
 import tempfile
 import hashlib
+import gzip
 import json
 import os
 import re
@@ -86,6 +87,14 @@ class Case:
             raise RuntimeError('案件已被占用或无法加锁') from error
         try:
             self.data = json.loads(metadata.read_text(encoding='utf-8'))
+            self._index = self.data.pop('inventory_file', None)
+            if self._index is not None:
+                if not re.fullmatch(r'inventory-[0-9a-f]{32}\.jsonl\.gz', self._index):
+                    raise ValueError('清单文件名无效')
+                with gzip.open(self.folder / self._index, 'rt', encoding='utf-8') as stream:
+                    self.data['inventory'] = [json.loads(line) for line in stream]
+                if len(self.data['inventory']) != self.data.pop('inventory_count'):
+                    raise ValueError('案件清单数量不匹配')
             for key in ('id', 'examiner', 'number', 'target', 'created'):
                 if not isinstance(self.data[key], str) or not self.data[key].strip():
                     raise ValueError(key)
@@ -100,6 +109,8 @@ class Case:
             self.actor = actor or self.data['examiner']
             self.lock = threading.RLock()
             self.check_audit()
+            if not self._index and self.data['inventory']:
+                self.save(inventory=self.data['inventory'])
         except (KeyError, TypeError, ValueError) as error:
             self.close()
             raise ValueError(f'案件数据损坏：{error}') from error
@@ -141,8 +152,36 @@ class Case:
         if self._lease.closed:
             raise RuntimeError('案件已关闭')
         candidate = {**self.data, **changes}
-        save_json(self.folder / 'case.json', candidate)
+        previous = self._index
+        index = previous
+        metadata = dict(candidate)
+        if 'inventory' in changes and candidate['inventory']:
+            index = f'inventory-{uuid.uuid4().hex}.jsonl.gz'
+            try:
+                with gzip.open(self.folder / index, 'xt', encoding='utf-8', compresslevel=1, newline='\n') as stream:
+                    for entry in candidate['inventory']:
+                        stream.write(canonical(entry) + '\n')
+            except BaseException:
+                (self.folder / index).unlink(missing_ok=True)
+                raise
+        if not candidate['inventory']:
+            index = None
+        if index:
+            metadata['inventory_file'] = index
+            metadata['inventory_count'] = len(metadata.pop('inventory'))
+        try:
+            save_json(self.folder / 'case.json', metadata)
+        except BaseException:
+            if index and index != previous:
+                (self.folder / index).unlink(missing_ok=True)
+            raise
+        self._index = index
         self.data = candidate
+        if previous and previous != index:
+            try:
+                (self.folder / previous).unlink()
+            except OSError:
+                pass
 
     def check_audit(self):
         previous = '0' * 64
@@ -255,16 +294,20 @@ class Case:
         scanned = {p['offset'] for p in self.data.get('partition_scans', [])}
         return expected != scanned
 
-    def scan_all(self, tsk=None):
+    def scan_all(self, tsk=None, progress=None):
         """汇总全部分区；单个分区不可读时保留失败状态，不影响其他分区。"""
         image = self.image()
+        def verify_stage(label):
+            return self.verify((lambda done, total: progress(label, done, total)) if progress else None)
         try:
-            if not self.verify():
+            if not verify_stage('扫描前校验'):
                 raise RuntimeError('镜像校验失败，禁止扫描')
             tool = tsk or TSK()
             inventory, scans, sections = [], [], []
             for partition in self.data['evidence']['partitions']:
                 offset = partition['offset']
+                if progress:
+                    progress(f'扫描分区（偏移 {offset} 扇区）', 0, 0)
                 try:
                     info, entries = self._read_partition(tool, offset)
                 except (RuntimeError, OSError, ValueError, OverflowError) as error:
@@ -276,8 +319,10 @@ class Case:
                     scans.append(dict(offset=offset, status='ready', count=len(entries)))
                     self.log('FILE_BROWSE', f'{image}@{offset}', '成功', count=len(entries))
                 sections.append(f'分区偏移 {offset} 扇区 · {partition["description"]}\n{info}')
-            if not self.verify():
+            if not verify_stage('扫描后校验'):
                 raise RuntimeError('扫描期间镜像变化，文件清单未保存')
+            if progress:
+                progress('保存文件清单', 0, 0)
             self.save(inventory=inventory, partition_scans=scans, offset=None,
                       fsstat='\n\n'.join(sections))
             failed = sum(p['status'] == 'error' for p in scans)

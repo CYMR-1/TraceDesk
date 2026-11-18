@@ -83,6 +83,30 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.case.data['evidence']['partitions'][0]['offset'], 0)
         self.assertTrue(any(e['path'] == 'DOCS/CASE.TXT' for e in self.case.scan(0)))
 
+    def test_legacy_inventory_migration_is_atomic_and_reused(self):
+        folder = self.case.folder
+        metadata = folder / 'case.json'
+        legacy = dict(self.case.data, inventory=[{'path': '证据.txt', 'size': 2**35}])
+        self.case.close()
+        original = json.dumps(legacy, ensure_ascii=False).encode('utf-8')
+        metadata.write_bytes(original)
+        with patch('forensic.core.case.save_json', side_effect=OSError('disk full')):
+            with self.assertRaises(OSError):
+                Case(folder)
+        self.assertEqual(metadata.read_bytes(), original)
+        self.assertFalse(list(folder.glob('inventory-*.gz')))
+        reopened = Case(folder)
+        self.addCleanup(reopened.close)
+        self.assertEqual(reopened.data, legacy)
+        stored = json.loads(metadata.read_bytes())
+        self.assertNotIn('inventory', stored)
+        self.assertEqual(stored['inventory_count'], 1)
+        index = folder / stored['inventory_file']
+        stamp = index.stat().st_mtime_ns
+        reopened.save(exports=[])
+        self.assertEqual(json.loads(metadata.read_bytes())['inventory_file'], index.name)
+        self.assertEqual(index.stat().st_mtime_ns, stamp)
+
     def test_filter(self):
         self.load_scan()
         entries = self.case.filtered('TXT', 'docs')
@@ -94,9 +118,11 @@ class WorkflowTests(unittest.TestCase):
         for path in ('石头.jpg', '素材', '素材/7134-中文20110102.doc'):
             with self.subTest(path=path):
                 body = f'0|/{path}|15|r/rrwxrwxrwx|0|0|128|0|0|0|0\r\n'.encode('cp936')
-                result = subprocess.CompletedProcess([], 0, stdout=body)
-                empty = subprocess.CompletedProcess([], 0, stdout=b'')
-                with patch('forensic.engines.tsk.TSK_TEXT_ENCODING', 'cp936'), patch.object(tool, 'run', side_effect=[result, empty]):
+                def write_listing(name, args, *, stdout, **kwargs):
+                    if '-u' in args:
+                        stdout.write(body)
+                    return subprocess.CompletedProcess([], 0)
+                with patch('forensic.engines.tsk.TSK_TEXT_ENCODING', 'cp936'), patch.object(tool, 'run', side_effect=write_listing):
                     entry, = tool.files(self.image, 128)
                 self.assertEqual(entry['path'], path)
                 self.assertEqual(entry['inode'], '15')

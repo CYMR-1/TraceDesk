@@ -67,12 +67,12 @@ class TSK:
             raise RuntimeError(f'缺少 Sleuth Kit 工具 {name}，请检查 TSK_BIN')
         return [exe, *map(str, args)]
 
-    def run(self, name, args, **streams):
+    def run(self, name, args, *, timeout=300, **streams):
         try:
-            return subprocess.run(self.command(name, args), timeout=300,
+            return subprocess.run(self.command(name, args), timeout=timeout,
                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), **streams)
         except subprocess.TimeoutExpired as error:
-            raise TimeoutError(f'{name} 执行超时（300 秒）') from error
+            raise TimeoutError(f'{name} 执行超时（{timeout} 秒）') from error
         except OSError as error:
             raise RuntimeError(f'无法启动 {name}：{error}') from error
 
@@ -103,14 +103,21 @@ class TSK:
         # FAT 等文件系统没有内置时区，本课程原型明确按 UTC 解释，避免依赖宿主时区。
         # 分别读取两种分配状态，以免把原名恰好以 " (deleted)" 结尾的正常文件误判为删除项。
         entries = []
+        timeout = max(300, 120 * ((Path(image).stat().st_size + 2**30 - 1) // 2**30))
         for flag in ('-u', '-d'):
-            raw = self.text('fls', ['-i', 'raw', '-o', offset, '-z', 'UTC', '-r', flag, '-p', '-m', '/', image])
-            entries.extend(self._body_entries(raw, offset, deleted=(flag == '-d')))
+            with tempfile.TemporaryFile() as output:
+                result = self.run('fls', ['-i', 'raw', '-o', offset, '-z', 'UTC', '-r', flag, '-p', '-m', '/', image],
+                                  stdout=output, stderr=subprocess.PIPE, timeout=timeout)
+                if result.returncode:
+                    raise RuntimeError(tsk_error(result.stderr))
+                output.seek(0)
+                lines = (line.decode(TSK_TEXT_ENCODING).rstrip('\r\n') for line in output)
+                entries.extend(self._body_entries(lines, offset, deleted=(flag == '-d')))
         return entries
 
     @staticmethod
-    def _body_entries(raw, offset, deleted):
-        for line in raw.splitlines():
+    def _body_entries(lines, offset, deleted):
+        for line in lines:
             parts = line.split('|')
             if len(parts) < 11:
                 raise RuntimeError('无法解析 fls bodyfile 行：' + line[:150])

@@ -126,6 +126,19 @@ class FileBrowserTests(QtTests):
             self.assertTrue(alignment & Qt.AlignmentFlag.AlignHCenter)
             self.assertGreaterEqual(app.tree.columnWidth(column), 120)
 
+    def test_large_inventory_can_find_entries_beyond_first_page(self):
+        root, app = self.controller()
+        entries = [self.entry(path=f'目录/{index:04d}.txt') for index in range(1051)]
+        app.display(entries)
+        self.assertEqual(app.tree.topLevelItemCount(), 100)
+        app.browser.next_page.click()
+        self.assertEqual(app.tree.topLevelItem(0).text(0), '0100.txt')
+        app.browser.apply_filter(entries[-1:])
+        self.assertEqual(app.tree.topLevelItemCount(), 1)
+        self.assertEqual(app.tree.topLevelItem(0).text(0), '1050.txt')
+        app.browser.reset_filter()
+        self.assertTrue(app.browser.next_page.isEnabled())
+
     def test_selected_partition_survives_audit_refresh(self):
         root, app = self.controller()
         data = dict(number='TEST', examiner='测试', target='镜像', offset=0,

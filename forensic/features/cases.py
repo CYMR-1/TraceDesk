@@ -2,8 +2,6 @@
 from functools import partial
 from pathlib import Path
 
-from PySide6.QtWidgets import QMessageBox
-
 from ..core.case import Case
 from ..paths import CASES_DIR
 from ..ui.views import NewCaseDialog
@@ -25,12 +23,15 @@ def open_case(context):
         return
     path = choose_file(context.root, '打开案件 case.json', str(CASES_DIR), '案件元数据 (case.json)')
     if path:
-        try:
+        def read_case():
             case = Case(Path(path).parent)
-            case.log('CASE_OPEN', path, '成功')
-            context.replace_case(case)
-        except Exception as error:
-            QMessageBox.critical(context.root, '打开失败', str(error))
+            try:
+                case.log('CASE_OPEN', path, '成功')
+            except Exception:
+                case.close()
+                raise
+            return case
+        context.task('打开案件并读取清单', read_case, context.replace_case, False)
 
 
 FEATURE = Feature('cases', actions=(

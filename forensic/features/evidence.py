@@ -19,7 +19,7 @@ def load(context):
             context.root, '选择案件库之外的 RAW 镜像', str(EVIDENCE_DIR),
             RAW_IMAGE_FILTER)
         if path:
-            context.task('固定镜像并识别分区', lambda: context.case().load(path),
+            context.task('固定镜像并识别分区', lambda: context.case().load(path, progress=lambda n, size: context.progress('固定镜像 SHA-256', n, size)),
                          lambda result: image_loaded(context, result))
 
 
@@ -30,13 +30,13 @@ def resume_partitions(context):
 
 def scan(context):
     if context.available() and context.case().data['evidence']:
-        context.task('自动读取所有分区与文件树', context.case().scan_all,
+        context.task('自动读取所有分区与文件树', lambda: context.case().scan_all(progress=context.progress),
                      lambda _: context.refresh(reset=True))
 
 
 def verify(context):
     if context.available():
-        context.task('流式校验 SHA-256', context.case().verify, lambda ok: QMessageBox.information(
+        context.task('流式校验 SHA-256', lambda: context.case().verify(lambda n, size: context.progress('校验 SHA-256', n, size)), lambda ok: QMessageBox.information(
             context.root, '完整性校验', '通过：与初始固定值一致。' if ok else '失败：原始镜像已发生变化！'))
 
 
