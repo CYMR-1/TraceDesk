@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QMessageBox
 from ..core.formatting import display_time
 from ..paths import EVIDENCE_DIR
 from ..ui.dialogs import RAW_IMAGE_FILTER, choose_file
+from ..ui.analysis_panels import EvidencePanel
 from .api import Action, Feature, Panel
 
 
@@ -60,5 +61,5 @@ FEATURE = Feature('evidence', requires=('cases',), actions=(
     Action('verify', verify, '校验完整性', 'evidence'),
     Action('scan', scan),
     Action('resume_partitions', resume_partitions),
-), panels=(Panel('info', '镜像与文件系统', information, information_version),),
+), panels=(Panel('info', '镜像与文件系统', lambda context: context.case().data if context.case() else {}, information_version, EvidencePanel),),
     case_changed=resume_partitions)

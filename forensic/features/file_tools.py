@@ -3,7 +3,8 @@ from PySide6.QtWidgets import QMessageBox
 from ..ui.dialogs import choose_file, enter_note
 from ..core.file_tools import examine, record_note
 from ..engines.tsk import can_export
-from ..core.findings import findings_text
+from ..core.findings import OPERATIONS
+from ..ui.analysis_panels import FindingsPanel
 from .api import Action, Feature, Panel
 
 
@@ -42,16 +43,23 @@ def inspect_file(context, compare=False):
 def findings(context):
     case = context.case()
     if case is None:
-        return '尚未打开案件'
+        return '尚未打开案件', []
     try:
         records = case.check_audit()
     except (ValueError, KeyError, RuntimeError, OSError) as error:
-        return f'操作记录校验失败：{error}'
-    return findings_text(records) or '尚无取证发现。右键文件可记录笔记、计算摘要或比对副本。'
+        return f'操作记录校验失败：{error}', []
+    groups = {}
+    for r in records:
+        if r['action'] in OPERATIONS:
+            d = r['details']
+            key = (r['subject'], d['offset'], d['inode'], d['deleted'], d['image_sha256'])
+            groups.setdefault(key, []).append(r)
+    return (f'取证发现 · {len(groups)} 个文件 · 日志链校验通过' if groups else
+            '尚无取证发现 · 右键文件可记录笔记、计算摘要或比对副本'), list(groups.values())
 
 
 FEATURE = Feature('file_tools', requires=('files',),
-                  panels=(Panel('findings', '取证发现', findings),), actions=(
+                  panels=(Panel('findings', '取证发现', findings, widget_factory=FindingsPanel),), actions=(
     Action('file_note', record, '记录取证发现', 'file_menu', accepts_entry=can_export),
     Action('file_hash', inspect_file, '计算哈希值（SHA-256）', 'file_menu', accepts_entry=can_export),
     Action('compare_file', lambda ctx: inspect_file(ctx, True), '校验一致性…', 'file_menu', accepts_entry=can_export),

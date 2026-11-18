@@ -238,6 +238,9 @@ class Case:
     def _read_partition(self, tool, offset):
         info = tool.text('fsstat', ['-i', 'raw', '-o', offset, self.image()])
         entries = tool.files(self.image(), offset)
+        match = re.search(r'^File System Type:\s*(\S+)', info, re.M)
+        for entry in entries:
+            entry['filesystem'] = match[1] if match else ''
         try:
             entries.extend(fat_regions(self.image(), offset, info, entries))
         except (ValueError, OSError, OverflowError) as error:

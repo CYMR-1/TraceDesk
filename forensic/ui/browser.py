@@ -1,5 +1,6 @@
 """完整文件树、当前目录列表与内容区；不负责证据读写。"""
 from pathlib import Path
+import re
 
 from PySide6.QtCore import QSignalBlocker, QSize, QTimer, Qt
 from PySide6.QtGui import QColor
@@ -38,6 +39,7 @@ class FileBrowserView(QWidget):
         self._busy = False
         self._image_name = '尚未加载镜像'
         self._evidence, self._scans = None, {}
+        self._filesystems = {}
         self.partition_nodes = {}
         self._icons = {name: outline_icon(name) for name in ('file', 'folder', 'disk', 'image', 'table', 'system')}
         self._batch_timer = QTimer(self)
@@ -124,9 +126,10 @@ class FileBrowserView(QWidget):
         self.tree = QTreeWidget()
         self.tree.setObjectName('fileResults')
         self.tree.setRootIsDecorated(False)
-        self.tree.setColumnCount(8)
+        self.tree.setColumnCount(9)
         self.tree.setHeaderLabels(['文件名称 / 镜像内路径', '状态', '字节数', 'inode',
-                                   'M 修改 (UTC+8)', 'A 访问 (UTC+8)', 'C 变更 (UTC+8)', '分区偏移（扇区）'])
+                                   'M 修改 (UTC+8)', 'A 访问 (UTC+8)', 'C 变更 (UTC+8)', 'B 创建 (UTC+8)', '分区偏移（扇区）'])
+        self.tree.headerItem().setToolTip(6, 'C 为元数据变更时间。FAT 不保存此时间；创建时间请查看 B 列。')
         self.tree.setUniformRowHeights(True)
         self.tree.setIconSize(QSize(18, 18))
         self.tree.setAlternatingRowColors(True)
@@ -137,7 +140,7 @@ class FileBrowserView(QWidget):
         header = self.tree.header()
         header.setStretchLastSection(False)
         header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        for column, width in enumerate((260, 120, 120, 120, 170, 170, 170, 140)):
+        for column, width in enumerate((260, 120, 120, 120, 170, 170, 170, 170, 140)):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
             self.tree.setColumnWidth(column, width)
         for column in (2, 3):
@@ -212,8 +215,18 @@ class FileBrowserView(QWidget):
             menu.exec(view.viewport().mapToGlobal(pos))
         menu.deleteLater()
 
-    def set_context(self, evidence, scans=()):
+    def set_context(self, evidence, scans=(), fsstat=''):
         self._evidence = evidence
+        self._filesystems = {}
+        # 兼容旧案件：从已保存的各分区 fsstat 识别时间能力，无须重扫证据。
+        offset = (evidence or {}).get('partitions', [{}])[0].get('offset', 0) if (evidence or {}).get('partitions') else 0
+        for line in fsstat.splitlines():
+            part = re.match(r'分区偏移 (\d+) 扇区', line)
+            kind = re.match(r'File System Type:\s*(\S+)', line)
+            if part:
+                offset = int(part[1])
+            if kind:
+                self._filesystems[offset] = kind[1]
         self._scans = {p['offset']: p for p in scans}
         self._image_name = Path(evidence['path']).name if evidence else '尚未加载镜像'
         self.image_node.setText(0, self._image_name)
@@ -295,7 +308,10 @@ class FileBrowserView(QWidget):
 
     def _insert_entry(self, entry):
         path = self._path(entry)
-        dates = [display_time(entry[key], compact=True) for key in ('mtime', 'atime', 'ctime')]
+        dates = [display_time(entry.get(key, 0), compact=True) for key in ('mtime', 'atime', 'ctime', 'crtime')]
+        filesystem = entry.get('filesystem') or self._filesystems.get(entry['offset'], '')
+        if not entry.get('ctime') and filesystem.upper() in ('FAT12', 'FAT16', 'FAT32', 'EXFAT'):
+            dates[2] = '不支持（' + filesystem + '）'
         item = QTreeWidgetItem(self.tree, [entry_name(entry) or '/', entry_status(entry),
                                           str(entry['size']), str(entry['inode'] or '—'), *dates, str(entry['offset'])])
         key = id(item)

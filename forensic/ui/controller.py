@@ -150,7 +150,7 @@ class App(QObject):
         evidence = data['evidence']
         self.summary.setText(f'案件 {data["number"]}  ·  取证人员 {data["examiner"]}  ·  对象 {data["target"]}\n' + (f'证据 {Path(evidence["path"]).name}  ·  已固定 SHA-256（完整摘要见“镜像与文件系统”）' if evidence else '尚未加载镜像'))
         self.summary.setToolTip(f'SHA-256：{evidence["sha256"]}' if evidence else '')
-        self.browser.set_context(evidence, data.get('partition_scans', []))
+        self.browser.set_context(evidence, data.get('partition_scans', []), data.get('fsstat', ''))
         if reset:
             self.display(data['inventory'])
         self.features.refresh_panels(self.view.panels, reset=reset)
