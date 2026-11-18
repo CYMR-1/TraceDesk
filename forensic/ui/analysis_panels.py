@@ -86,13 +86,15 @@ class TimelinePanel(RecordsPanel):
         self.search.returnPressed.connect(self._search)
         controls = QHBoxLayout()
         self.layout().removeWidget(self.status)
+        self.status.setObjectName('timelineStatus')
+        self.status.setWordWrap(False)
         controls.addWidget(self.status)
-        self.selection = QLabel('当前记录：—')
-        controls.addWidget(self.selection)
         controls.addStretch(1)
         self.build = QPushButton('生成时间线')
         self.back = QPushButton('上一页')
         self.forward = QPushButton('下一页')
+        for button in (self.back, self.forward):
+            button.setProperty('role', 'pager')
         self.page_label = PageLabel(self._jump)
         for button in (self.build, self.back, self.page_label, self.forward):
             controls.addWidget(button)
@@ -112,9 +114,10 @@ class TimelinePanel(RecordsPanel):
         self._offset = 0
         if self._start:
             result = ('大清单 · 点击生成时间线，在后台整理事件。', [])
-        self._title, self._matches = result
+        hint, self._matches = result
+        self.status.setToolTip(hint)
         self._numbers = {id(row): number for number, row in enumerate(self._matches, 1)}
-        self.selection.setText('当前记录：—')
+        self._current_number = '—'
         super().set_text(result)
 
     def _search(self):
@@ -138,11 +141,16 @@ class TimelinePanel(RecordsPanel):
 
     def _detail(self, item, previous):
         if item is not None:
-            self.selection.setText('当前记录：' + item.text(0))
+            self._update_status(item.text(0))
             self.text.hide()
 
+    def _update_status(self, number=None):
+        if number is not None:
+            self._current_number = number
+        self.status.setText(f'MAC/B 时间线·UTC+8·当前 {self._current_number}/{len(self.records)}')
+
     def _open_detail(self, item, column):
-        self.selection.setText('当前记录：' + item.text(0))
+        self._update_status(item.text(0))
         self.text.setHtml(self.details(item.data(0, Qt.ItemDataRole.UserRole)))
         self.text.show()
         height = max(200, self.split.height())
@@ -153,7 +161,7 @@ class TimelinePanel(RecordsPanel):
         self.page_label.set_pages(self._offset // 100 + 1, (count + 99) // 100)
         self.back.setEnabled(self._offset > 0)
         self.forward.setEnabled(self._offset + 100 < count)
-        self.status.setText(self._title + (f' · 当前 {self._offset + 1}–{min(self._offset + 100, count)} / {count}' if count else ''))
+        self._update_status()
         return self._matches[self._offset:self._offset + 100]
 
     def columns(self, r):

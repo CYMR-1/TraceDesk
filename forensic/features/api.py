@@ -67,7 +67,7 @@ class FeatureRegistry:
             for action in feature.actions:
                 if action.key in self.actions:
                     raise ValueError(f'命令标识重复：{action.key}')
-                if action.location not in (None, 'header', 'evidence', 'preview', 'file_menu'):
+                if action.location not in (None, 'brand', 'header', 'evidence', 'preview', 'file_menu'):
                     raise ValueError(f'未知按钮位置：{action.location}')
                 self.actions[action.key] = action
             for panel in feature.panels:

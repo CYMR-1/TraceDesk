@@ -38,6 +38,8 @@ class WorkbenchView(QObject):
         self.title_label.setFont(title_font)
         header.addWidget(self.title_label)
         header.addWidget(label('电子数据取证工作台', 'muted'))
+        for action in features.actions_at('brand'):
+            header.addWidget(self._action_button(action, commands))
         header.addStretch(1)
         self.buttons = []
         for action in features.actions_at('header'):
@@ -98,8 +100,9 @@ class WorkbenchView(QObject):
         return button
 
     def set_busy(self, busy):
-        for button in self.action_buttons.values():
-            button.setEnabled(not busy)
+        for key, button in self.action_buttons.items():
+            if key != 'help':
+                button.setEnabled(not busy)
         self.browser.set_busy(busy)
         self.progress.setRange(0, 0 if busy else 100)
         self.progress.setVisible(busy)

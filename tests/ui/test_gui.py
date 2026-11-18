@@ -153,7 +153,7 @@ class FileBrowserTests(QtTests):
         item = panel.table.topLevelItem(14)
         self.assertEqual(item.text(0), '215')
         panel.table.setCurrentItem(item)
-        self.assertIn('215', panel.selection.text())
+        self.assertEqual(panel.status.text(), 'MAC/B 时间线·UTC+8·当前 215/215')
         self.assertTrue(panel.text.isHidden())
         panel.table.itemDoubleClicked.emit(item, 1)
         self.assertFalse(panel.text.isHidden())
