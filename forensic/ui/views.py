@@ -4,7 +4,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+    QDialog, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QStyle, QVBoxLayout, QWidget,
 )
 
@@ -114,15 +114,18 @@ class NewCaseDialog(QDialog):
             form.addRow(label, entry)
             self.fields.append(entry)
         content.addLayout(form)
-        buttons = QDialogButtonBox(self)
-        cancel = buttons.addButton('取消', QDialogButtonBox.ButtonRole.RejectRole)
+        buttons = QHBoxLayout()
+        cancel = QPushButton('取消', self)
+        cancel.setAutoDefault(False)
+        buttons.addWidget(cancel)
+        buttons.addStretch(1)
         create = QPushButton('选择案件目录', self)
         create.setProperty('accent', True)
         create.setDefault(True)
-        buttons.addButton(create, QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.addWidget(create)
         cancel.clicked.connect(self.reject)
         create.clicked.connect(self.create)
-        content.addWidget(buttons)
+        content.addLayout(buttons)
         self.fields[0].setFocus(Qt.FocusReason.OtherFocusReason)
 
     def create(self):

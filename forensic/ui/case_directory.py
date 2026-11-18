@@ -31,9 +31,10 @@ def choose_case_directory(parent, suggested):
     tree.clicked.connect(lambda index: address.setText(str(
         Path(model.filePath(index)) / (Path(address.text()).name or suggested.name))))
     row = QHBoxLayout()
-    row.addStretch()
     cancel, create = QPushButton('取消'), QPushButton('创建案件')
     row.addWidget(cancel)
+    cancel.setAutoDefault(False)
+    row.addStretch(1)
     row.addWidget(create)
     layout.addLayout(row)
     cancel.clicked.connect(dialog.reject)

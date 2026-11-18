@@ -72,11 +72,13 @@ class FilePreview(QWidget):
 
     def _build_controls(self):
         self.encoding_controls = QWidget(self.formats)
+        self.encoding_controls.setObjectName('previewEncoding')
         encoding_layout = QHBoxLayout(self.encoding_controls)
         encoding_layout.setContentsMargins(CONTROL_GAP, 0, 0, 0)
         encoding_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         encoding_layout.addWidget(QLabel('编码'))
         self.encoding = QComboBox()
+        self.encoding.setObjectName('previewEncodingChoice')
         self.encoding.addItems(('ASCII', 'UTF-8'))
         self.encoding.currentTextChanged.connect(self.render)
         encoding_layout.addWidget(self.encoding)
@@ -137,12 +139,14 @@ class FilePreview(QWidget):
         self.content.addWidget(self.text)
         self.content.addWidget(self.image)
         self.formats = TabbedView()
+        self.formats.tabBar().setObjectName('previewTabs')
         self.formats.layout().setSpacing(SECTION_GAP)
         self.formats.addTab(self.content, '文本')
         self.formats.addTab(self.rows, '十六进制')
         self._layout.addWidget(self.formats, 1)
 
-    def clear(self, message='请选择文件'):
+    def _reset_data(self):
+        """停止旧读取并清空内容，不改变正在显示的格式标签。"""
         if self.image_reader:
             self.image_reader.close()
             self.image_reader = None
@@ -152,31 +156,45 @@ class FilePreview(QWidget):
         self.page = self.size = 0
         self.window = b''
         self.source_note = ''
-        self._image_mode = False
         self._image_checked = False
         self._image_status = ''
-        self._page_status = message
         self.image.reset()
-        self.content.setCurrentWidget(self.text)
-        self.formats.tabBar().setTabText(0, '文本')
         self.rows.clear()
         self.text.clear()
-        self._set_status(message)
         self.previous.setEnabled(False)
         self.next.setEnabled(False)
+
+    def _set_image_mode(self, enabled):
+        self._image_mode = enabled
+        self.content.setCurrentWidget(self.image if enabled else self.text)
+        title = '图片' if enabled else '文本'
+        if self.formats.tabBar().tabText(0) != title:
+            self.formats.tabBar().setTabText(0, title)
+
+    def clear(self, message='请选择文件'):
+        self._has_file = False
+        self.formats.hide()
+        self._reset_data()
+        self._set_image_mode(False)
+        self._page_status = message
         self._update_controls()
 
     def open_file(self, image, entry):
-        self.clear()
+        self._reset_data()
+        self._has_file = True
         self.source_note = deleted_source_note(entry)
         self._source, self._entry = image, dict(entry)
         self.size = entry['size']
+        # 常见图片立即显示图片标签；未知类型保持当前标签直到文件头读取完成。
+        if Path(entry.get('path', '')).suffix.lower() in IMAGE_SUFFIXES:
+            self._set_image_mode(True)
         if self.size:
-            self._set_status('正在读取…')
+            self._page_status = self._image_status = '正在读取…'
             self.reader = PreviewReader(image, entry, page_bytes=PAGE_BYTES)
         else:
-            self._set_status('删除记录为 0 字节，无内容可显示' if entry.get('deleted') else '空文件（0 字节）')
-        self._page_status = self.status.text()
+            self._set_image_mode(False)
+            self._page_status = '删除记录为 0 字节，无内容可显示' if entry.get('deleted') else '空文件（0 字节）'
+        self._update_controls()
 
     def turn(self, direction):
         if self.reader is None or not 0 <= self.page + direction < (self.size + PAGE_BYTES - 1) // PAGE_BYTES:
@@ -196,7 +214,9 @@ class FilePreview(QWidget):
         except queue.Empty:
             return
         if page is None:
-            self.clear('读取失败：' + note)
+            self._reset_data()
+            self._page_status = self._image_status = '读取失败：' + note
+            self._update_controls()
             return
         self.page, self.window, self.size = page, value, size
         if not self._image_checked:
@@ -213,9 +233,11 @@ class FilePreview(QWidget):
 
     def _update_controls(self, event=None):
         showing_image = self._image_mode and self.formats.currentIndex() == 0
+        self.formats.setVisible(self._has_file)
+        self.status.setVisible(self._has_file)
         self.encoding_controls.setVisible(not showing_image)
-        self.previous.setVisible(not showing_image)
-        self.next.setVisible(not showing_image)
+        self.previous.setVisible(self._has_file and not showing_image)
+        self.next.setVisible(self._has_file and not showing_image)
         self._set_status(self._image_status if showing_image else self._page_status)
 
     @staticmethod
@@ -232,10 +254,9 @@ class FilePreview(QWidget):
         # 用文件内容识别格式；保留常见扩展名的损坏图片提示。
         buffer, decoder = self._decoder(self.window)
         if not decoder.canRead() and Path(self._entry.get('path', '')).suffix.lower() not in IMAGE_SUFFIXES:
+            self._set_image_mode(False)
             return
-        self._image_mode = True
-        self.content.setCurrentWidget(self.image)
-        self.formats.tabBar().setTabText(0, '图片')
+        self._set_image_mode(True)
         self._image_status = '正在读取图片…'
         self.image.reset(self._image_status)
         self.formats.setCurrentIndex(0)

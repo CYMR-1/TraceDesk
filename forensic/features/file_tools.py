@@ -1,5 +1,6 @@
 """文件右键菜单中的取证记录、摘要计算与副本比较。"""
-from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
+from PySide6.QtWidgets import QMessageBox
+from ..ui.dialogs import choose_file, enter_note
 from ..core.file_tools import examine, record_note
 from ..engines.tsk import can_export
 from ..core.findings import findings_text
@@ -10,7 +11,7 @@ def record(context):
     if not context.available():
         return
     entry = context.selected_entry()
-    text, ok = QInputDialog.getMultiLineText(context.root, '记录取证发现', entry['path'])
+    text, ok = enter_note(context.root, '记录取证发现', entry['path'])
     if ok and text.strip():
         context.task('保存取证记录', lambda: record_note(context.case(), entry, text))
 
@@ -21,8 +22,7 @@ def inspect_file(context, compare=False):
     case, entry = context.case(), context.selected_entry()
     other = None
     if compare:
-        other, _ = QFileDialog.getOpenFileName(context.root, '选择与镜像内文件比较的本地副本',
-                                              str(case.folder / 'exports'))
+        other = choose_file(context.root, '选择与镜像内文件比较的本地副本', str(case.folder / 'exports'))
         if not other:
             return
     title = '校验文件一致性' if compare else '计算文件 SHA-256'

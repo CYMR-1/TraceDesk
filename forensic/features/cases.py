@@ -2,11 +2,12 @@
 from functools import partial
 from pathlib import Path
 
-from PySide6.QtWidgets import QFileDialog, QMessageBox
+from PySide6.QtWidgets import QMessageBox
 
 from ..core.case import Case
 from ..paths import CASES_DIR
 from ..ui.views import NewCaseDialog
+from ..ui.dialogs import choose_file
 from .api import Action, Feature
 
 
@@ -22,9 +23,7 @@ def new_case(context):
 def open_case(context):
     if not context.available(False):
         return
-    path, _ = QFileDialog.getOpenFileName(
-        context.root, '打开案件 case.json', str(CASES_DIR), '案件元数据 (case.json)',
-        options=QFileDialog.Option.DontUseNativeDialog)
+    path = choose_file(context.root, '打开案件 case.json', str(CASES_DIR), '案件元数据 (case.json)')
     if path:
         try:
             case = Case(Path(path).parent)

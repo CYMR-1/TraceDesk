@@ -49,6 +49,10 @@ class TabbedView(QWidget):
         self._align_height()
 
     def _align_height(self):
+        # 字体与局部样式须先应用，否则首次装配会缓存主题默认的较大标签高度。
+        self._bar.ensurePolished()
+        for control in self._controls:
+            control.ensurePolished()
         heights = [QTabBar.tabSizeHint(self._bar, i).height() for i in range(self._bar.count())]
         heights.extend(control.sizeHint().height() for control in self._controls)
         height = max(heights, default=0)

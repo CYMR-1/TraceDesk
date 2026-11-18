@@ -146,6 +146,42 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(preview.formats.tabBar().tabText(0), '文本')
         self.assertEqual(preview.text.toPlainText(), 'broken image')
 
+    def test_image_switch_never_temporarily_changes_tab_to_text(self):
+        raw = (ROOT / 'forensic/assets/tracedesk.png').read_bytes()
+        preview, source, entry = self.image_preview(raw)
+        for name in ('second.png', 'image-without-extension'):
+            with self.subTest(name=name), patch.object(
+                    preview.formats.tabBar(), 'setTabText', wraps=preview.formats.tabBar().setTabText) as change:
+                preview.open_file(source, dict(entry, path=name))
+                self.assertEqual(preview.formats.tabBar().tabText(0), '图片')
+                self.assertTrue(preview.formats.isVisible())
+                self.assertTrue(preview.image.original.isNull(), '不能在新文件名下显示旧图片')
+                self.wait_preview(preview)
+                self.assertFalse(preview.image.original.isNull())
+                self.assertEqual(preview.formats.tabBar().tabText(0), '图片')
+                self.assertNotIn(unittest.mock.call(0, '文本'), change.call_args_list)
+
+    def test_no_selection_hides_formats_encoding_and_paging(self):
+        preview = FilePreview(None)
+        self.addCleanup(preview.deleteLater)
+        self.addCleanup(preview.clear)
+        preview.show()
+        self.qt.processEvents()
+        self.assertFalse(preview.formats.isVisible())
+        self.assertFalse(preview.status.isVisible())
+        self.assertFalse(preview.previous.isVisible())
+        self.assertFalse(preview.next.isVisible())
+        self.assertFalse(preview.encoding.isVisible())
+        raw = (ROOT / 'forensic/assets/tracedesk.png').read_bytes()
+        loaded, _, _ = self.image_preview(raw)
+        loaded.clear('请选择目录中的文件')
+        self.qt.processEvents()
+        self.assertFalse(loaded.formats.isVisible())
+        self.assertFalse(loaded.status.isVisible())
+        self.assertFalse(loaded.previous.isVisible())
+        self.assertIsNone(loaded.reader)
+        self.assertIsNone(loaded.image_reader)
+
     def test_utf8_across_rows_and_pages(self):
         raw = b'a' * 15 + '取'.encode() + b'b' * (PAGE_BYTES - 19) + '🙂'.encode() + b'\xff\r\n'
         first = list(preview_rows(raw[:PAGE_BYTES + 3], 0, len(raw), 'UTF-8'))

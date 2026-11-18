@@ -151,6 +151,15 @@ class DesktopAppearance:
             }
             QTabBar::tab:selected { color: #086b55; background: #e5f4ec; border-color: #c8e6d7; }
             QTabBar::tab:hover:!selected { background: #edf0f2; }
+            QTabBar#previewTabs { font-size: 12px; }
+            QTabBar#previewTabs::tab {
+                padding: 3px 9px; border-radius: 5px; margin-right: 3px;
+            }
+            QWidget#previewEncoding QLabel { font-size: 12px; }
+            QComboBox#previewEncodingChoice {
+                font-size: 12px; padding: 2px 24px 2px 8px; min-height: 16px;
+                border-radius: 5px;
+            }
             QTabBar#moduleTabs::tab:selected {
                 background: #e0f1e9; color: #086b55; border-color: #bfdfcf; font-weight: 600;
             }

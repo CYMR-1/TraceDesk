@@ -45,8 +45,9 @@ class PartitionLoadingTests(unittest.TestCase):
         self.assertEqual({e['offset'] for e in self.app.entries.values()}, {2048, 20480})
 
     def test_loading_image_automatically_populates_every_partition(self):
+        self.image = self.image.rename(self.image.with_suffix('.bin'))
         self.app.create_case(self.folder / 'cases', 'AUTO', '测试', '自动加载')
-        with patch('PySide6.QtWidgets.QFileDialog.getOpenFileName', return_value=(str(self.image), '')):
+        with patch('forensic.features.evidence.choose_file', return_value=str(self.image)):
             self.app.load()
         self.finish()
         self.assertFalse(self.app.case.needs_partition_scan())
@@ -60,7 +61,6 @@ class PartitionLoadingTests(unittest.TestCase):
             self.assertTrue(case.needs_partition_scan())
         finally:
             case.close()
-        with patch('PySide6.QtWidgets.QFileDialog.getOpenFileName',
-                   return_value=(str(case.folder / 'case.json'), '')):
+        with patch('forensic.features.cases.choose_file', return_value=str(case.folder / 'case.json')):
             self.app.open_case()
         self.finish()

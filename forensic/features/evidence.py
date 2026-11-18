@@ -1,8 +1,9 @@
 """镜像载入、自动全分区扫描、完整性校验与镜像信息页。"""
-from PySide6.QtWidgets import QFileDialog, QMessageBox
+from PySide6.QtWidgets import QMessageBox
 
 from ..core.formatting import display_time
 from ..paths import EVIDENCE_DIR
+from ..ui.dialogs import RAW_IMAGE_FILTER, choose_file
 from .api import Action, Feature, Panel
 
 
@@ -13,10 +14,9 @@ def image_loaded(context, _):
 
 def load(context):
     if context.available():
-        path, _ = QFileDialog.getOpenFileName(
+        path = choose_file(
             context.root, '选择案件库之外的 RAW 镜像', str(EVIDENCE_DIR),
-            'RAW 镜像 (*.dd *.raw *.img);;所有文件 (*)',
-            options=QFileDialog.Option.DontUseNativeDialog)
+            RAW_IMAGE_FILTER)
         if path:
             context.task('固定镜像并识别分区', lambda: context.case().load(path),
                          lambda result: image_loaded(context, result))
