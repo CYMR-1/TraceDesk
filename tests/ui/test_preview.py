@@ -1,6 +1,7 @@
 import io
 import queue
 import shutil
+import struct
 import tempfile
 import threading
 import time
@@ -9,11 +10,12 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QBuffer, QIODevice, Qt
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QMainWindow, QTreeWidgetItemIterator
 
 from forensic.ui.controller import App
-from forensic.ui.preview import PAGE_BYTES, PreviewReader, preview_rows, preview_text
+from forensic.ui.preview import FilePreview, PAGE_BYTES, PreviewReader, preview_rows, preview_text
 from forensic.engines.tsk import TSK
 from forensic.paths import ROOT
 
@@ -22,6 +24,127 @@ class PreviewTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.qt = QApplication.instance() or QApplication([])
+
+    def image_preview(self, data, name='photo.png'):
+        test_root = ROOT / '.test-work'
+        test_root.mkdir(exist_ok=True)
+        temp = tempfile.TemporaryDirectory(dir=test_root)
+        self.addCleanup(temp.cleanup)
+        source = Path(temp.name) / 'image.dd'
+        # 两段不连续区域，验证完整图像读取与十六进制分页共享只读来源。
+        split = len(data) // 2
+        source.write_bytes(data[:split] + b'gap' + data[split:])
+        preview = FilePreview(None)
+        preview.resize(600, 350)
+        preview.show()
+        self.addCleanup(preview.deleteLater)
+        self.addCleanup(preview.clear)
+        entry = dict(path=name, size=len(data), extents=[[0, split], [split + 3, len(data) - split]])
+        preview.open_file(source, entry)
+        self.wait_preview(preview)
+        return preview, source, entry
+
+    def wait_preview(self, preview):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            self.qt.processEvents()
+            preview.poll()
+            if preview._image_checked and preview.image_reader is None and preview.status.text() != '正在读取…':
+                return
+            time.sleep(.01)
+        self.fail('预览读取超时：' + preview.status.text())
+
+    def test_image_content_detection_full_read_resize_hex_and_text_switch(self):
+        picture = QImage(128, 96, QImage.Format.Format_RGB32)
+        picture.fill(QColor('#087f6b'))
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        # BMP 超过一页，且扩展名不提示图片，验证实际文件头识别。
+        self.assertTrue(picture.save(buffer, 'BMP'))
+        data = bytes(buffer.data())
+        self.assertGreater(len(data), PAGE_BYTES)
+        preview, source, entry = self.image_preview(data, 'photo.bin')
+        self.assertEqual(preview.formats.tabBar().tabText(0), '图片')
+        self.assertEqual(preview.image.original.toImage().pixelColor(64, 48), QColor('#087f6b'))
+        self.assertFalse(preview.next.isVisible())
+        self.assertFalse(preview.encoding_controls.isVisible())
+        preview.resize(400, 250)
+        self.qt.processEvents()
+        pixmap = preview.image.pixmap()
+        self.assertLessEqual(pixmap.width(), preview.image.width())
+        self.assertLessEqual(pixmap.height(), preview.image.height())
+        self.assertAlmostEqual(pixmap.width() / pixmap.height(), 128 / 96, places=1)
+        preview.formats.setCurrentIndex(1)
+        self.assertTrue(preview.next.isVisible())
+        self.assertTrue(preview.next.isEnabled())
+        preview.next.click()
+        self.wait_preview(preview)
+        self.assertEqual(preview.rows.topLevelItem(0).text(0), '00001000')
+        preview.formats.setCurrentIndex(0)
+        self.assertIn('128 × 96', preview.status.text())
+        self.assertFalse(preview.image.original.isNull())
+        preview.open_file(source, dict(path='text.txt', size=3, extents=[[len(data) // 2, 3]]))
+        self.wait_preview(preview)
+        self.assertEqual(preview.formats.tabBar().tabText(0), '文本')
+        self.assertEqual(preview.text.toPlainText(), 'gap')
+        self.assertTrue(preview.image.original.isNull())
+        self.assertTrue(preview.encoding_controls.isVisible())
+
+    def test_corrupt_and_oversized_images_keep_hex_available(self):
+        preview, source, entry = self.image_preview(b'broken PNG data', 'broken.PNG')
+        self.assertIn('损坏', preview.status.text())
+        preview.formats.setCurrentIndex(1)
+        self.assertEqual(preview.rows.topLevelItem(0).text(1), b'broken PNG data'.hex(' ').upper())
+        with patch('forensic.ui.preview.MAX_IMAGE_BYTES', 4):
+            preview.open_file(source, entry)
+            self.wait_preview(preview)
+        self.assertIn('预览上限', preview.status.text())
+        self.assertIsNone(preview.image_reader)
+        preview.clear()
+        self.assertEqual(preview.status.text(), '请选择文件')
+        self.assertEqual(preview.formats.tabBar().tabText(0), '文本')
+
+    def test_image_from_real_fat_file_via_tsk(self):
+        picture = QImage(16, 16, QImage.Format.Format_RGB32)
+        picture.fill(QColor('#8752c4'))
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        self.assertTrue(picture.save(buffer, 'BMP'))
+        raw = bytes(buffer.data())
+        temp = tempfile.TemporaryDirectory(dir=ROOT / '.test-work')
+        self.addCleanup(temp.cleanup)
+        source = Path(temp.name) / 'fat.dd'
+        shutil.copyfile(ROOT / 'evidence' / 'demo.dd', source)
+        directory = (2048 + 1 + 2 * 64) * 512
+        with source.open('r+b') as stream:
+            stream.seek(directory + 3 * 32)
+            record = bytearray(stream.read(32))
+            cluster = struct.unpack_from('<H', record, 26)[0]
+            record[:11] = b'PHOTO   BMP'
+            struct.pack_into('<I', record, 28, len(raw))
+            stream.seek(directory + 3 * 32)
+            stream.write(record)
+            stream.seek(directory + 32 * 512 + (cluster - 2) * 512)
+            stream.write(raw)
+        entry = next(e for e in TSK().files(source, 2048) if e['path'] == 'PHOTO.BMP')
+        preview = FilePreview(None)
+        self.addCleanup(preview.deleteLater)
+        self.addCleanup(preview.clear)
+        preview.open_file(source, entry)
+        self.wait_preview(preview)
+        self.assertIn('16 × 16', preview.status.text())
+        self.assertEqual(preview.image.original.toImage().pixelColor(0, 0), QColor('#8752c4'))
+
+    def test_switching_files_cancels_pending_image_and_ignores_old_results(self):
+        preview, source, entry = self.image_preview(b'broken image', 'broken.png')
+        stale_reader = SimpleNamespace(close=unittest.mock.Mock(), results=queue.Queue())
+        preview.image_reader = stale_reader
+        preview.open_file(source, dict(entry, path='text.txt'))
+        stale_reader.close.assert_called_once()
+        stale_reader.results.put((0, b'old image', 9, ''))
+        self.wait_preview(preview)
+        self.assertEqual(preview.formats.tabBar().tabText(0), '文本')
+        self.assertEqual(preview.text.toPlainText(), 'broken image')
 
     def test_utf8_across_rows_and_pages(self):
         raw = b'a' * 15 + '取'.encode() + b'b' * (PAGE_BYTES - 19) + '🙂'.encode() + b'\xff\r\n'

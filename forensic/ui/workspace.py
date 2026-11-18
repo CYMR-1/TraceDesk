@@ -1,7 +1,7 @@
 """顶部案件工具、模块导航与工作台布局。"""
 from PySide6.QtCore import QObject, QSize, Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QHBoxLayout, QProgressBar, QPushButton,
+from PySide6.QtWidgets import (QHBoxLayout, QProgressBar, QPushButton, QSizePolicy,
                                QVBoxLayout, QWidget)
 
 from .browser import FileBrowserView, label
@@ -75,14 +75,17 @@ class WorkbenchView(QObject):
             self.panels[spec.key] = panel
             self.tabs.addTab(panel, spec.title)
         footer = QHBoxLayout()
+        self.browser.detail.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        footer.addWidget(self.browser.detail, 1)
         self.status = label('就绪 · 应用层只读 · 本地处理 · UTC+8', 'muted')
-        self.status.setWordWrap(True)
-        footer.addWidget(self.status, 1)
+        self.status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        footer.addWidget(self.status)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setTextVisible(False)
         self.progress.setFixedSize(160, 6)
+        self.progress.hide()
         footer.addWidget(self.progress)
         layout.addLayout(footer)
 
@@ -99,5 +102,6 @@ class WorkbenchView(QObject):
             button.setEnabled(not busy)
         self.browser.set_busy(busy)
         self.progress.setRange(0, 0 if busy else 100)
+        self.progress.setVisible(busy)
         if not busy:
             self.progress.setValue(0)

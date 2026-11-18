@@ -98,6 +98,13 @@ class DesktopAppearance:
             QPushButton:pressed { background: #dff0e8; }
             QPushButton:focus { border-color: #087f6b; }
             QPushButton:disabled { color: #98a29d; background: #f7f9f8; border-color: #e8ece9; }
+            QPushButton[role="pager"] {
+                padding: 2px 8px; min-height: 16px; border-radius: 5px; font-size: 12px;
+            }
+            QLabel#imagePreview {
+                background: #ffffff; border: 1px solid #e7ece9; border-radius: 5px;
+                color: #687570;
+            }
             QPushButton[role="accent"], QPushButton[accent="true"] {
                 background: #087f6b; color: #ffffff; border-color: #087f6b; font-weight: 600;
             }

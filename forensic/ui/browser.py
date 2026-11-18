@@ -175,9 +175,8 @@ class FileBrowserView(QWidget):
         self.split.setStretchFactor(1, 2)
         self.split.setSizes([370, 290])
         self.detail = label('选择目录定位文件；拖动分隔条调整树、列表和内容区域。', 'muted')
-        self.detail.setWordWrap(True)
+        self.detail.setWordWrap(False)
         self.detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(self.detail)
         self.menu_actions = (*preview_actions, *menu_actions)
         for view in (self.navigation, self.tree):
             view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
