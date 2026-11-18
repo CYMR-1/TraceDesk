@@ -43,8 +43,10 @@ class RecordsPanel(QWidget):
         split.setSizes([430, 240])
         layout.addWidget(split, 1)
         self.records = []
+        self.text.hide()
         self.search.textChanged.connect(self._populate)
         self.table.currentItemChanged.connect(self._detail)
+        self.table.itemDoubleClicked.connect(self._open_detail)
 
     def set_text(self, result):
         status, self.records = result
@@ -63,7 +65,9 @@ class RecordsPanel(QWidget):
             item.setData(0, Qt.ItemDataRole.UserRole, record)
             if record == selected:
                 self.table.setCurrentItem(item)
-        if self.table.currentItem() is None:
+        if not self.table.topLevelItemCount():
+            self.text.hide()
+        elif self.table.currentItem() is None and not self.text.isHidden():
             self.text.setHtml(page('选择一条记录查看详情', f'当前显示 {self.table.topLevelItemCount()} 条', []))
 
     def page_records(self, query):
@@ -74,8 +78,16 @@ class RecordsPanel(QWidget):
     def _detail(self, item, previous):
         if item is None:
             self.text.clear()
-        else:
+        elif not self.text.isHidden():
             self.text.setHtml(self.details(item.data(0, Qt.ItemDataRole.UserRole)))
+
+    def _open_detail(self, item, column):
+        needs_space = self.text.isHidden() or self.split.sizes()[1] == 0
+        self.text.show()
+        self._detail(item, None)
+        if needs_space:
+            height = max(200, self.split.height())
+            self.split.setSizes([height * 2 // 3, height // 3])
 
 
 class TimelinePanel(RecordsPanel):
@@ -99,8 +111,6 @@ class TimelinePanel(RecordsPanel):
         for button in (self.build, self.back, self.page_label, self.forward):
             controls.addWidget(button)
         self.layout().insertLayout(0, controls)
-        self.text.hide()
-        self.table.itemDoubleClicked.connect(self._open_detail)
         self.build.clicked.connect(lambda: self._start(self.set_text))
         self.back.clicked.connect(lambda: self._move(-1))
         self.forward.clicked.connect(lambda: self._move(1))
@@ -134,27 +144,15 @@ class TimelinePanel(RecordsPanel):
         self._offset = index * 100
         self._populate()
 
-    def _populate(self):
-        self.table.clear()
-        self.text.hide()
-        super()._populate()
-
     def _detail(self, item, previous):
         if item is not None:
             self._update_status(item.text(0))
-            self.text.hide()
+        super()._detail(item, previous)
 
     def _update_status(self, number=None):
         if number is not None:
             self._current_number = number
         self.status.setText(f'MAC/B 时间线·UTC+8·当前 {self._current_number}/{len(self.records)}')
-
-    def _open_detail(self, item, column):
-        self._update_status(item.text(0))
-        self.text.setHtml(self.details(item.data(0, Qt.ItemDataRole.UserRole)))
-        self.text.show()
-        height = max(200, self.split.height())
-        self.split.setSizes([height * 2 // 3, height // 3])
 
     def page_records(self, query):
         count = len(self._matches)

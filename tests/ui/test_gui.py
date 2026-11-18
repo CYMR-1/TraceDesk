@@ -30,6 +30,39 @@ class QtTests(unittest.TestCase):
 
 
 class ControllerTests(QtTests):
+    def test_record_panels_open_on_double_click_then_follow_single_click(self):
+        root, app = self.controller()
+        records = [dict(seq=index, action='FILE_NOTE', timestamp=1700000000, actor='测试',
+                        subject=name, result='成功', previous='previous-digest', hash='current-digest',
+                        details=dict(note=name, offset=0, inode=str(index), deleted=False, image_sha256='abc'))
+                   for index, name in enumerate(('first.txt', 'second.txt'), 1)]
+        timeline = [dict(time=r['timestamp'], path=r['subject'], event='修改', offset=0, inode='1', status='现存')
+                    for r in records]
+        root.show()
+        for key, data in [('audit', records), ('findings', [[r] for r in records]), ('timeview', timeline)]:
+            with self.subTest(panel=key):
+                panel = app.view.panels[key]
+                app.tabs.setCurrentIndex(list(app.view.panels).index(key) + 1)
+                panel.set_text(('测试', data))
+                self.qt_app.processEvents()
+                table = panel.table
+                first, second = [table.visualItemRect(table.topLevelItem(i)).center() for i in range(2)]
+                titles = ['second.txt', 'first.txt'] if key == 'audit' else ['first.txt', 'second.txt']
+                QTest.mouseClick(table.viewport(), Qt.MouseButton.LeftButton, pos=first)
+                self.assertTrue(panel.text.isHidden())
+                QTest.mouseDClick(table.viewport(), Qt.MouseButton.LeftButton, pos=first)
+                self.assertTrue(panel.text.isVisible())
+                self.assertIn(titles[0], panel.text.toPlainText())
+                sizes = panel.split.sizes()
+                QTest.mouseClick(table.viewport(), Qt.MouseButton.LeftButton, pos=second)
+                self.assertTrue(panel.text.isVisible())
+                self.assertEqual(panel.split.sizes(), sizes)
+                self.assertIn(titles[1], panel.text.toPlainText())
+                self.assertNotIn(titles[0], panel.text.toPlainText())
+                if key == 'audit':
+                    self.assertIn('previous-digest', panel.text.toPlainText())
+                    self.assertIn('current-digest', panel.text.toPlainText())
+
     def test_chained_scan_keeps_busy_controls_and_defers_refresh(self):
         root, app = self.controller()
         app.case = Mock()

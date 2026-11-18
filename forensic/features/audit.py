@@ -1,9 +1,7 @@
 """按操作显示已验证的审计链；原始记录可逐条查看。"""
 import json
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QLabel, QLineEdit, QPlainTextEdit, QTreeWidget,
-                               QTreeWidgetItem, QVBoxLayout, QWidget)
 from ..core.formatting import display_time
+from ..ui.analysis_panels import RecordsPanel, page
 from .api import Feature, Panel
 
 TITLES = {
@@ -25,61 +23,32 @@ def render(context):
     return f'日志链校验通过 · 共 {len(records)} 条操作', records
 
 
-class AuditPanel(QWidget):
+class AuditPanel(RecordsPanel):
     def __init__(self, parent):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        self.status = QLabel()
-        self.status.setTextFormat(Qt.TextFormat.PlainText)
-        layout.addWidget(self.status)
-        self.search = QLineEdit()
-        self.search.setPlaceholderText('搜索操作、人员、对象或结果')
-        layout.addWidget(self.search)
-        self.table = QTreeWidget()
-        self.table.setRootIsDecorated(False)
-        self.table.setAlternatingRowColors(True)
-        self.table.setHeaderLabels(['序号', '时间（UTC+8）', '操作人员', '操作', '结果', '对象'])
-        for index, width in enumerate((54, 153, 96, 135, 100)):
-            self.table.setColumnWidth(index, width)
-        layout.addWidget(self.table, 3)
-        self.text = QPlainTextEdit()
-        self.text.setReadOnly(True)
-        self.text.setPlaceholderText('选择一条操作查看完整审计记录')
-        layout.addWidget(self.text, 1)
-        self.records = []
-        self.table.currentItemChanged.connect(self._detail)
-        self.search.textChanged.connect(self._populate)
+        super().__init__(parent, ['序号', '时间（UTC+8）', '操作人员', '操作', '结果', '对象'],
+                         [54, 153, 96, 135, 100], '搜索操作、人员、对象或结果')
 
     def set_text(self, result):
-        status, self.records = result
-        self.status.setText(status)
-        self._populate()
+        status, records = result
+        super().set_text((status, list(reversed(records))))
 
-    def _populate(self):
-        current = self.table.currentItem()
-        selected = current.text(0) if current else None
-        self.table.clear()
-        self.text.clear()
-        query = self.search.text().strip().casefold()
-        for record in reversed(self.records):
-            columns = [str(record['seq']), display_time(record['timestamp'], compact=True),
-                       record['actor'], TITLES.get(record['action'], record['action']),
-                       record['result'], record['subject']]
-            if query and query not in ' '.join(columns).casefold():
-                continue
-            item = QTreeWidgetItem(self.table, columns)
-            item.setData(0, Qt.ItemDataRole.UserRole, record['seq'] - 1)
-            if columns[0] == selected:
-                self.table.setCurrentItem(item)
+    def columns(self, record):
+        return [str(record['seq']), display_time(record['timestamp'], compact=True),
+                record['actor'], TITLES.get(record['action'], record['action']),
+                record['result'], record['subject']]
 
-    def _detail(self, item, previous):
-        if item is None:
-            self.text.clear()
-        else:
-            record = self.records[item.data(0, Qt.ItemDataRole.UserRole)]
-            note = record['details'].get('note') or record['details'].get('error') or ''
-            self.text.setPlainText((note + '\n\n' if note else '') +
-                                   json.dumps(record, ensure_ascii=False, indent=2))
+    def details(self, record):
+        seq, _, actor, action, result, subject = self.columns(record)
+        sections = [('操作详情', [('时间（UTC+8）', display_time(record['timestamp'])),
+                              ('操作人员', actor), ('对象', subject), ('结果', result),
+                              ('操作代码', record['action'])])]
+        labels = {'note': '笔记', 'error': '错误', 'sha256': 'SHA-256', 'offset': '分区偏移（扇区）',
+                  'size': '字节数', 'count': '数量', 'keyword': '关键词', 'actual': '实测摘要'}
+        if record['details']:
+            sections.append(('操作参数与结果', [(labels.get(key, key), value if isinstance(value, str)
+                             else json.dumps(value, ensure_ascii=False)) for key, value in record['details'].items()]))
+        sections.append(('审计链', [('上一条记录哈希', record['previous']), ('本条记录哈希', record['hash'])]))
+        return page(f'#{seq} · {action}', '审计日志 · UTC+8', sections)
 
 
 FEATURE = Feature('audit', requires=('cases',), panels=(
