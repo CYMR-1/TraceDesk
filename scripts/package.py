@@ -3,6 +3,7 @@ from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 
 ROOT = Path(__file__).resolve().parent.parent
+DOC_FILES = ('README.md', '目录结构.md', '设计与验收说明.md')
 DEMO_FILES = ('demo.dd', 'demo.manifest.json', 'demo_volume.dd', 'demo_volume.manifest.json')
 
 
@@ -10,8 +11,9 @@ def package_files(root):
     """明确区分项目资料与本地证据、案件、环境及缓存。"""
     selected = [root / name for name in
                 ('main.py', '启动取证工作台.bat', 'README.md', 'requirements.txt', '.gitignore')]
-    for name in ('forensic', 'tests', 'scripts', 'docs', 'tools/sleuthkit-4.15.0-win32'):
+    for name in ('forensic', 'tests', 'scripts', 'tools/sleuthkit-4.15.0-win32'):
         selected.extend(sorted((root / name).rglob('*')))
+    selected.extend(root / 'docs' / name for name in DOC_FILES)
     selected.extend(root / 'evidence' / name for name in DEMO_FILES)
     for path in selected:
         if (not path.is_file() or path.is_symlink() or '__pycache__' in path.parts

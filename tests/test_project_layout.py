@@ -50,7 +50,7 @@ window.close()
             included = ['main.py', 'requirements.txt', 'README.md', '启动取证工作台.bat', '.gitignore',
                         'forensic/core/__init__.py', 'forensic/core/case.py', 'forensic/engines/tsk.py',
                         'forensic/ui/controller.py', 'forensic/assets/tracedesk.ico',
-                        'tests/ui/__init__.py', 'docs/validation/test-results.txt',
+                        'tests/ui/__init__.py', 'docs/README.md', 'docs/目录结构.md', 'docs/设计与验收说明.md',
                         'tools/sleuthkit-4.15.0-win32/bin/fls.exe',
                         'tools/sleuthkit-4.15.0-win32/bin/runtime.dll',
                         'tools/sleuthkit-4.15.0-win32/licenses/LICENSE.txt',
@@ -58,6 +58,7 @@ window.close()
             excluded = ['evidence/private.dd', 'evidence/private.manifest.json', 'evidence/desktop.ini',
                         'cases/private/case.json', 'logs/startup.log', '.venv/test.txt', '.git/config',
                         '.test-work/output.txt', 'forensic/__pycache__/old.pyc', 'docs/latest-demo.txt',
+                        'docs/validation/test-results.txt', 'docs/ui/README.md', 'docs/私有文档.md',
                         'AGENTS.md', 'docs/AGENTS.md']
             for name in included + excluded:
                 file = root / name
