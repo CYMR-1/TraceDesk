@@ -68,6 +68,13 @@ class WorkflowTests(unittest.TestCase):
         record = self.case.check_audit()[-1]
         self.assertEqual(record['details']['note'], '比对发现内容有变化')
         self.assertEqual(record['details']['offset'], 2048)
+        report = self.case.report().read_text(encoding='utf-8')
+        findings = report.split('## 文件取证发现')[1].split('## 审计日志摘要')[0]
+        self.assertIn(f"#{record['seq']}", findings)
+        self.assertIn('比对发现内容有变化', findings)
+        self.assertIn('不一致', findings)
+        self.assertIn(details['sha256'], findings)
+        self.assertIn('分区偏移 2048', findings)
 
     def test_unpartitioned_volume(self):
         image = self.root / 'volume.dd'

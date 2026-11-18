@@ -2,7 +2,8 @@
 from PySide6.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 from ..core.file_tools import examine, record_note
 from ..engines.tsk import can_export
-from .api import Action, Feature
+from ..core.findings import findings_text
+from .api import Action, Feature, Panel
 
 
 def record(context):
@@ -38,7 +39,19 @@ def inspect_file(context, compare=False):
     context.task(title, lambda: examine(case, entry, other), show)
 
 
-FEATURE = Feature('file_tools', requires=('files',), actions=(
+def findings(context):
+    case = context.case()
+    if case is None:
+        return '尚未打开案件'
+    try:
+        records = case.check_audit()
+    except (ValueError, KeyError, RuntimeError, OSError) as error:
+        return f'操作记录校验失败：{error}'
+    return findings_text(records) or '尚无取证发现。右键文件可记录笔记、计算摘要或比对副本。'
+
+
+FEATURE = Feature('file_tools', requires=('files',),
+                  panels=(Panel('findings', '取证发现', findings),), actions=(
     Action('file_note', record, '记录取证发现', 'file_menu', accepts_entry=can_export),
     Action('file_hash', inspect_file, '计算哈希值（SHA-256）', 'file_menu', accepts_entry=can_export),
     Action('compare_file', lambda ctx: inspect_file(ctx, True), '校验一致性…', 'file_menu', accepts_entry=can_export),

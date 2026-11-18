@@ -1,6 +1,7 @@
 """Markdown 报告内容生成；不进行证据读写、校验或审计写入。"""
 from .formatting import now, display_time, deleted_export_summary
 from ..engines.tsk import entry_status
+from .findings import findings_text
 
 
 def render_report(data, records, conclusion):
@@ -31,6 +32,10 @@ def render_report(data, records, conclusion):
         lines.append(f'- 分区偏移 {row["offset"]} · {cell(row["source"])} → {cell(row["path"])}；SHA-256：`{row["sha256"]}`')
         if row.get('deleted'):
             lines.append('  ' + cell(deleted_export_summary(row)))
+    findings = findings_text(records)
+    if findings:
+        lines += ['', '## 文件取证发现', '']
+        lines.extend('    ' + line for line in findings.splitlines())
     lines += ['', '## 审计日志摘要', '', f'审计链验证通过；当前 {len(records)} 条；锚点：`{records[-1]["hash"]}`。', '',
               '| 时间 (UTC+8) | 主体 | 操作 | 对象 | 结果 |', '| --- | --- | --- | --- | --- |']
     for row in records[-100:]:

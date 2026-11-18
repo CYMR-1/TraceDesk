@@ -22,6 +22,7 @@ test_east_8_display_with_legacy_audit (core.test_workflow.WorkflowTests.test_eas
 test_export_filename_windows_limits (core.test_workflow.WorkflowTests.test_export_filename_windows_limits) ... ok
 test_export_preserves_name_on_collision (core.test_workflow.WorkflowTests.test_export_preserves_name_on_collision) ... ok
 test_failed_save_preserves_state (core.test_workflow.WorkflowTests.test_failed_save_preserves_state) ... ok
+test_file_hash_compare_and_note (core.test_workflow.WorkflowTests.test_file_hash_compare_and_note) ... ok
 test_filter (core.test_workflow.WorkflowTests.test_filter) ... ok
 test_invalid_image_audited (core.test_workflow.WorkflowTests.test_invalid_image_audited) ... ok
 test_missing_tool_and_timeout (core.test_workflow.WorkflowTests.test_missing_tool_and_timeout) ... ok
@@ -66,6 +67,6 @@ test_text_preview_keeps_newlines_and_utf8_page_boundaries (ui.test_preview.Previ
 test_utf8_across_rows_and_pages (ui.test_preview.PreviewTests.test_utf8_across_rows_and_pages) ... ok
 
 ----------------------------------------------------------------------
-Ran 66 tests in 12.119s
+Ran 67 tests in 14.028s
 
 OK
