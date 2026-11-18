@@ -75,6 +75,7 @@ class DesktopAppearance:
             QLabel { background: transparent; }
             QLabel[role="section"] { color: #30483e; font-weight: 600; }
             QLabel#timelineStatus { font-size: 12px; font-weight: 500; }
+            QLabel#fileResultCount, QLabel#filePageNumber { font-size: 12px; }
             QFrame#navigationPanel, QFrame#resultsPanel, QFrame#previewPanel {
                 background: #ffffff; border: 1px solid #e2e7e5; border-radius: 6px;
             }

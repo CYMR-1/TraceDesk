@@ -1,6 +1,44 @@
 """分页视图共用的页码跳转入口，界面页码从 1 开始。"""
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QInputDialog, QLabel
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSpinBox, QVBoxLayout
+
+
+class PageJumpDialog(QDialog):
+    def __init__(self, parent, current, total):
+        super().__init__(parent)
+        self.setWindowTitle('跳转页码')
+        layout = QVBoxLayout(self)
+        prompt = QLabel(f'目标页（1–{total}）')
+        layout.addWidget(prompt)
+        if total <= 2147483647:
+            self.field = QSpinBox()
+            self.field.setRange(1, total)
+            self.field.setValue(current)
+        else:
+            self.field = QLineEdit(str(current))
+            self.field.setMaxLength(len(str(total)))
+        prompt.setBuddy(self.field)
+        layout.addWidget(self.field)
+        buttons = QHBoxLayout()
+        cancel = QPushButton('Cancel')
+        cancel.setAutoDefault(False)
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        buttons.addStretch(1)
+        confirm = QPushButton('OK')
+        confirm.setProperty('role', 'accent')
+        confirm.setDefault(True)
+        confirm.clicked.connect(self.accept)
+        buttons.addWidget(confirm)
+        layout.addLayout(buttons)
+        if isinstance(self.field, QLineEdit):
+            self.field.textChanged.connect(lambda s: confirm.setEnabled(
+                s.isascii() and s.isdigit() and 1 <= int(s) <= total))
+        self.field.setFocus()
+        self.field.selectAll()
+
+    def number(self):
+        return self.field.value() if isinstance(self.field, QSpinBox) else int(self.field.text())
 
 
 class PageLabel(QLabel):
@@ -17,15 +55,12 @@ class PageLabel(QLabel):
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.total > 1:
-            prompt = f'目标页（1–{self.total}）'
-            if self.total <= 2147483647:
-                number, accepted = QInputDialog.getInt(self, '跳转页码', prompt, self.current, 1, self.total)
-            else:
-                value, accepted = QInputDialog.getText(self, '跳转页码', prompt, text=str(self.current))
-                value = value.strip()
-                number = int(value) if value.isascii() and value.isdigit() and len(value) < 21 else 0
-            if accepted and 1 <= number <= self.total:
-                self.jump(number - 1)
+            dialog = PageJumpDialog(self, self.current, self.total)
+            try:
+                if dialog.exec() == QDialog.DialogCode.Accepted:
+                    self.jump(dialog.number() - 1)
+            finally:
+                dialog.deleteLater()
             event.accept()
             return
         super().mouseDoubleClickEvent(event)

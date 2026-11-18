@@ -4,10 +4,10 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from PySide6.QtCore import QCoreApplication, QEvent, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QTimer, Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QMainWindow
+from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QPushButton
 
 from forensic.ui.controller import App
 from forensic.core.tasks import TaskResult
@@ -148,8 +148,14 @@ class FileBrowserTests(QtTests):
         records = [dict(time=1700000000, event='修改', status='现存', offset=0,
                         inode=str(i), path=f'{i}.txt') for i in range(215)]
         panel.set_text(('时间线', records))
-        with patch('forensic.ui.pagination.QInputDialog.getInt', return_value=(3, True)):
-            QTest.mouseDClick(panel.page_label, Qt.MouseButton.LeftButton)
+        def choose_page():
+            dialog = QApplication.activeModalWidget()
+            dialog.field.setValue(3)
+            buttons = {b.text(): b for b in dialog.findChildren(QPushButton)}
+            buttons['OK'].click()
+
+        QTimer.singleShot(0, choose_page)
+        QTest.mouseDClick(panel.page_label, Qt.MouseButton.LeftButton)
         item = panel.table.topLevelItem(14)
         self.assertEqual(item.text(0), '215')
         panel.table.setCurrentItem(item)
