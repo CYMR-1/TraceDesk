@@ -3,7 +3,7 @@ from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 
 ROOT = Path(__file__).resolve().parent.parent
-DOC_FILES = ('README.md', '目录结构.md', '设计与验收说明.md')
+DOC_FILES = ('README.md', '目录结构.md', '设计与验收说明.md' ,'validation/test-results.txt')
 DEMO_FILES = ('demo.dd', 'demo.manifest.json', 'demo_volume.dd', 'demo_volume.manifest.json')
 
 
