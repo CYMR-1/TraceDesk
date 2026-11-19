@@ -3,6 +3,8 @@ import hashlib
 import re
 import subprocess
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
@@ -25,14 +27,25 @@ def snapshot(parts):
 
 
 def physical(parts, hash_file, progress=None):
-    total = sum(p.stat().st_size for p in parts)
-    done, rows = 0, []
-    for path in parts:
-        size = path.stat().st_size
-        digest = hash_file(path, (lambda n,_:progress(done+n,total)) if progress else None)
-        rows.append(dict(name=path.name, size=size, sha256=digest))
-        done += size
-    return rows
+    sizes = {path: path.stat().st_size for path in parts}
+    total = sum(sizes.values())
+    lock = threading.Lock()
+    done = 0
+
+    def hash_part(path):
+        previous = 0
+        def report(count, _):
+            nonlocal previous, done
+            with lock:
+                done += count - previous
+                previous = count
+                progress(done, total)
+        digest = hash_file(path, report if progress else None)
+        return dict(name=path.name, size=sizes[path], sha256=digest)
+
+    # 每个封装段有独立摘要；限制同时读取的段数并按原始顺序返回。
+    with ThreadPoolExecutor(max_workers=min(3, len(parts))) as pool:
+        return list(pool.map(hash_part, parts))
 
 
 def logical(tool, image, size, progress=None):

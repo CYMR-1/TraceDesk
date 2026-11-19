@@ -1,11 +1,18 @@
 """按目录记录读取文件内容；所有结果坐标均为文件内字节偏移。"""
 import json
-import subprocess
+import msvcrt
+import os
 import tempfile
 import threading
 import uuid
+import _winapi
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, closing, contextmanager
+from pathlib import Path
 
 from .case import sha256
+from ..engines import ewf
 from ..engines.tsk import TSK, can_export, deleted_source_note, tsk_error
 
 
@@ -17,13 +24,16 @@ class SearchControl:
     def __init__(self):
         self.event = threading.Event()
         self.lock = threading.Lock()
-        self.process = None
+        self.processes = set()
 
     def cancel(self):
         self.event.set()
+        self.stop_readers()
+
+    def stop_readers(self):
         with self.lock:
-            if self.process and self.process.poll() is None:
-                self.process.kill()
+            for process in self.processes:
+                process.kill()
 
     def check(self):
         if self.event.is_set():
@@ -37,25 +47,134 @@ def pattern(query, encoding):
     return value
 
 
-def matches(stream, size, needle, control, chunk=256 * 1024):
+def matches(stream, size, needle, control, chunk=256 * 1024, *, progress=None):
     tail, consumed, cursor = b'', 0, 0
     while consumed < size:
         control.check()
         block = stream.read(min(chunk, size - consumed))
-        if not block:
-            raise OSError(f'仅读到 {consumed}/{size} 字节')
         base = consumed - len(tail)
         data = tail + block
         consumed += len(block)
+        if progress:
+            progress('搜索文件字节', consumed, size)
+        # 等到后文的 12 个字节到齐才发布，块边界处的复核上下文也应完整。
+        end = len(data) if consumed == size or not block else max(0, len(data) - 12)
         while True:
-            pos = data.find(needle, max(0, cursor - base))
+            pos = data.find(needle, max(0, cursor - base), end)
             if pos < 0:
                 break
             control.check()
             yield base + pos, data[max(0, pos-12):pos].hex(' '), data[pos+len(needle):pos+len(needle)+12].hex(' ')
             cursor = base + pos + 1
-        cursor = max(cursor, consumed - len(needle) + 1)
-        tail = data[-(len(needle) + 12):]
+        if not block:
+            raise OSError(f'仅读到 {consumed}/{size} 字节')
+        cursor = max(cursor, base + end - len(needle) + 1)
+        tail = data[-(len(needle) + 24):]
+
+
+@contextmanager
+def protected_source(image, segmented):
+    """持有全部源文件的拒写、拒删除句柄，直到校验与搜索都结束。"""
+    def parts():
+        return ewf.segments(image) if segmented else [Path(image)]
+
+    paths = parts()
+    with ExitStack() as handles:
+        try:
+            for path in paths:
+                # FILE_SHARE_READ 只允许其他读取者（包括 icat）。
+                handle = _winapi.CreateFile(str(path), _winapi.GENERIC_READ, 1, 0,
+                                            _winapi.OPEN_EXISTING, 0, 0)
+                handles.callback(_winapi.CloseHandle, handle)
+        except OSError:
+            handles.close()
+            yield False
+            return
+        stamp = ewf.snapshot(paths)
+        yield True
+        if ewf.snapshot(parts()) != stamp:
+            raise ValueError('搜索期间镜像或分段清单发生变化，结果未发布')
+
+
+@contextmanager
+def buffered_icat(tool, args, stderr, size):
+    # Windows 默认匿名管道很小，大文件会频繁阻塞 icat。最多缓存 1 MiB。
+    handles = list(_winapi.CreatePipe(None, min(size, 1024 * 1024)))
+    try:
+        def open_end(mode, flags):
+            fd = msvcrt.open_osfhandle(handles[0], flags | os.O_BINARY)
+            handles.pop(0)  # 此后由文件对象关闭句柄。
+            return os.fdopen(fd, mode)
+
+        with open_end('rb', os.O_RDONLY) as source, open_end('wb', os.O_WRONLY) as target:
+            with tool.popen_image('icat', args, stdout=target, stderr=stderr) as proc:
+                target.close()  # 只留下子进程的写端，子进程退出时读取方才能收到 EOF。
+                yield proc, source
+    finally:
+        for handle in handles:
+            _winapi.CloseHandle(handle)
+
+
+def read_entry(tool, image, entry, needle, control, stop, limit, byte_progress):
+    found = []
+    control.check()
+    if not entry['size'] or stop.is_set():
+        return found, None
+    try:
+        args = tool.entry_args(image, entry)
+        with tempfile.TemporaryFile() as stderr, buffered_icat(tool, args, stderr, entry['size']) as (proc, stream):
+            try:
+                with control.lock:
+                    control.check()
+                    if stop.is_set():
+                        return found, None
+                    control.processes.add(proc)
+                for offset, before, after in matches(stream, entry['size'], needle, control, progress=byte_progress):
+                    found.append((entry, offset, before, after))
+                    if len(found) == limit:
+                        return found, None
+                if stream.read(1):
+                    raise OSError('输出超过目录记录长度')
+                if proc.wait():
+                    stderr.seek(0)
+                    raise OSError(tsk_error(stderr.read(2000)) or 'icat 读取失败')
+            finally:
+                with control.lock:
+                    control.processes.discard(proc)
+                proc.kill()
+    except OSError as error:
+        control.check()
+        return found, dict(path=entry['path'], offset=entry['offset'], inode=entry['inode'], error=str(error))
+    return found, None
+
+
+def scan_entries(tool, image, entries, needle, control, progress, limit):
+    completed = 0
+    remaining = iter(entries)
+    stop = threading.Event()
+    byte_progress = progress if len(entries) == 1 else None
+    # 只提前读取四项，按原清单顺序发布，使上限和命中顺序可复现。
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        pending = deque()
+        try:
+            while True:
+                control.check()
+                while len(pending) < 4:
+                    entry = next(remaining, None)
+                    if entry is None:
+                        break
+                    pending.append(pool.submit(read_entry, tool, image, entry, needle, control, stop, limit, byte_progress))
+                if not pending:
+                    return
+                if not byte_progress:
+                    progress('搜索文件内容', completed, len(entries))
+                yield pending.popleft().result()
+                completed += 1
+        finally:
+            stop.set()
+            control.stop_readers()
+            for future in pending:
+                future.cancel()
 
 
 def search(case, query, encoding, control, progress, *, limit=1000, selected=None):
@@ -69,6 +188,7 @@ def search(case, query, encoding, control, progress, *, limit=1000, selected=Non
     hits, errors = [], []
     completed = 0
     state = '完成'
+    verification = '校验未完成'
     def verify(stage):
         def notify(done, total):
             control.check()
@@ -76,41 +196,22 @@ def search(case, query, encoding, control, progress, *, limit=1000, selected=Non
         if not case.verify(notify):
             raise ValueError('镜像摘要与案件不一致，拒绝使用搜索结果')
     try:
-        verify('搜索前校验')
-        for entry in entries:
+        control.check()
+        with protected_source(image, evidence.get('format') == 'EWF') as protected:
+            verify('搜索前校验')
+            verification = '全程持有镜像只读共享句柄，搜索前复算 SHA-256' if protected else '搜索前后分别复算 SHA-256'
+            with closing(scan_entries(tool, image, entries, needle, control, progress, limit)) as results:
+                for found, error in results:
+                    hits.extend(found[:limit - len(hits)])
+                    if len(hits) == limit:
+                        state = f'达到 {limit} 条上限，未搜索全部内容'
+                        break
+                    if error:
+                        errors.append(error)
+                    completed += 1
             control.check()
-            progress('搜索文件内容', completed, len(entries))
-            if entry['size']:
-                args = tool.entry_args(image, entry)
-                try:
-                    with tempfile.TemporaryFile() as stderr, tool.popen_image('icat', args, stdout=subprocess.PIPE,
-                            stderr=stderr) as proc:
-                        with control.lock:
-                            control.process = proc
-                        try:
-                            control.check()
-                            for offset, before, after in matches(proc.stdout, entry['size'], needle, control):
-                                hits.append((entry, offset, before, after))
-                                if len(hits) >= limit:
-                                    state = f'达到 {limit} 条上限，未搜索全部内容'
-                                    break
-                            if state == '完成':
-                                if proc.stdout.read(1):
-                                    raise OSError('输出超过目录记录长度')
-                                if proc.wait():
-                                    stderr.seek(0)
-                                    raise OSError(tsk_error(stderr.read(2000)) or 'icat 读取失败')
-                        finally:
-                            proc.kill()
-                            with control.lock:
-                                control.process = None
-                except OSError as error:
-                    control.check()
-                    errors.append(dict(path=entry['path'], offset=entry['offset'], inode=entry['inode'], error=str(error)))
-            if state != '完成':
-                break
-            completed += 1
-        verify('搜索后校验')
+            if not protected:
+                verify('搜索后校验')
     except Cancelled:
         state = '已取消；结果未发布'
         hits.clear()
@@ -120,6 +221,7 @@ def search(case, query, encoding, control, progress, *, limit=1000, selected=Non
     if errors and state == '完成':
         state = '部分文件读取失败'
     record = dict(query=query, encoding=encoding, needle=needle.hex(), image_sha256=evidence['sha256'],
+                  verification=verification,
                   scope='选中文件' if selected is not None else '清单内可读取的文件，不含未分配空间',
                   selected={k:selected[k] for k in ('path','offset','inode')} if selected is not None else None,
                   partition_scans=case.data.get('partition_scans', []),

@@ -8,7 +8,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 from forensic.core.case import Case
-from forensic.core.content_search import matches, pattern, search, SearchControl
+from forensic.core.content_search import matches, pattern, protected_source, search, SearchControl
 from forensic.core.coverage import assess, source_status
 from forensic.core.file_tools import record_note
 from forensic.core.review import build_bundle
@@ -45,6 +45,34 @@ class ReviewTests(unittest.TestCase):
             self.assertEqual([r[0] for r in matches(stream,len(stream.getvalue()),needle,SearchControl(),chunk=3)],
                              [3, 3+len(needle)])
         self.assertEqual([r[0] for r in matches(io.BytesIO(b'aaaa'),4,pattern('61 61','HEX'),SearchControl(),chunk=2)], [0,1,2])
+
+    def test_context_on_block_boundary_and_short_read(self):
+        raw = bytes(range(50))
+        needle = raw[19:23]
+        expected = [(19, raw[7:19].hex(' '), raw[23:35].hex(' '))]
+        for chunk in (1, 4, 22, 32, 256):
+            self.assertEqual(list(matches(io.BytesIO(raw), len(raw), needle, SearchControl(), chunk)), expected)
+        stream = matches(io.BytesIO(raw[:25]), 50, needle, SearchControl(), 5)
+        self.assertEqual(next(stream), (19, expected[0][1], raw[23:25].hex(' ')))
+        with self.assertRaisesRegex(OSError, '25/50'):
+            next(stream)
+
+    def test_search_protection_covers_every_segment_and_releases_handles(self):
+        first, second = (self.root / ('sample.' + suffix) for suffix in ('E01', 'E02'))
+        first.touch()
+        second.touch()
+        with protected_source(first, True) as protected:
+            self.assertTrue(protected)
+            for path in (first, second):
+                with self.assertRaises(PermissionError):
+                    path.write_bytes(b'changed')
+                self.assertEqual(path.read_bytes(), b'')
+        with second.open('r+b'), protected_source(first, True) as protected:
+            self.assertFalse(protected)
+            first.write_bytes(b'free')
+        with self.assertRaisesRegex(ValueError, '分段清单'):
+            with protected_source(first, True):
+                first.with_suffix('.E03').touch()
 
     def test_missing_middle_segment_rejected(self):
         first = self.root/'sample.E01'
@@ -88,3 +116,34 @@ class ReviewTests(unittest.TestCase):
         exported.write_bytes(b'altered')
         with self.assertRaisesRegex(ValueError,'摘要不一致'):
             build_bundle(case)
+
+    def test_parallel_search_limit_cancel_and_writer_fallback(self):
+        image = self.root / 'parallel.dd'
+        create(image)
+        case = Case.create(self.root / 'cases', '2', 'test', 'parallel')
+        self.addCleanup(case.close)
+        case.load(image)
+        case.scan_all()
+        control = SearchControl()
+        results = []
+        for _ in range(2):
+            record, hits, _ = search(case, '61', 'HEX', control, lambda *_: None, limit=2)
+            self.assertIn('上限', record['status'])
+            self.assertEqual(len(hits), 2)
+            results.append(record['hits'])
+        self.assertEqual(*results)
+        def cancel(stage, *_):
+            if stage == '搜索文件内容':
+                control.cancel()
+        record, hits, _ = search(case, '61', 'HEX', control, cancel)
+        self.assertFalse(hits)
+        self.assertFalse(control.processes)
+        self.assertIn('取消', record['status'])
+        with image.open('r+b') as writer:
+            def modify(stage, done, _):
+                if stage == '搜索文件内容' and not done:
+                    writer.seek(-1, 2)
+                    writer.write(b'!')
+                    writer.flush()
+            with self.assertRaisesRegex(ValueError, '镜像摘要'):
+                search(case, '61', 'HEX', SearchControl(), modify)

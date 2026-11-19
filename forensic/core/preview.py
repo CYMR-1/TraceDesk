@@ -1,5 +1,7 @@
 """后台只读字节读取与文本/十六进制格式化，不依赖 Qt。"""
+import codecs
 import queue
+import re
 import subprocess
 import tempfile
 import threading
@@ -14,40 +16,61 @@ ROW_BYTES = 16
 PAGE_BYTES = 4096
 
 
-def preview_text(window, start, size, encoding, page_bytes=PAGE_BYTES):
-    """按字符起始字节归属页面，保留文本换行且不重复跨页 UTF-8 字符。"""
+PREVIEW_ENCODINGS = ('ASCII', 'UTF-8', 'UTF-16LE', 'UTF-16BE', 'GBK', 'GB18030', 'Big5',
+                     'Windows-1252', 'ISO-8859-1')
+LEGACY_MULTIBYTE = {'GBK', 'GB18030', 'Big5'}
+
+
+class PageWindow(bytes):
+    """保留原始字节，以及从文件起点解码时延续到本页的字符长度。"""
+    encoding = None
+    carry = 0
+
+
+def page_characters(window, start, size, encoding, page_bytes):
     prefix = min(3, start)
     length = min(page_bytes, max(0, size - start))
-    if encoding == 'ASCII':
-        return ''.join(chr(b) if 32 <= b < 127 or b in (9, 10, 13) else '·'
-                       for b in window[prefix:prefix + length])
-    result, index = [], -prefix
-    for char in window.decode('utf-8', errors='surrogateescape'):
-        if 0 <= index < length:
-            result.append(char if char.isprintable() or char in '\r\n\t' else
-                          '�' if 0xDC80 <= ord(char) <= 0xDCFF else '·')
-        index += len(char.encode('utf-8', errors='surrogateescape'))
-    return ''.join(result)
+    index = 0
+    if encoding.startswith('UTF-16'):
+        index = -(start - prefix) % 2
+    elif encoding in LEGACY_MULTIBYTE:
+        index = prefix - getattr(window, 'carry', prefix)
+    unit_order = {'UTF-16LE': 'little', 'UTF-16BE': 'big'}.get(encoding)
+    while index < len(window) and index - prefix < length:
+        byte = window[index]
+        step = 1
+        if encoding == 'ASCII':
+            char = chr(byte) if byte < 128 else '·'
+        else:
+            if unit_order:
+                unit = int.from_bytes(window[index:index + 2], unit_order)
+                step = 4 if 0xD800 <= unit <= 0xDBFF else 2
+            elif encoding == 'UTF-8' and byte >= 0xC2:
+                step = 2 if byte < 0xE0 else 3 if byte < 0xF0 else 4
+            elif encoding in LEGACY_MULTIBYTE and 0x81 <= byte <= 0xFE:
+                step = 4 if (encoding == 'GB18030' and index + 1 < len(window)
+                             and 0x30 <= window[index + 1] <= 0x39) else 2
+            try:
+                char = window[index:index + step].decode(encoding)
+            except UnicodeDecodeError:
+                step = 2 if unit_order else 1
+                char = '�'
+        if index >= prefix:
+            yield index - prefix, char
+        index += step
+
+
+def preview_text(window, start, size, encoding, page_bytes=PAGE_BYTES):
+    return ''.join(char if char.isprintable() or char in '\r\n\t' else '·'
+                   for _, char in page_characters(window, start, size, encoding, page_bytes))
 
 
 def preview_rows(window, start, size, encoding, page_bytes=PAGE_BYTES):
     prefix = min(3, start)
     data = window[prefix:prefix + min(page_bytes, size - start)]
     strings = [''] * ((len(data) + ROW_BYTES - 1) // ROW_BYTES)
-    if encoding == 'ASCII':
-        for i, byte in enumerate(data):
-            strings[i // ROW_BYTES] += chr(byte) if 32 <= byte < 127 else '·'
-    else:
-        # 每个字符只出现一次，归到其首字节所在行。非法字节各占一个替换符。
-        index = -prefix
-        for char in window.decode('utf-8', errors='surrogateescape'):
-            if 0 <= index < len(data):
-                if 0xDC80 <= ord(char) <= 0xDCFF:
-                    display = '�'
-                else:
-                    display = char if char.isprintable() else '·'
-                strings[index // ROW_BYTES] += display
-            index += len(char.encode('utf-8', errors='surrogateescape'))
+    for offset, char in page_characters(window, start, size, encoding, page_bytes):
+        strings[offset // ROW_BYTES] += char if char.isprintable() else '·'
     for row, chars in enumerate(strings):
         i = row * ROW_BYTES
         yield (f'{start + i:08X}', data[i:i + ROW_BYTES].hex(' ').upper(), chars)
@@ -56,7 +79,9 @@ def preview_rows(window, start, size, encoding, page_bytes=PAGE_BYTES):
 class PreviewReader:
     """在后台按需读取 icat 字节流，缓存已查看的部分以便向前翻页。"""
 
-    def __init__(self, image, entry, page_bytes=PAGE_BYTES):
+    def __init__(self, image, entry, page_bytes=PAGE_BYTES, encoding='ASCII'):
+        self.encoding = encoding
+        self.checkpoint = None
         self.page_bytes = page_bytes
         self.pages = queue.Queue()
         self.results = queue.Queue()
@@ -97,12 +122,9 @@ class PreviewReader:
 
     def _read_extents(self, source, extents):
         offsets = list(accumulate((length for _, length in extents), initial=0))
-        while not self.closed.is_set():
-            page = self.pages.get()
-            if page is None:
-                return
-            start = max(0, page * self.page_bytes - 3)
-            end = min(offsets[-1], (page + 1) * self.page_bytes + 3)
+
+        def read_at(start, length):
+            end = min(offsets[-1], start + length)
             index = bisect_right(offsets, start) - 1
             window = bytearray()
             while start < end:
@@ -114,18 +136,69 @@ class PreviewReader:
                 window.extend(data)
                 start += length
                 index += 1
-            self.results.put((page, bytes(window), offsets[-1], ''))
+            return bytes(window)
+
+        while not self.closed.is_set():
+            page = self.pages.get()
+            if page is None:
+                return
+            self._publish(page, offsets[-1], '', read_at)
+
+    def _publish(self, page, size, note, read_at):
+        start = page * self.page_bytes
+        left = max(0, start - 3)
+        end = min(size, start + self.page_bytes + 3)
+        window = PageWindow(read_at(left, end - left))
+        encoding = getattr(self, 'encoding', 'ASCII')
+        if start and encoding in LEGACY_MULTIBYTE:
+            window.carry = self._legacy_carry(start, encoding, read_at)
+        window.encoding = encoding
+        self.results.put((page, window, size, note))
+
+    def _legacy_carry(self, start, encoding, read_at):
+        # GBK 等的首、尾字节范围重叠。跳页时从确定的字符边界同步，
+        # 顺序翻页时复用上次的解码器状态，避免将连续中文错开一个字节。
+        lower, pending = 0, b''
+        if self.checkpoint:
+            codec, offset, saved = self.checkpoint
+            if codec == encoding and offset <= start:
+                lower, pending = offset, saved
+        pos = start
+        while pos > lower and not self.closed.is_set():
+            left = max(lower, pos - 65536)
+            block = read_at(left, pos - left)
+            # 0x00–0x2F 均不能作为这些编码的续字节。
+            anchor = re.search(rb'[\x00-\x2f][^\x00-\x2f]*\Z', block)
+            if anchor:
+                lower, pending = left + anchor.start() + 1, b''
+                break
+            pos = left
+        decoder = codecs.getincrementaldecoder(encoding)(errors='replace')
+        decoder.setstate((pending, 0))
+        while lower < start and not self.closed.is_set():
+            chunk = read_at(lower, min(start - lower, 65536))
+            if not chunk:
+                raise OSError('无法读取预览页前的编码边界')
+            decoder.decode(chunk)
+            lower += len(chunk)
+        carry = decoder.getstate()[0]
+        self.checkpoint = encoding, start, carry
+        return len(carry)
 
     def _read_pages(self, process, errors, cache, recorded_size, deleted):
         size = recorded_size
         note = ''
         cached = 0
+
+        def read_at(offset, length):
+            cache.seek(offset)
+            return cache.read(length)
+
         while not self.closed.is_set():
             page = self.pages.get()
             if page is None:
                 return
             start = page * self.page_bytes
-            left = max(0, start - 3)
             right = min(size, start + self.page_bytes + 3)
             while right > cached:
                 if self.closed.is_set():
@@ -157,7 +230,4 @@ class PreviewReader:
                 cached += len(chunk)
             if start >= size and size:
                 page = (size - 1) // self.page_bytes
-                left = max(0, page * self.page_bytes - 3)
-                right = size
-            cache.seek(left)
-            self.results.put((page, cache.read(right - left), size, note))
+            self._publish(page, size, note, read_at)

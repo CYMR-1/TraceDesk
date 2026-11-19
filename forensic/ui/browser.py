@@ -143,6 +143,7 @@ class FileBrowserView(QWidget):
         self.tree.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.tree.setMinimumHeight(110)
         header = self.tree.header()
+        header.setObjectName('recordHeader')
         header.setStretchLastSection(False)
         header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         for column, width in enumerate((260, 120, 120, 120, 170, 170, 170, 170, 140)):

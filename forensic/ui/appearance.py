@@ -160,8 +160,9 @@ class DesktopAppearance:
             QWidget#previewEncoding QLabel { font-size: 12px; }
             QComboBox#previewEncodingChoice {
                 font-size: 12px; padding: 2px 24px 2px 8px; min-height: 16px;
-                border-radius: 5px;
+                border-radius: 5px; combobox-popup: 0;
             }
+            QComboBox#previewEncodingChoice QListView::item { min-height: 22px; padding: 1px 6px; }
             QTabBar#moduleTabs::tab:selected {
                 background: #e0f1e9; color: #086b55; border-color: #bfdfcf; font-weight: 600;
             }
@@ -181,6 +182,7 @@ class DesktopAppearance:
                 border: none; border-bottom: 1px solid #dfe7e2;
                 font-weight: 600;
             }
+            QHeaderView#recordHeader::section:horizontal:!last { border-right: 2px solid #ffffff; }
             QSplitter::handle { background: #f5f6f8; }
             QSplitter::handle:hover { background: #c4dfd2; }
             QProgressBar { border: none; border-radius: 3px; background: #e6eae8; max-height: 7px; }

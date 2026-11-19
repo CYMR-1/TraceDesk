@@ -41,6 +41,7 @@ class ReviewPanel(QWidget):
         layout.addWidget(self.status)
         self.table = QTreeWidget()
         self.table.setRootIsDecorated(False)
+        self.table.header().setObjectName('recordHeader')
         self.table.setHeaderLabels(['文件内字节偏移', '分区偏移', 'inode', '镜像内路径', '前文 HEX', '后文 HEX'])
         self.table.setColumnWidth(3, 320)
         self.table.itemDoubleClicked.connect(self.preview)

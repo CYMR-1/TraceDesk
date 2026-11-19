@@ -12,9 +12,12 @@ from unittest.mock import patch
 
 from PySide6.QtCore import QBuffer, QIODevice, Qt
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtWidgets import QApplication, QMainWindow, QTreeWidgetItemIterator
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QTreeWidgetItemIterator, QVBoxLayout
 
 from forensic.ui.controller import App
+from forensic.ui.appearance import DesktopAppearance
+from forensic.core.preview import PREVIEW_ENCODINGS
 from forensic.ui.preview import FilePreview, PAGE_BYTES, PreviewReader, preview_rows, preview_text
 from forensic.engines.tsk import TSK
 from forensic.paths import ROOT
@@ -197,6 +200,59 @@ class PreviewTests(unittest.TestCase):
         tail = preview_text(raw[PAGE_BYTES - 3:], PAGE_BYTES, len(raw), 'UTF-8')
         self.assertEqual(head + tail, 'a' * (PAGE_BYTES - 1) + '取证\n\t�·')
         self.assertEqual(preview_text(b'A\r\n\x00', 0, 4, 'ASCII'), 'A\r\n·')
+        self.assertEqual(preview_text(b'\x80\xe9', 0, 2, 'Windows-1252'), '€é')
+        self.assertEqual(preview_text(b'\x80\xe9', 0, 2, 'ISO-8859-1'), '·é')
+
+    def test_chinese_and_utf16_encodings_after_direct_page_jump(self):
+        for encoding, sample in (('GBK', '取证'), ('Big5', '鑑識'), ('GB18030', '取🙂'),
+                                 ('UTF-16LE', '证🙂'), ('UTF-16BE', '证🙂')):
+            with self.subTest(encoding=encoding):
+                value = 'A' + sample * 3000
+                raw = value.encode(encoding)
+                preview, _, _ = self.image_preview(raw, 'test.txt')
+                # 先以 ASCII 直接跳到第三页，再按所选编码重新同步。
+                preview.turn(2)
+                self.wait_preview(preview)
+                preview.encoding.setCurrentText(encoding)
+                self.wait_preview(preview)
+                index = 0
+                expected = []
+                for char in value:
+                    if 2 * PAGE_BYTES <= index < 3 * PAGE_BYTES:
+                        expected.append(char)
+                    index += len(char.encode(encoding))
+                self.assertEqual(preview.text.toPlainText(), ''.join(expected))
+                self.assertEqual(''.join(preview.rows.topLevelItem(i).text(2)
+                                         for i in range(preview.rows.topLevelItemCount())), ''.join(expected))
+
+    def test_encoding_popup_in_preview_dialog(self):
+        dialog = QDialog()
+        self.addCleanup(dialog.deleteLater)
+        DesktopAppearance(dialog).configure()
+        layout = QVBoxLayout(dialog)
+        preview = FilePreview(dialog)
+        layout.addWidget(preview)
+        preview._has_file = True
+        preview._update_controls()
+        dialog.resize(860, 550)
+        dialog.show()
+        self.qt.processEvents()
+        combo = preview.encoding
+        combo.showPopup()
+        self.qt.processEvents()
+        view = combo.view()
+        try:
+            self.assertEqual([combo.itemText(i) for i in range(combo.count())], list(PREVIEW_ENCODINGS))
+            for row in range(combo.count()):
+                rect = view.visualRect(view.model().index(row, 0))
+                self.assertTrue(view.viewport().rect().contains(rect), (row, rect, view.viewport().rect()))
+                self.assertGreaterEqual(rect.width(), view.fontMetrics().horizontalAdvance(combo.itemText(row)))
+            last = view.model().index(combo.count() - 1, 0)
+            QTest.mouseClick(view.viewport(), Qt.MouseButton.LeftButton, pos=view.visualRect(last).center())
+            self.assertEqual(combo.currentText(), 'ISO-8859-1')
+        finally:
+            combo.hidePopup()
+            dialog.close()
 
     def test_file_selection_encoding_paging_and_resize(self):
         test_root = ROOT / '.test-work'

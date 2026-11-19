@@ -1,17 +1,17 @@
-"""只读文件预览。每页保留前后各三个字节，用于解码跨页的 UTF-8 字符。"""
+"""只读文件预览，文本与十六进制字符列共享编码选择。"""
 import queue
 from pathlib import Path
 
-from PySide6.QtCore import QBuffer, QIODevice, QSize, Qt
+from PySide6.QtCore import QBuffer, QIODevice, QPoint, QSize, Qt
 from PySide6.QtGui import QFontDatabase, QFontMetrics, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
-    QPlainTextEdit, QPushButton, QSizePolicy, QStackedWidget, QTreeWidget, QTreeWidgetItem,
+    QListView, QPlainTextEdit, QPushButton, QSizePolicy, QStackedWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 
 from ..engines.tsk import deleted_source_note
-from ..core.preview import PAGE_BYTES, PreviewReader, preview_rows, preview_text
+from ..core.preview import LEGACY_MULTIBYTE, PAGE_BYTES, PREVIEW_ENCODINGS, PreviewReader, preview_rows, preview_text
 from .tabs import TabbedView
 from .pagination import PageLabel
 from .metrics import CONTROL_GAP, SECTION_GAP
@@ -54,6 +54,25 @@ class ImagePreview(QLabel):
                     bounds, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
 
 
+class EncodingChoice(QComboBox):
+    def __init__(self):
+        super().__init__()
+        self.setObjectName('previewEncodingChoice')
+        self.setView(QListView())
+        self.addItems(PREVIEW_ENCODINGS)
+        self.setMaxVisibleItems(self.count())
+
+    def showPopup(self):
+        view = self.view()
+        view.ensurePolished()
+        height = view.sizeHintForRow(0) * self.count() + 2 * view.frameWidth()
+        screen = self.screen().availableGeometry()
+        top = self.mapToGlobal(QPoint(0, 0)).y()
+        room = max(top - screen.top(), screen.bottom() - top - self.height())
+        view.setMinimumHeight(min(height, max(0, room - 16)))
+        super().showPopup()
+
+
 class FilePreview(QWidget):
     """独立的文件内容视图；读取器只提供字节，视图负责分页和编码选择。"""
 
@@ -78,11 +97,12 @@ class FilePreview(QWidget):
         encoding_layout.setContentsMargins(CONTROL_GAP, 0, 0, 0)
         encoding_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         encoding_layout.addWidget(QLabel('编码'))
-        self.encoding = QComboBox()
-        self.encoding.setObjectName('previewEncodingChoice')
-        self.encoding.addItems(('ASCII', 'UTF-8'))
+        self.encoding = EncodingChoice()
         self.encoding.currentTextChanged.connect(self.render)
         encoding_layout.addWidget(self.encoding)
+        self.encoding.ensurePolished()
+        metrics = self.encoding.fontMetrics()
+        self.encoding.setFixedWidth(max(metrics.horizontalAdvance(name) for name in PREVIEW_ENCODINGS) + 44)
         self.formats.set_actions(self.encoding_controls, (self.encoding,))
 
         bar = QHBoxLayout()
@@ -158,6 +178,7 @@ class FilePreview(QWidget):
         self.status.set_pages(1, 1, show_text=False)
         self.window = b''
         self.source_note = ''
+        self.encoding.setEnabled(True)
         self._image_checked = False
         self._image_status = ''
         self.image.reset()
@@ -192,7 +213,7 @@ class FilePreview(QWidget):
             self._set_image_mode(True)
         if self.size:
             self._page_status = self._image_status = '正在读取…'
-            self.reader = PreviewReader(image, entry, page_bytes=PAGE_BYTES)
+            self.reader = PreviewReader(image, entry, page_bytes=PAGE_BYTES, encoding=self.encoding.currentText())
         else:
             self._set_image_mode(False)
             self._page_status = '删除记录为 0 字节，无内容可显示' if entry.get('deleted') else '空文件（0 字节）'
@@ -204,6 +225,7 @@ class FilePreview(QWidget):
         self.previous.setEnabled(False)
         self.next.setEnabled(False)
         self._set_status('正在读取…')
+        self.encoding.setEnabled(False)
         self.status.set_pages(1, 1, show_text=False)
         self._page_status = self.status.text()
         self.reader.pages.put(self.page + direction)
@@ -222,6 +244,7 @@ class FilePreview(QWidget):
             self._update_controls()
             return
         self.page, self.window, self.size = page, value, size
+        self.encoding.setEnabled(True)
         if not self._image_checked:
             self._image_checked = True
             self._start_image()
@@ -310,10 +333,22 @@ class FilePreview(QWidget):
 
     def render(self, event=None):
         position = self.vertical.value()
+        current = self.rows.currentItem()
+        selected_offset = current.text(0) if current else None
+        encoding = self.encoding.currentText()
+        if self.reader:
+            self.reader.encoding = encoding
+            if self.page and encoding in LEGACY_MULTIBYTE and getattr(self.window, 'encoding', None) != encoding:
+                self.turn(0)
+                return
         self.rows.clear()
         self.rows.addTopLevelItems([
             QTreeWidgetItem(values)
-            for values in preview_rows(self.window, self.page * PAGE_BYTES, self.size, self.encoding.currentText(), page_bytes=PAGE_BYTES)
+            for values in preview_rows(self.window, self.page * PAGE_BYTES, self.size, encoding, page_bytes=PAGE_BYTES)
         ])
-        self.text.setPlainText(preview_text(self.window, self.page * PAGE_BYTES, self.size, self.encoding.currentText(), page_bytes=PAGE_BYTES))
+        if selected_offset:
+            index = (int(selected_offset, 16) - self.page * PAGE_BYTES) // 16
+            if 0 <= index < self.rows.topLevelItemCount():
+                self.rows.setCurrentItem(self.rows.topLevelItem(index))
+        self.text.setPlainText(preview_text(self.window, self.page * PAGE_BYTES, self.size, encoding, page_bytes=PAGE_BYTES))
         self.vertical.setValue(position)

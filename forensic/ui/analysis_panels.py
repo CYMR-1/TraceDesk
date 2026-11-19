@@ -34,6 +34,7 @@ class RecordsPanel(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setUniformRowHeights(True)
         self.table.setHeaderLabels(headers)
+        self.table.header().setObjectName('recordHeader')
         self.table.setHorizontalScrollMode(QTreeWidget.ScrollMode.ScrollPerPixel)
         for i, width in enumerate(widths):
             self.table.setColumnWidth(i, width)
@@ -153,7 +154,7 @@ class TimelinePanel(RecordsPanel):
     def _update_status(self, number=None):
         if number is not None:
             self._current_number = number
-        self.status.setText(f'MAC/B 时间线·UTC+8·当前 {self._current_number}/{len(self.records)}')
+        self.status.setText(f'MACB 时间线·UTC+8·当前 {self._current_number}/{len(self.records)}')
 
     def page_records(self, query):
         count = len(self._matches)
