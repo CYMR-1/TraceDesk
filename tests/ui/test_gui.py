@@ -201,6 +201,19 @@ class FileBrowserTests(QtTests):
         panel._search()
         self.assertEqual(panel.table.topLevelItem(0).text(0), '215')
 
+    def test_large_directory_can_select_last_record_without_creating_every_node(self):
+        window, app = self.controller()
+        rows = [self.entry(path=f'big/{i:05d}.txt') for i in range(3000)]
+        app.display(rows)
+        browser = app.browser
+        node = browser._locate_entry(rows[-1])
+        parent = browser._nodes[(0, 'big')]
+        self.assertLess(parent.childCount(), 20)
+        self.assertLess(len(browser._tree_by_id), 257)
+        with patch.dict(browser.commands, select=lambda: None):
+            browser.navigation.setCurrentItem(node)
+        self.assertEqual(app.selected_entry()['path'], rows[-1]['path'])
+
     def test_large_inventory_can_find_entries_beyond_first_page(self):
         root, app = self.controller()
         entries = [self.entry(path=f'目录/{index:04d}.txt') for index in range(1051)]

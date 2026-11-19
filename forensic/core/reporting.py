@@ -2,6 +2,7 @@
 from .formatting import now, display_time, deleted_export_summary
 from ..engines.tsk import entry_status
 from .findings import findings_text
+from .coverage import coverage_text, source_status, SOURCE_FIELDS
 
 
 def render_report(data, records, conclusion):
@@ -13,8 +14,13 @@ def render_report(data, records, conclusion):
         lines.append(f'- {label}：{cell(data[key])}')
     lines.append(f'- 建立时间：{display_time(data["created"])}')
     lines += ['', '## 原始证据与完整性', '', f'- 路径：{cell(e["path"])}', f'- 字节数：{e["size"]}',
-              f'- 初始 SHA-256：`{e["sha256"]}`', f'- 当前 SHA-256：`{data["verification"]["actual"]}`',
-              f'- 校验结论：{conclusion}', '', '## 文件清单摘要', '',
+              f'- 初始逻辑介质 SHA-256：`{e["sha256"]}`',
+              f'- {"与已核验分段对应的逻辑摘要（本次未重新解码）" if e.get("format") == "EWF" else "当前 SHA-256"}：`{data["verification"]["actual"] or "无法确认"}`',
+              f'- 校验方式：{data["verification"].get("method", "复算 RAW SHA-256")}',
+              f'- 校验结论：{conclusion}', f'- 声明范围：{coverage_text(e.get("coverage"))}',
+              f'- 来源校验：{source_status(e)}',
+              *[f'- {label}：{cell(e.get("provenance", {}).get(key, "") or "未登记")}' for key,label in SOURCE_FIELDS.items()],
+              '', '## 文件清单摘要', '',
               f'已识别 {len(e["partitions"])} 个分区；当前清单共 {len(data["inventory"])} 项（最多列出 200 项）。', '']
     scans = {p['offset']: p for p in data.get('partition_scans', [])}
     for partition in e['partitions']:

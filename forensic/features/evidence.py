@@ -2,6 +2,7 @@
 from PySide6.QtWidgets import QMessageBox
 
 from ..core.formatting import display_time
+from ..core.browser_index import prepare
 from ..paths import EVIDENCE_DIR
 from ..ui.dialogs import RAW_IMAGE_FILTER, choose_file
 from ..ui.analysis_panels import EvidencePanel
@@ -16,7 +17,7 @@ def image_loaded(context, _):
 def load(context):
     if context.available():
         path = choose_file(
-            context.root, '选择案件库之外的 RAW 镜像', str(EVIDENCE_DIR),
+            context.root, '选择 RAW 镜像或 E01 首段', str(EVIDENCE_DIR),
             RAW_IMAGE_FILTER)
         if path:
             context.task('固定镜像并识别分区', lambda: context.case().load(path, progress=lambda n, size: context.progress('固定镜像 SHA-256', n, size)),
@@ -30,7 +31,12 @@ def resume_partitions(context):
 
 def scan(context):
     if context.available() and context.case().data['evidence']:
-        context.task('自动读取所有分区与文件树', lambda: context.case().scan_all(progress=context.progress),
+        case = context.case()
+        def work():
+            entries = case.scan_all(progress=context.progress)
+            if len(entries) > 1000:
+                case.browser_index = prepare(entries)
+        context.task('自动读取所有分区与文件树', work,
                      lambda _: context.refresh(reset=True))
 
 
@@ -57,7 +63,7 @@ def information_version(context):
 
 
 FEATURE = Feature('evidence', requires=('cases',), actions=(
-    Action('load', load, '加载 RAW 镜像', 'evidence', 'accent'),
+    Action('load', load, '加载镜像', 'evidence', 'accent'),
     Action('verify', verify, '校验完整性', 'evidence'),
     Action('scan', scan),
     Action('resume_partitions', resume_partitions),

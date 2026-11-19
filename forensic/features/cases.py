@@ -3,6 +3,7 @@ from functools import partial
 from pathlib import Path
 
 from ..core.case import Case
+from ..core.browser_index import prepare
 from ..paths import CASES_DIR
 from ..ui.views import NewCaseDialog
 from ..ui.dialogs import choose_file
@@ -26,6 +27,8 @@ def open_case(context):
         def read_case():
             case = Case(Path(path).parent)
             try:
+                if len(case.data['inventory']) > 1000:
+                    case.browser_index = prepare(case.data['inventory'])
                 case.log('CASE_OPEN', path, '成功')
             except Exception:
                 case.close()

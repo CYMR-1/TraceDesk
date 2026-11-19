@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
 )
 
 
-RAW_IMAGE_FILTER = 'RAW 镜像 (*.dd *.raw *.img *.ima *.bin *.dsk *.image *.flp *.vfd)'
+RAW_IMAGE_FILTER = 'RAW 或 EWF 首段 (*.dd *.raw *.img *.ima *.bin *.dsk *.image *.flp *.vfd *.E01 *.e01)'
 
 
 def cancel_on_left(dialog):

@@ -83,10 +83,8 @@ class PreviewReader:
             tool = TSK()
             deleted = entry.get('deleted', False)
             args = tool.entry_args(image, entry)
-            command = tool.command('icat', args)
             with tempfile.TemporaryFile() as errors, tempfile.SpooledTemporaryFile(max_size=1024 * 1024) as cache:
-                with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors,
-                                      creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)) as process:
+                with tool.popen_image('icat', args, stdout=subprocess.PIPE, stderr=errors) as process:
                     self.process = process
                     try:
                         self._read_pages(process, errors, cache, entry['size'], deleted)

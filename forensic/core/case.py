@@ -12,7 +12,9 @@ from itertools import count
 from pathlib import Path
 from .formatting import EAST_8, now, display_time, deleted_export_summary
 from .reporting import render_report
+from .coverage import assess, SOURCE_FIELDS
 from ..engines.fat import fat_regions
+from ..engines import ewf
 from ..engines.tsk import TSK, can_export, entry_name, entry_status
 
 
@@ -227,12 +229,37 @@ class Case:
             raise ValueError('镜像必须是案件库目录之外的普通文件')
         self.log('IMAGE_LOAD_BEGIN', image, '开始')
         try:
-            baseline = sha256(image, progress)
-            self.log('HASH_FIXED', image, '成功', sha256=baseline)
             tsk = tsk or TSK()
+            is_ewf = image.suffix.casefold() == '.e01'
+            if re.fullmatch(r'\.e\d\d', image.suffix, re.I) and not is_ewf:
+                raise ValueError('请从首段 E01 打开')
+            extra = {}
+            size = image.stat().st_size
+            boot_reader = None
+            if is_ewf:
+                parts = ewf.segments(image)
+                stamp = ewf.snapshot(parts)
+                info = tsk.text('img_stat', ['-i','ewf',image])
+                length = re.search(r'Size of data in bytes:\s*(\d+)', info)
+                sector = re.search(r'Sector size:\s*(\d+)', info)
+                if not length or not sector or int(sector[1]) != 512:
+                    raise ValueError('无法确定受支持的 EWF 逻辑大小或扇区大小')
+                size = int(length[1])
+                baseline = ewf.logical(tsk, image, size, progress)
+                extra = dict(format='EWF', segments=ewf.physical(parts, sha256, progress),
+                             provenance=ewf.acquisition_info(image))
+                def boot_reader(offset):
+                    result = tsk.run('img_cat', ['-i','ewf','-s',offset,'-e',offset,image], capture_output=True)
+                    return result.stdout if result.returncode == 0 else b''
+            else:
+                baseline = sha256(image, progress)
+            self.log('HASH_FIXED', image, '成功', sha256=baseline)
             layout, partitions = tsk.inspect(image)
-            evidence = dict(path=str(image), size=image.stat().st_size, sha256=baseline,
-                            fixed_at=now(), partitions=partitions, layout=layout)
+            evidence = dict(path=str(image), size=size, sha256=baseline,
+                            fixed_at=now(), partitions=partitions, layout=layout, **extra)
+            evidence['coverage'] = assess(image, partitions, layout, logical_size=size, boot_reader=boot_reader)
+            if is_ewf and ewf.snapshot(ewf.segments(image)) != stamp:
+                raise ValueError('分析期间 EWF 分段发生变化')
             self.save(evidence=evidence)
             self.log('IMAGE_LOAD', image, '成功', sha256=baseline, partitions=partitions)
         except Exception as error:
@@ -241,15 +268,36 @@ class Case:
 
     def image(self):
         if not self.data['evidence']:
-            raise ValueError('请先加载 RAW 镜像')
+            raise ValueError('请先加载镜像')
         return self.data['evidence']['path']
+
+    def register_source(self, values):
+        self.image()
+        source = {key: values.get(key, '').strip() for key in SOURCE_FIELDS}
+        if source['expected_sha256'] and not re.fullmatch('[0-9a-fA-F]{64}', source['expected_sha256']):
+            raise ValueError('交付方 SHA-256 应为 64 位十六进制字符')
+        self.log('SOURCE_REGISTER', self.image(), '登记', **source)
+        self.save(evidence={**self.data['evidence'], 'provenance': source})
 
     def verify(self, progress=None):
         try:
-            actual = sha256(self.image(), progress)
-            ok = actual == self.data['evidence']['sha256']
-            self.save(verification=dict(time=now(), actual=actual, ok=ok))
-            self.log('HASH_VERIFY', self.image(), '通过' if ok else '不匹配', actual=actual)
+            evidence = self.data['evidence']
+            if evidence.get('format') == 'EWF':
+                parts = ewf.segments(self.image())
+                before = ewf.snapshot(parts)
+                ok = (ewf.physical(parts, sha256, progress) == evidence['segments']
+                      and before == ewf.snapshot(ewf.segments(self.image())))
+                method = '逐段复算封装 SHA-256，与首次逻辑流校验时的全部分段比对'
+                actual = evidence['sha256'] if ok else None
+            else:
+                actual = sha256(self.image(), progress)
+                ok = actual == evidence['sha256']
+                method = '复算 RAW SHA-256'
+            changes = {}
+            if ok and not evidence.get('coverage'):
+                changes['evidence'] = {**evidence, 'coverage': assess(self.image(), evidence['partitions'], evidence['layout'])}
+            self.save(verification=dict(time=now(), actual=actual, ok=ok, method=method), **changes)
+            self.log('HASH_VERIFY', self.image(), '通过' if ok else '不匹配', actual=actual, method=method)
             return ok
         except Exception as error:
             self.log('HASH_VERIFY', self.data.get('evidence'), '失败', error=str(error))
@@ -281,7 +329,8 @@ class Case:
         for entry in entries:
             entry['filesystem'] = match[1] if match else ''
         try:
-            entries.extend(fat_regions(self.image(), offset, info, entries))
+            if self.data['evidence'].get('format') != 'EWF':
+                entries.extend(fat_regions(self.image(), offset, info, entries))
         except (ValueError, OSError, OverflowError) as error:
             info += f'\nFAT 空间区域未能映射：{error}'
         return info, entries
@@ -425,7 +474,8 @@ class Case:
         if not self.verify():
             conclusion = '不通过：镜像当前 SHA-256 与固定值不一致。'
         else:
-            conclusion = '通过：本次报告生成时镜像 SHA-256 与初始固定值一致。'
+            conclusion = ('通过：每个 EWF 分段摘要均与首次解码固定时一致。' if self.data['evidence'].get('format') == 'EWF'
+                          else '通过：本次报告生成时镜像 SHA-256 与初始固定值一致。')
         self.log('REPORT_GENERATE', 'Markdown', '开始')
         records = self.check_audit()
         content = render_report(self.data, records, conclusion)

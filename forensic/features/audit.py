@@ -5,6 +5,7 @@ from ..ui.analysis_panels import RecordsPanel, page
 from .api import Feature, Panel
 
 TITLES = {
+    'CONTENT_SEARCH': '搜索文件内容', 'SOURCE_REGISTER': '登记证据来源', 'REVIEW_EXPORT': '生成复核包',
     'CASE_CREATE': '新建案件', 'CASE_OPEN': '打开案件', 'IMAGE_LOAD_BEGIN': '开始载入镜像',
     'IMAGE_LOAD': '载入镜像', 'HASH_FIXED': '固定镜像摘要', 'HASH_VERIFY': '校验镜像完整性',
     'FILE_BROWSE': '读取分区文件', 'PARTITIONS_SCAN': '扫描所有分区', 'FILE_FILTER': '筛选文件',

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFrame, QHBoxLayout
 
 from ..core.formatting import display_time
 from .preview import FilePreview
+from ..core.browser_index import prepare
 from .pagination import PageLabel
 from .icons import entry_icon_kind, outline_icon
 from .metrics import CONTROL_GAP, PANEL_GAP, PANEL_PADDING, SECTION_GAP
@@ -266,7 +267,7 @@ class FileBrowserView(QWidget):
         node.setToolTip(0, f'{partition.get("description", "")}\n偏移 {offset} 扇区\n'
                        + (scan.get('error', state) if scan else state))
 
-    def display(self, entries):
+    def display(self, entries, prepared=None):
         self.cancel_display()
         self.preview.clear()
         self.detail.setText('选择目录定位文件；拖动分隔条调整树、列表和内容区域。')
@@ -280,7 +281,7 @@ class FileBrowserView(QWidget):
             self.image_node.setExpanded(True)
             self.partition_nodes, self._nodes = {}, {}
             offsets = list(dict.fromkeys([p['offset'] for p in (self._evidence or {}).get('partitions', [])]
-                                         + [e['offset'] for e in entries]))
+                                         + (list({key[0] for key in prepared[2]}) if prepared else [e['offset'] for e in entries])))
             for offset in offsets:
                 node = QTreeWidgetItem(self.image_node)
                 node.setIcon(0, self._icons['disk'])
@@ -301,7 +302,8 @@ class FileBrowserView(QWidget):
         self.keyword.clear()
         with QSignalBlocker(self.status_filter):
             self.status_filter.setCurrentIndex(0)
-        ordered = sorted(entries, key=lambda e: (e['offset'], e['path'].count('/'), e['mode'].lower().startswith('v/'),
+        prepared = prepared or (prepare(entries) if len(entries) > self.PAGING_THRESHOLD else None)
+        ordered = prepared[0] if prepared else sorted(entries, key=lambda e: (e['offset'], e['path'].count('/'), e['mode'].lower().startswith('v/'),
                                                  not e['directory'], e['path'], e.get('deleted', False)))
         self._total, self._visible_count = len(ordered), 0
         self._paged = self._total > self.PAGING_THRESHOLD
@@ -311,36 +313,43 @@ class FileBrowserView(QWidget):
         self._ordered = ordered if self._paged else []
         self._matching = []
         self._branches, self._inventory_by_id, self._tree_by_id = {}, {}, {}
+        self._children = {}
+        self._groups, self._entry_groups, self._directory_groups = {}, {}, {}
         if self._paged:
-            self._build_branches(ordered)
+            _, self._branches, self._children, self._inventory_by_id = prepared
+            for node in list(self._nodes.values()):
+                self._expand_branch(node)
             self._matching = ordered
             self._show_page(0)
             return
         self._remaining = iter(ordered)
         self._insert_batch()
 
-    def _build_branches(self, ordered):
-        directories = {(row['offset'], self._path(row)) for row in ordered if row['directory']}
-        for row in ordered:
-            offset, path = row['offset'], self._path(row)
-            self._inventory_by_id[id(row)] = row
-            parent = path.rpartition('/')[0]
-            self._branches.setdefault((offset, parent), []).append((path, row))
-            while parent and (offset, parent) not in directories:
-                directories.add((offset, parent))
-                ancestor = parent.rpartition('/')[0]
-                self._branches.setdefault((offset, ancestor), []).append((parent, None))
-                parent = ancestor
-        for (offset, path), node in list(self._nodes.items()):
-            self._expand_branch(node)
-
     def _expand_branch(self, node):
         if not getattr(self, '_paged', False):
             return
         offset, scope = node.data(0, self.OFFSET_ROLE), node.data(0, self.SCOPE_ROLE)
-        if self._nodes.get((offset, scope)) is not node:
+        if node in self._groups:
+            children = self._groups.pop(node)
+        elif self._nodes.get((offset, scope)) is node:
+            children = self._branches.pop((offset, scope), ())
+        else:
             return
-        for path, row in self._branches.pop((offset, scope), ()):
+        if len(children) > 2048:
+            for start in range(0, len(children), 256):
+                group_rows = children[start:start + 256]
+                group = QTreeWidgetItem(node, [f'条目 {start + 1}–{start + len(group_rows)}'])
+                group.setData(0, self.OFFSET_ROLE, offset)
+                group.setData(0, self.SCOPE_ROLE, scope)
+                group.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+                self._groups[group] = group_rows
+                for path, row in group_rows:
+                    if row:
+                        self._entry_groups[id(row)] = group
+                    if row is None or row['directory']:
+                        self._directory_groups.setdefault((offset,path),group)
+            return
+        for path, row in children:
             directory = row is None or row['directory']
             name = entry_name(row) if row else path.rpartition('/')[2]
             if row and row.get('deleted'):
@@ -364,7 +373,13 @@ class FileBrowserView(QWidget):
             while pending:
                 node = pending.pop()
                 self._expand_branch(node)
-                pending.extend(node.child(i) for i in range(node.childCount()) if node.child(i).data(0, self.SCOPE_ROLE) is not None)
+                node.setExpanded(True)
+                pending.extend(node.child(i) for i in range(node.childCount()) if node.child(i) not in self._groups
+                               and node.child(i).data(0, self.SCOPE_ROLE) is not None)
+            self.image_node.setExpanded(True)
+            for node in self.partition_nodes.values():
+                node.setExpanded(True)
+            return
         self.navigation.expandAll()
 
     def _locate_entry(self, entry):
@@ -373,7 +388,11 @@ class FileBrowserView(QWidget):
         for part in self._path(entry).split('/')[:-1]:
             self._expand_branch(self._nodes[(offset, parent)])
             parent = f'{parent}/{part}' if parent else part
+            if (offset,parent) not in self._nodes:
+                self._expand_branch(self._directory_groups[(offset,parent)])
         self._expand_branch(self._nodes[(offset, parent)])
+        if id(entry) not in self._tree_by_id:
+            self._expand_branch(self._entry_groups[id(entry)])
         return self._tree_by_id[id(entry)]
 
     def _parent_node(self, offset, path):
@@ -476,7 +495,12 @@ class FileBrowserView(QWidget):
 
     def _apply_visibility(self, *_):
         if self._paged:
-            self._matching = [entry for entry in self._ordered if self._matches(entry)]
+            scoped = self._scope is not None and self._scope_offset is not None
+            pool = self._children.get((self._scope_offset, self._scope), []) if scoped else self._ordered
+            if self._allowed is None and self.status_filter.currentIndex() == 0 and (scoped or self._scope_offset is None):
+                self._matching = pool
+            else:
+                self._matching = [entry for entry in pool if self._matches(entry)]
             self._show_page(0)
             return
         self._visible_count = 0

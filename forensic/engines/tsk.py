@@ -60,7 +60,7 @@ class TSK:
             raise RuntimeError('未找到 Sleuth Kit。请运行 scripts/install_tsk.ps1，或设置 TSK_BIN 为 bin 目录。')
 
     def command(self, name, args):
-        if name not in ('mmls', 'fsstat', 'fls', 'icat'):
+        if name not in ('mmls', 'fsstat', 'fls', 'icat', 'img_stat', 'img_cat'):
             raise ValueError('仅允许只读 TSK 命令')
         exe = str(self.bin / (name + ('.exe' if os.name == 'nt' else ''))) if self.bin else shutil.which(name)
         if not exe or not Path(exe).is_file():
@@ -68,9 +68,10 @@ class TSK:
         return [exe, *map(str, args)]
 
     def run(self, name, args, *, timeout=300, **streams):
+        args, cwd = self.image_args(args)
         try:
             return subprocess.run(self.command(name, args), timeout=timeout,
-                                  creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), **streams)
+                                  cwd=cwd, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), **streams)
         except subprocess.TimeoutExpired as error:
             raise TimeoutError(f'{name} 执行超时（{timeout} 秒）') from error
         except OSError as error:
@@ -81,6 +82,23 @@ class TSK:
         if result.returncode:
             raise RuntimeError(tsk_error(result.stderr))
         return result.stdout.decode(TSK_TEXT_ENCODING, errors='strict' if name == 'fls' else 'replace')
+
+    @staticmethod
+    def image_args(args):
+        args = list(args)
+        for index, arg in enumerate(args):
+            if str(arg).lower().endswith('.e01'):
+                path = Path(arg).resolve()
+                args[index] = path.name
+                if '-i' in args:
+                    args[args.index('-i') + 1] = 'ewf'
+                return args, path.parent
+        return args, None
+
+    def popen_image(self, name, args, **streams):
+        args, cwd = self.image_args(args)
+        return subprocess.Popen(self.command(name, args), cwd=cwd,
+                                creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0), **streams)
 
     def inspect(self, image):
         # mmls 失败可能仅代表无分区表；必须再由 fsstat 验证是否为分区镜像。
@@ -158,9 +176,8 @@ class TSK:
         with destination.open('xb') as output:
             if limit == 0:
                 return ''
-            with tempfile.TemporaryFile() as errors, subprocess.Popen(
-                    self.command('icat', args), stdout=subprocess.PIPE, stderr=errors,
-                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)) as process:
+            with tempfile.TemporaryFile() as errors, self.popen_image(
+                    'icat', args, stdout=subprocess.PIPE, stderr=errors) as process:
                 timeout = threading.Timer(300, process.kill)
                 timeout.start()
                 try:

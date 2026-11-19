@@ -165,7 +165,11 @@ class App(QObject):
         self.summary.setToolTip(f'SHA-256：{evidence["sha256"]}' if evidence else '')
         self.browser.set_context(evidence, data.get('partition_scans', []), data.get('fsstat', ''))
         if reset:
-            self.display(data['inventory'])
+            prepared = vars(self.case).pop('browser_index', None)
+            if prepared:
+                self.browser.display(data['inventory'], prepared)
+            else:
+                self.display(data['inventory'])
         self.features.refresh_panels(self.view.panels, reset=reset)
 
     def close(self):

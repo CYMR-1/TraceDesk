@@ -5,6 +5,7 @@ from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QLabel, QLineEdit, QPlainTextEdit, QSplitter, QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 from ..core.formatting import display_time
 from ..core.findings import OPERATIONS
+from ..core.coverage import coverage_text, source_status, SOURCE_FIELDS
 from .pagination import PageLabel
 
 
@@ -219,12 +220,19 @@ class EvidencePanel(QWidget):
     def set_text(self, data):
         evidence = data.get('evidence') if data else None
         if not evidence:
-            self.summary.setHtml(page('镜像与文件系统', '加载 RAW 镜像后查看证据摘要、分区状态与解析结果。', []))
+            self.summary.setHtml(page('镜像与文件系统', '加载 RAW 镜像或 E01 首段后查看摘要与覆盖范围。', []))
             self.text.clear()
             return
         scans = {s['offset']: s for s in data.get('partition_scans', [])}
         sections = [('证据固定', [('镜像路径', evidence['path']), ('大小', f"{evidence['size']:,} 字节"), ('固定时间（UTC+8）', display_time(evidence['fixed_at'], compact=True)), ('SHA-256', evidence['sha256'])])]
         rows = []
+        if evidence.get('format') == 'EWF':
+            sections.append(('EWF 分段镜像', [('分段数', len(evidence['segments'])),
+                ('封装总大小（字节）',sum(r['size'] for r in evidence['segments'])),
+                ('逻辑介质大小（字节）',evidence['size']), ('校验方式','首次解码整个逻辑磁盘，后续逐段复算封装摘要')]))
+        sections.append(('覆盖范围与证据来源', [('范围判断', coverage_text(evidence.get('coverage'))),
+            ('交付方摘要比对', source_status(evidence)), *[(title, evidence.get('provenance', {}).get(key, '') or '未登记')
+            for key, title in SOURCE_FIELDS.items()]]))
         for p in evidence['partitions']:
             scan = scans.get(p['offset'], {})
             state = f"已读取 {scan.get('count', 0)} 项" if scan.get('status') == 'ready' else scan.get('error', '待读取')
