@@ -1,9 +1,10 @@
 """只读文件预览，文本与十六进制字符列共享编码选择。"""
 import queue
+import re
 from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QIODevice, QPoint, QSize, Qt
-from PySide6.QtGui import QFontDatabase, QFontMetrics, QImageReader, QPixmap
+from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics, QImageReader, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
     QListView, QPlainTextEdit, QPushButton, QSizePolicy, QStackedWidget, QTreeWidget, QTreeWidgetItem,
@@ -20,6 +21,7 @@ from .metrics import CONTROL_GAP, SECTION_GAP
 MAX_IMAGE_BYTES = 32 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
 IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp', '.tif', '.tiff', '.ico'}
+GURMUKHI_OR_MALAYALAM = re.compile('[\u0a00-\u0a7f\u0d00-\u0d7f]')
 
 
 class ImagePreview(QLabel):
@@ -133,6 +135,15 @@ class FilePreview(QWidget):
         if 'Consolas' in QFontDatabase.families():
             fixed.setFamily('Consolas')
         fixed.setPointSizeF(10.5)
+        self._fixed_font = fixed
+        systems = QFontDatabase.WritingSystem
+        supported = set(QFontDatabase.families(systems.Gurmukhi)).intersection(
+            QFontDatabase.families(systems.Malayalam))
+        self._indic_font = QFont(fixed)
+        if supported:
+            family = next((name for name in ('Nirmala UI', 'Nirmala Text') if name in supported),
+                          min(supported))
+            self._indic_font.setFamilies([family, *fixed.families()])
         metrics = QFontMetrics(fixed)
         self.rows = QTreeWidget()
         self.rows.setObjectName('hexPreview')
@@ -343,13 +354,23 @@ class FilePreview(QWidget):
                 self.turn(0)
                 return
         self.rows.clear()
-        self.rows.addTopLevelItems([
-            QTreeWidgetItem(values)
-            for values in preview_rows(self.window, self.page * PAGE_BYTES, self.size, encoding, page_bytes=PAGE_BYTES)
-        ])
+        start = self.page * PAGE_BYTES
+        items = []
+        for values in preview_rows(self.window, start, self.size, encoding, page_bytes=PAGE_BYTES):
+            item = QTreeWidgetItem(values)
+            if GURMUKHI_OR_MALAYALAM.search(values[2]):
+                item.setFont(2, self._indic_font)
+            items.append(item)
+        self.rows.addTopLevelItems(items)
         if selected_offset:
             index = (int(selected_offset, 16) - self.page * PAGE_BYTES) // 16
             if 0 <= index < self.rows.topLevelItemCount():
                 self.rows.setCurrentItem(self.rows.topLevelItem(index))
-        self.text.setPlainText(preview_text(self.window, self.page * PAGE_BYTES, self.size, encoding, page_bytes=PAGE_BYTES))
+        content = preview_text(self.window, start, self.size, encoding, page_bytes=PAGE_BYTES)
+        font = self._indic_font if GURMUKHI_OR_MALAYALAM.search(content) else self._fixed_font
+        if self.text.font().families() != font.families():
+            # 先清掉旧页，避免切回等宽字体时 Qt 用它重新排版上一页的复杂文字。
+            self.text.clear()
+            self.text.setFont(font)
+        self.text.setPlainText(content)
         self.vertical.setValue(position)

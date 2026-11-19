@@ -10,8 +10,8 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from PySide6.QtCore import QBuffer, QIODevice, Qt
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtCore import QBuffer, QIODevice, Qt, qInstallMessageHandler
+from PySide6.QtGui import QColor, QFontDatabase, QImage, QTextLayout
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QTreeWidgetItemIterator, QVBoxLayout
 
@@ -56,6 +56,43 @@ class PreviewTests(unittest.TestCase):
                 return
             time.sleep(.01)
         self.fail('预览读取超时：' + preview.status.text())
+
+    def test_switch_encoding_shapes_indic_scripts_without_font_warnings(self):
+        systems = QFontDatabase.WritingSystem
+        supported = set(QFontDatabase.families(systems.Gurmukhi)) & set(QFontDatabase.families(systems.Malayalam))
+        if not supported:
+            self.skipTest('测试环境缺少同时支持两种文字的字体')
+        value = '中文 ਪੰਜਾਬੀ മലയാളം'
+        raw = value.encode('utf-8')
+        preview, _, _ = self.image_preview(raw, 'sample.txt')
+        fixed = preview.text.font().families()
+        logs = []
+        previous = qInstallMessageHandler(lambda _, ctx, msg: logs.append((ctx.category, msg)))
+        try:
+            for _ in range(2):
+                preview.encoding.setCurrentText('UTF-8')
+                preview.formats.setCurrentIndex(0)
+                preview.grab()
+                self.assertEqual(preview.text.toPlainText(), value)
+                self.assertIn(preview.text.font().families()[0], supported)
+                layout = QTextLayout(value, preview.text.font())
+                layout.beginLayout()
+                layout.createLine()
+                layout.endLayout()
+                runs = layout.glyphRuns()
+                self.assertTrue(runs)
+                self.assertTrue(all(0 not in run.glyphIndexes() for run in runs))
+                preview.formats.setCurrentIndex(1)
+                preview.grab()
+                rows = [preview.rows.topLevelItem(i) for i in range(preview.rows.topLevelItemCount())]
+                self.assertEqual(bytes.fromhex(' '.join(row.text(1) for row in rows)), raw)
+                self.assertEqual(''.join(row.text(2) for row in rows), value)
+                self.assertEqual(preview.rows.font().families(), fixed)
+                preview.encoding.setCurrentText('ASCII')
+                self.assertEqual(preview.text.font().families(), fixed)
+        finally:
+            qInstallMessageHandler(previous)
+        self.assertFalse([msg for category, msg in logs if category in ('qt.text.font.db', 'qt.qpa.fonts')])
 
     def test_image_content_detection_full_read_resize_hex_and_text_switch(self):
         picture = QImage(128, 96, QImage.Format.Format_RGB32)
