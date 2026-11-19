@@ -15,6 +15,7 @@ class FeatureContext:
     replace_case: Callable
     selected_entry: Callable
     progress: Callable
+    hash_image: Callable | None = None
 
 
 @dataclass(frozen=True)

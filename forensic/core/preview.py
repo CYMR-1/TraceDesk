@@ -10,6 +10,8 @@ from itertools import accumulate
 from pathlib import Path
 
 from ..engines.tsk import TSK, tsk_error
+from ..engines.random_read import VolumeReader
+from contextlib import closing
 
 
 ROW_BYTES = 16
@@ -79,7 +81,7 @@ def preview_rows(window, start, size, encoding, page_bytes=PAGE_BYTES):
 class PreviewReader:
     """在后台按需读取 icat 字节流，缓存已查看的部分以便向前翻页。"""
 
-    def __init__(self, image, entry, page_bytes=PAGE_BYTES, encoding='ASCII'):
+    def __init__(self, image, entry, page_bytes=PAGE_BYTES, encoding='ASCII', validate=None):
         self.encoding = encoding
         self.checkpoint = None
         self.page_bytes = page_bytes
@@ -88,7 +90,7 @@ class PreviewReader:
         self.closed = threading.Event()
         self.process = None
         self.pages.put(0)
-        threading.Thread(target=self._run, args=(image, entry), daemon=True).start()
+        threading.Thread(target=self._run, args=(image, entry, validate), daemon=True).start()
 
     def close(self):
         self.closed.set()
@@ -97,14 +99,35 @@ class PreviewReader:
         if process is not None:
             process.kill()
 
-    def _run(self, image, entry):
+    def _run(self, image, entry, validate=None):
         try:
+            if validate:
+                validate()
             if not Path(image).is_file():
                 raise FileNotFoundError(f'案件记录的镜像不存在：{image}')
             if 'extents' in entry:
                 with open(image, 'rb') as source:
                     self._read_extents(source, entry['extents'])
                 return
+            if (entry['size'] >= 8 << 20 and not entry.get('deleted')
+                    and entry['mode'].startswith('r/')):
+                try:
+                    with closing(VolumeReader(image)) as reader:
+                        read_at = reader.open_entry(entry)
+                        while not self.closed.is_set():
+                            page = self.pages.get()
+                            if page is None:
+                                break
+                            try:
+                                self._publish(page, entry['size'], '', read_at)
+                            except (OSError, ValueError, RuntimeError):
+                                self.pages.put(page)
+                                raise
+                        return
+                except (OSError, ValueError, RuntimeError):
+                    if self.closed.is_set():
+                        return
+                    # 无法随机读取的属性沿用 icat 预览路径。
             tool = TSK()
             deleted = entry.get('deleted', False)
             args = tool.entry_args(image, entry)

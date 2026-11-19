@@ -1,25 +1,42 @@
 """分段 EWF 的物理封装与解码后介质是不同的哈希对象。"""
 import hashlib
 import re
-import subprocess
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from .tsk import buffered_output, tsk_error
 
 
 def segments(image):
     first = Path(image).resolve()
     if first.suffix.upper() != '.E01':
         raise ValueError('请选择首段 .E01')
-    parts = sorted((p for p in first.parent.iterdir() if p.stem.casefold() == first.stem.casefold()
-                    and re.fullmatch(r'\.E\d\d', p.suffix, re.I)), key=lambda p:p.suffix.upper())
-    if not parts or any(int(p.suffix[2:]) != i for i,p in enumerate(parts, 1)):
+    numbered = {}
+    other_extensions = set()
+    for path in first.parent.iterdir():
+        if path.stem.casefold() != first.stem.casefold():
+            continue
+        suffix = path.suffix[1:].upper()
+        if re.fullmatch(r'E[0-9]{2}', suffix):
+            number = int(suffix[1:])
+        elif re.fullmatch('[E-Z][A-Z]{2}', suffix):
+            # .TXT 和 .LOG 等随附材料也可能同名，按 EWF1 文件头辨别。
+            number = 100 + (ord(suffix[0]) - ord('E')) * 676 + (ord(suffix[1]) - 65) * 26 + ord(suffix[2]) - 65
+            if not path.is_file():
+                continue
+            with path.open('rb') as source:
+                if source.read(8) != bytes.fromhex('455646090d0aff00'):
+                    other_extensions.add(number)
+                    continue
+        else:
+            continue
+        numbered[number] = path
+    if not numbered or sorted(numbered) != list(range(1, len(numbered) + 1)):
         raise ValueError('E01 分段缺失或编号不连续')
-    if any(p.stem.casefold() == first.stem.casefold() and re.fullmatch(r'\.E[A-Z]{2}',p.suffix,re.I)
-           for p in first.parent.iterdir()):
-        raise ValueError('暂不支持含字母续段的 EWF 镜像')
-    return parts
+    if len(numbered) + 1 in other_extensions:
+        raise ValueError('EWF 字母续段文件头无效')
+    return [numbered[i] for i in range(1, len(numbered) + 1)]
 
 
 def snapshot(parts):
@@ -51,19 +68,17 @@ def physical(parts, hash_file, progress=None):
 def logical(tool, image, size, progress=None):
     digest = hashlib.sha256()
     done = 0
-    path = Path(image).resolve()
-    with tempfile.TemporaryFile() as err, subprocess.Popen(tool.command('img_cat', ['-i','ewf',path.name]),
-            cwd=path.parent, stdout=subprocess.PIPE, stderr=err,
-            creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0)) as proc:
+    args = ['-i', 'ewf', image]
+    with tempfile.TemporaryFile() as errors, buffered_output(tool, 'img_cat', args, errors, size) as (proc, source):
         try:
-            while block := proc.stdout.read(4 << 20):
+            while block := source.read(4 << 20):
                 digest.update(block)
                 done += len(block)
                 if progress:
-                    progress(done,size)
+                    progress(done, size)
             if proc.wait() or done != size:
-                err.seek(0)
-                raise OSError(f'EWF 解码失败，读取 {done}/{size} 字节：' + err.read(512).decode(errors='replace'))
+                errors.seek(0)
+                raise OSError(f'EWF 解码失败，读取 {done}/{size} 字节：' + tsk_error(errors.read(512)))
         finally:
             proc.kill()
     return digest.hexdigest()

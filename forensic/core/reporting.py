@@ -16,6 +16,7 @@ def render_report(data, records, conclusion):
     lines += ['', '## 原始证据与完整性', '', f'- 路径：{cell(e["path"])}', f'- 字节数：{e["size"]}',
               f'- 初始逻辑介质 SHA-256：`{e["sha256"]}`',
               f'- {"与已核验分段对应的逻辑摘要（本次未重新解码）" if e.get("format") == "EWF" else "当前 SHA-256"}：`{data["verification"]["actual"] or "无法确认"}`',
+              f'- 完整读取时间：{display_time(data["verification"]["time"])}',
               f'- 校验方式：{data["verification"].get("method", "复算 RAW SHA-256")}',
               f'- 校验结论：{conclusion}', f'- 声明范围：{coverage_text(e.get("coverage"))}',
               f'- 来源校验：{source_status(e)}',
@@ -23,6 +24,8 @@ def render_report(data, records, conclusion):
               '', '## 文件清单摘要', '',
               f'已识别 {len(e["partitions"])} 个分区；当前清单共 {len(data["inventory"])} 项（最多列出 200 项）。', '']
     scans = {p['offset']: p for p in data.get('partition_scans', [])}
+    if data.get('index_verification'):
+        lines.append('- 建立清单时的完整性状态：' + cell(data['index_verification']))
     for partition in e['partitions']:
         scan = scans.get(partition['offset'])
         state = (f'已读取 {scan["count"]} 项' if scan['status'] == 'ready'
@@ -36,6 +39,8 @@ def render_report(data, records, conclusion):
     lines += ['', '## 导出副本', '']
     for row in data['exports']:
         lines.append(f'- 分区偏移 {row["offset"]} · {cell(row["source"])} → {cell(row["path"])}；SHA-256：`{row["sha256"]}`')
+        if row.get('source_verification'):
+            lines.append('  导出时的完整性状态：' + cell(row['source_verification']))
         if row.get('deleted'):
             lines.append('  ' + cell(deleted_export_summary(row)))
     findings = findings_text(records)

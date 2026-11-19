@@ -60,6 +60,8 @@ SOURCE_FIELDS = {'evidence_id': '证据编号', 'source': '来源 / 交付方', 
 
 def source_status(evidence):
     expected = evidence.get('provenance', {}).get('expected_sha256')
+    if not evidence.get('sha256'):
+        return '本机整镜像 SHA-256 待固定'
     if not expected:
         return '未提供交付方摘要，仅有本机固定值'
     return '交付方摘要与本机固定值一致' if expected.lower() == evidence['sha256'].lower() else '警告：交付方摘要与本机固定值不一致'

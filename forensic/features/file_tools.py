@@ -34,7 +34,7 @@ def inspect_file(context, compare=False):
                  f"镜像内文件 SHA-256：{data['sha256']}"]
         if other:
             lines.extend([other, f"本地文件 SHA-256：{data['comparison_sha256']}"])
-        lines.extend(filter(None, (data.get('read_note'), data.get('source_note'))))
+        lines.extend(filter(None, (data.get('read_note'), data.get('source_note'), data.get('source_verification'))))
         QMessageBox.information(context.root, title, '\n'.join(lines))
 
     context.task(title, lambda: examine(case, entry, other), show)

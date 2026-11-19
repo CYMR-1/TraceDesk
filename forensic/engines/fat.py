@@ -5,7 +5,7 @@ import re
 import struct
 
 
-def fat_regions(image, offset, fsstat, entries):
+def fat_regions(image, offset, fsstat, entries, *, cancel=None):
     match = re.search(r'^File System Type: FAT(12|16|32)\s*$', fsstat, re.M)
     if not match:
         return []
@@ -54,6 +54,8 @@ def fat_regions(image, offset, fsstat, entries):
             def claim(cluster):
                 count = 0
                 while 2 <= cluster < clusters + 2:
+                    if cancel is not None and count % 65536 == 0 and cancel.is_set():
+                        raise InterruptedError('已取消建立索引')
                     byte, bit = divmod(cluster, 8)
                     if owned[byte] & (1 << bit):
                         break
@@ -68,7 +70,9 @@ def fat_regions(image, offset, fsstat, entries):
                 root_size = claim(struct.unpack_from('<I', boot, 44)[0]) * cluster_size
 
             # TSK 的 FAT inode 3 对应首个数据扇区的首个 32 字节目录项。
-            for entry in entries:
+            for index, entry in enumerate(entries):
+                if cancel is not None and index % 1024 == 0 and cancel.is_set():
+                    raise InterruptedError('已取消建立索引')
                 if not entry['mode'].startswith(('r/', 'd/')):
                     continue
                 slot = int(entry['inode']) - 3
@@ -91,20 +95,31 @@ def fat_regions(image, offset, fsstat, entries):
 
             free, idle = [], []
             reserved_value = {12: 0xff0, 16: 0xfff0, 32: 0xffffff0}[bits]
-            for cluster in range(2, clusters + 2):
-                value = next_cluster(cluster)
-                if value == 0:
-                    ranges = free
-                elif (value == 1 or reserved_value <= value < reserved_value + 8
-                      or owned[cluster // 8] & (1 << (cluster % 8))):
-                    continue
+            def add_extent(ranges, first, count):
+                start = base + data_sector * sector + (first - 2) * cluster_size
+                length = count * cluster_size
+                if ranges and ranges[-1][0] + ranges[-1][1] == start:
+                    ranges[-1][1] += length
                 else:
-                    ranges = idle
-                start = base + data_sector * sector + (cluster - 2) * cluster_size
-                if ranges and sum(ranges[-1]) == start:
-                    ranges[-1][1] += cluster_size
-                else:
-                    ranges.append([start, cluster_size])
+                    ranges.append([start, length])
+
+            for first in range(2, clusters + 2, 16384):
+                if cancel is not None and cancel.is_set():
+                    raise InterruptedError('已取消建立索引')
+                end = min(first + 16384, clusters + 2)
+                if bits in (16, 32):
+                    width = bits // 8
+                    block = table[delta + first * width:delta + end * width]
+                    if block.count(0) == len(block):
+                        add_extent(free, first, end - first)
+                        continue
+                for cluster in range(first, end):
+                    value = next_cluster(cluster)
+                    if value == 0:
+                        add_extent(free, cluster, 1)
+                    elif (value != 1 and not reserved_value <= value < reserved_value + 8
+                          and not owned[cluster // 8] & (1 << (cluster % 8))):
+                        add_extent(idle, cluster, 1)
 
     common = dict(mode='v/v---------', directory=False, offset=offset, atime=0, mtime=0, ctime=0, crtime=0)
     regions = [dict(common, path='(根目录)', inode='2', size=root_size)]

@@ -242,6 +242,11 @@ class PreviewTests(unittest.TestCase):
         self.qt.processEvents()
         view = combo.view()
         try:
+            # Windows 可能先播放弹出动画，然后才显示接收点击的列表。
+            deadline = time.monotonic() + 2
+            while not view.isVisible() and time.monotonic() < deadline:
+                QTest.qWait(10)
+            self.assertTrue(view.isVisible())
             self.assertEqual([combo.itemText(i) for i in range(combo.count())], list(PREVIEW_ENCODINGS))
             for row in range(combo.count()):
                 rect = view.visualRect(view.model().index(row, 0))

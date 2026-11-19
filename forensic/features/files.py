@@ -23,7 +23,11 @@ def select(context, event=None):
     if entry['directory'] or entry['mode'].startswith('V/'):
         browser.preview.clear('请选择目录中的文件')
     else:
-        browser.preview.open_file(context.case().image(), entry)
+        case = context.case()
+        if (getattr(case, 'data', {}).get('evidence') or {}).get('large_image'):
+            browser.preview.open_file(case.image(), entry, validate=case.check_source)
+        else:
+            browser.preview.open_file(case.image(), entry)
 
 
 FEATURE = Feature('files', requires=('cases', 'evidence'), actions=(

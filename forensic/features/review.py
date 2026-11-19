@@ -5,7 +5,6 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFormLayout
                                QVBoxLayout, QWidget)
 from ..core.content_search import SearchControl, pattern, search
 from ..core.coverage import SOURCE_FIELDS, source_status
-from ..core.file_tools import identity
 from ..core.preview import PAGE_BYTES
 from ..core.review import build_bundle
 from ..ui.preview import FilePreview
@@ -106,7 +105,7 @@ class ReviewPanel(QWidget):
             item = QTreeWidgetItem(self.table, [str(pos), str(entry['offset']), str(entry['inode']), entry['path'], before, after])
             item.setData(0, Qt.ItemDataRole.UserRole, index)
         self.status.setText(f"{self.record['status']} · 已处理 {self.record['visited']}/{self.record['eligible']} 项 · "
-                            f"命中 {len(self.hits)} 条 · 读取失败 {len(self.record['errors'])} 项。清单及失败明细：reports/{self.name}")
+                            f"命中 {len(self.hits)} 条 · 读取失败 {len(self.record['errors'])} 项。{self.record['verification']}。清单及失败明细：reports/{self.name}")
 
     def preview(self, item, column):
         if not self.ready():
@@ -119,7 +118,8 @@ class ReviewPanel(QWidget):
         layout.addWidget(QLabel(f"文件内偏移 {pos}（0x{pos:X}） · {self.record['encoding']} · {self.record['needle'][:96]}"))
         view = FilePreview(dialog)
         layout.addWidget(view)
-        view.open_file(self.case.image(), entry)
+        validate = self.case.check_source if self.case.data['evidence'].get('large_image') else None
+        view.open_file(self.case.image(), entry, validate=validate)
         view.formats.setCurrentIndex(1)
         pending = True
         def poll():
@@ -159,7 +159,9 @@ class ReviewPanel(QWidget):
         entry, pos, before, after = self.hits[item.data(0, Qt.ItemDataRole.UserRole)]
         reference = self.record['hits'][item.data(0, Qt.ItemDataRole.UserRole)]
         def save():
-            self.case.log('FILE_NOTE', entry['path'], '成功', **identity(self.case, entry),
+            self.case.log('FILE_NOTE', entry['path'], '成功', offset=entry['offset'], inode=entry['inode'],
+                          deleted=entry['deleted'], image_sha256=self.record['image_sha256'],
+                          source_verification=self.record['verification'],
                           note=f"内容命中：{self.record['query']}；{self.record['encoding']}；文件内字节偏移 {pos}",
                           file_byte=pos, needle=self.record['needle'], before=before, after=after, search_record=self.name,
                           source_note=reference['source_note'], reallocated=entry.get('reallocated', False))

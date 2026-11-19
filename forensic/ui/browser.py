@@ -41,6 +41,10 @@ class FileBrowserView(QWidget):
         self._remaining = iter(())
         self._total = self._visible_count = 0
         self._busy = False
+        self.index_cancel = None
+        self.quick = False
+        self.quick_location = None
+        self._ancestors = {}
         self._image_name = '尚未加载镜像'
         self._evidence, self._scans = None, {}
         self._filesystems = {}
@@ -82,6 +86,12 @@ class FileBrowserView(QWidget):
         nav_buttons.addWidget(self.expand_button)
         nav_buttons.addWidget(self.collapse_button)
         nav_layout.addLayout(nav_buttons)
+        self.parent_button = self._button('返回上级目录', self._parent_directory)
+        nav_layout.addWidget(self.parent_button)
+        self.parent_button.hide()
+        self.index_button = self._button('建立完整文件索引', self._index_clicked)
+        nav_layout.addWidget(self.index_button)
+        self.index_button.hide()
         nav_layout.addWidget(self.navigation, 1)
         self.tree_count = label('尚未读取文件树', 'muted')
         self.tree_count.setWordWrap(True)
@@ -236,7 +246,32 @@ class FileBrowserView(QWidget):
             menu.exec(view.viewport().mapToGlobal(pos))
         menu.deleteLater()
 
-    def set_context(self, evidence, scans=(), fsstat=''):
+    def _index_clicked(self):
+        if self.index_cancel is None:
+            self.commands['scan']()
+        else:
+            self.index_cancel.set()
+            self.index_button.setEnabled(False)
+            self.index_button.setText('正在取消…')
+
+    def _parent_directory(self):
+        offset, _, path = self.quick_location
+        parent = path.rpartition('/')[0]
+        self.commands['browse_dir'](offset, self._ancestors.get((offset, parent)), parent)
+
+    def set_context(self, evidence, scans=(), fsstat='', location=None):
+        self.quick = bool(evidence and evidence.get('large_image') and not scans)
+        if not self.quick or (self._evidence or {}).get('path') != (evidence or {}).get('path'):
+            self._ancestors.clear()
+        self.quick_location = location
+        if location:
+            offset, inode, path = location
+            self._ancestors = {key: value for key, value in self._ancestors.items()
+                               if key[0] == offset and path.startswith(key[1] + '/')}
+            self._ancestors[offset, path] = inode
+        self.index_button.setVisible(bool(evidence and evidence.get('large_image')))
+        self.index_button.setText('建立完整文件索引' if self.quick else '重新建立文件索引')
+        self.parent_button.setVisible(bool(self.quick and location and location[2]))
         self._evidence = evidence
         self._filesystems = {}
         # 兼容旧案件：从已保存的各分区 fsstat 识别时间能力，无须重扫证据。
@@ -418,7 +453,7 @@ class FileBrowserView(QWidget):
         path = self._path(entry)
         dates = [display_time(entry.get(key, 0), compact=True) for key in ('mtime', 'atime', 'ctime', 'crtime')]
         filesystem = entry.get('filesystem') or self._filesystems.get(entry['offset'], '')
-        if not entry.get('ctime') and filesystem.upper() in ('FAT12', 'FAT16', 'FAT32', 'EXFAT'):
+        if not entry.get('ctime') and filesystem.upper() in ('FAT', 'FAT12', 'FAT16', 'FAT32', 'EXFAT'):
             dates[2] = '不支持（' + filesystem + '）'
         item = QTreeWidgetItem(self.tree, [entry_name(entry) or '/', entry_status(entry),
                                           str(entry['size']), str(entry['inode'] or '—'), *dates, str(entry['offset'])])
@@ -549,10 +584,17 @@ class FileBrowserView(QWidget):
         self.breadcrumb.setText(f'{self._image_name}  /  {partition}  /  {scope}')
         self.result_count.setText(f'当前范围 {self._visible_count} 项 · 完整清单 {self._total} 项 · 时间 UTC+8')
         self.tree_count.setText(f'{len(self.partition_nodes)} 个分区 · 完整清单 {len(self.entries)} / {self._total} 项\n含目录、删除记录与系统区域')
+        if self.quick:
+            where = f'分区 {self.quick_location[0]}  /  {self.quick_location[2]}' if self.quick_location else '选择分区'
+            self.breadcrumb.setText(f'{self._image_name}  /  {where}')
+            self.result_count.setText(f'当前目录 {self._total} 项 · 匹配 {self._visible_count} 项')
         if self._paged:
             pages = max(1, (self._visible_count + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
             self.page_label.set_pages(self._page + 1, pages)
             self.tree_count.setText(f'{len(self.partition_nodes)} 个分区 · 完整清单 {self._total} 项\n展开目录可查看全部子项')
+
+        if self.quick:
+            self.tree_count.setText('按目录读取 · 全案搜索和时间线可使用完整文件索引')
 
     def _navigation_selected(self):
         selected = self.navigation.selectedItems()
@@ -562,6 +604,12 @@ class FileBrowserView(QWidget):
         self._scope_offset = node.data(0, self.OFFSET_ROLE)
         key = node.data(0, self.ROW_ROLE)
         entry = self._inventory_by_id.get(key) if self._paged else self.entries.get(key)
+        if self.quick and self._scope_offset is not None and (entry is None or entry['directory']):
+            path = self._path(entry) if entry else node.data(0, self.SCOPE_ROLE) or ''
+            inode = entry['inode'] if entry else self._ancestors.get((self._scope_offset, path))
+            if (not path or inode is not None) and (self._scope_offset, inode, path) != self.quick_location:
+                self.commands['browse_dir'](self._scope_offset, inode, path)
+                return
         if entry is not None and not entry['directory']:
             self._scope = self._path(entry).rpartition('/')[0]
             self.reset_filter()
@@ -605,6 +653,9 @@ class FileBrowserView(QWidget):
     def _open_directory(self, item, _column):
         entry = item.data(0, Qt.ItemDataRole.UserRole)
         if entry and entry['directory']:
+            if self.quick:
+                self.commands['browse_dir'](entry['offset'], entry['inode'], self._path(entry))
+                return
             self._scope_offset = entry['offset']
             self._scope = self._path(entry)
             with QSignalBlocker(self.tree):
@@ -618,10 +669,15 @@ class FileBrowserView(QWidget):
 
     def set_busy(self, busy):
         self._busy = busy
-        for widget in (self.filter_button,
+        for widget in (self.filter_button, self.index_button, self.parent_button,
                        self.reset_button, self.suffix, self.keyword, self.status_filter,
                        self.navigation, self.tree, self.expand_button, self.collapse_button):
             widget.setEnabled(not busy)
+        if busy and self.index_cancel is not None:
+            self.index_button.setText('取消建立索引')
+            self.index_button.setEnabled(True)
+        elif not busy:
+            self.index_cancel = None
         selected = self.tree.selectedItems()
         entry = selected[0].data(0, Qt.ItemDataRole.UserRole) if selected else None
         self._update_file_actions(entry)

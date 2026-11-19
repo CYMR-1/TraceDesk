@@ -1,10 +1,14 @@
 """以参数数组调用官方 TSK，只开放读取命令，不使用 shell。"""
+import _winapi
+import msvcrt
 import os
+from contextlib import contextmanager
 import re
 import shutil
 import subprocess
 import tempfile
 import threading
+from time import monotonic
 from pathlib import Path
 
 from ..paths import TOOLS_DIR
@@ -47,6 +51,25 @@ def entry_name(entry):
         if re.fullmatch(r'\$FAT\d+', name):
             return f'FAT {name[4:]} ({name})'
     return name
+
+
+@contextmanager
+def buffered_output(tool, name, args, stderr, size):
+    # Windows 默认匿名管道很小，大文件会频繁阻塞 icat。最多缓存 1 MiB。
+    handles = list(_winapi.CreatePipe(None, min(size, 1024 * 1024)))
+    try:
+        def open_end(mode, flags):
+            fd = msvcrt.open_osfhandle(handles[0], flags | os.O_BINARY)
+            handles.pop(0)  # 此后由文件对象关闭句柄。
+            return os.fdopen(fd, mode)
+
+        with open_end('rb', os.O_RDONLY) as source, open_end('wb', os.O_WRONLY) as target:
+            with tool.popen_image(name, args, stdout=target, stderr=stderr) as proc:
+                target.close()  # 只留下子进程的写端，子进程退出时读取方才能收到 EOF。
+                yield proc, source
+    finally:
+        for handle in handles:
+            _winapi.CloseHandle(handle)
 
 
 class TSK:
@@ -114,23 +137,57 @@ class TSK:
                 raise RuntimeError('分区表中未发现可分析分区')
             return raw, offsets
         except RuntimeError as error:
-            self.text('fsstat', ['-i', 'raw', '-o', 0, image])
+            self.text('fsstat', ['-t', '-i', 'raw', '-o', 0, image])
             return f'无可解析分区表，fsstat 确认偏移 0 的文件系统。\n{error}', [{'offset': 0, 'description': '分区镜像 / 文件系统位于偏移 0'}]
 
-    def files(self, image, offset):
+    def files(self, image, offset, *, cancel=None):
+        return self._list(image, offset, recursive=True, cancel=cancel)
+
+    def directory(self, image, offset, inode=None, path=''):
+        if inode is not None and not re.fullmatch(r'\d+(?:-\d+)*', str(inode)):
+            raise ValueError('非法目录 inode')
+        return self._list(image, offset, recursive=False, inode=inode, path=path)
+
+    def _list(self, image, offset, *, recursive, inode=None, path='', cancel=None):
         # FAT 等文件系统没有内置时区，本课程原型明确按 UTC 解释，避免依赖宿主时区。
         # 分别读取两种分配状态，以免把原名恰好以 " (deleted)" 结尾的正常文件误判为删除项。
         entries = []
         timeout = max(300, 120 * ((Path(image).stat().st_size + 2**30 - 1) // 2**30))
         for flag in ('-u', '-d'):
             with tempfile.TemporaryFile() as output:
-                result = self.run('fls', ['-i', 'raw', '-o', offset, '-z', 'UTC', '-r', flag, '-p', '-m', '/', image],
-                                  stdout=output, stderr=subprocess.PIPE, timeout=timeout)
-                if result.returncode:
-                    raise RuntimeError(tsk_error(result.stderr))
+                args = ['-i', 'raw', '-o', offset, '-z', 'UTC', flag, '-p', '-m', '/', image]
+                if recursive:
+                    args.insert(0, '-r')
+                if inode is not None:
+                    args.append(inode)
+                if cancel is None:
+                    result = self.run('fls', args, stdout=output, stderr=subprocess.PIPE, timeout=timeout)
+                    if result.returncode:
+                        raise RuntimeError(tsk_error(result.stderr))
+                else:
+                    with tempfile.TemporaryFile() as errors, self.popen_image(
+                            'fls', args, stdout=output, stderr=errors) as process:
+                        deadline = monotonic() + timeout
+                        try:
+                            while process.poll() is None:
+                                if cancel.wait(.1):
+                                    raise InterruptedError('已取消建立索引')
+                                if monotonic() > deadline:
+                                    raise TimeoutError('fls 执行超时')
+                            if process.returncode:
+                                errors.seek(0)
+                                raise RuntimeError(tsk_error(errors.read(2000)))
+                        finally:
+                            process.kill()
                 output.seek(0)
                 lines = (line.decode(TSK_TEXT_ENCODING).rstrip('\r\n') for line in output)
-                entries.extend(self._body_entries(lines, offset, deleted=(flag == '-d')))
+                for index, entry in enumerate(self._body_entries(lines, offset, deleted=(flag == '-d'))):
+                    if cancel is not None and index % 2048 == 0 and cancel.is_set():
+                        raise InterruptedError('已取消建立索引')
+                    entries.append(entry)
+        if path:
+            for row in entries:
+                row['path'] = path + '/' + row['path']
         return entries
 
     @staticmethod
@@ -155,11 +212,11 @@ class TSK:
         args = ['-i', 'raw', '-o', offset, image, inode]
         return ['-r', *args] if recover else args
 
-    def export(self, image, offset, inode, destination):
+    def export(self, image, offset, inode, destination, *, size=0):
         args = self.file_args(image, offset, inode)
         # icat 的 stdout 直接落盘，文件内容不经过文本解码，也不整文件载入内存。
         with destination.open('xb') as output:
-            result = self.run('icat', args,
+            result = self.run('icat', args, timeout=max(300, size // (1 << 20)),
                               stdout=output, stderr=subprocess.PIPE)
         if result.returncode:
             destination.unlink(missing_ok=True)
@@ -171,33 +228,43 @@ class TSK:
 
     def export_deleted(self, image, entry, destination):
         """按预览使用的 inode 和恢复模式写入可读前缀，返回读取状态说明。"""
-        args = self.entry_args(image, entry)
-        limit = entry['size']
         with destination.open('xb') as output:
-            if limit == 0:
-                return ''
-            with tempfile.TemporaryFile() as errors, self.popen_image(
-                    'icat', args, stdout=subprocess.PIPE, stderr=errors) as process:
-                timeout = threading.Timer(300, process.kill)
-                timeout.start()
-                try:
-                    written = 0
-                    while written < limit:
-                        block = process.stdout.read(min(1024 * 1024, limit - written))
-                        if not block:
-                            break
-                        written += output.write(block)
-                    if written == limit and process.stdout.read(1):
-                        return '已按目录记录大小截取'
-                    if process.wait():
-                        errors.seek(0)
-                        note = tsk_error(errors.read(2000)) or 'icat 未正常完成读取'
-                        if written:
-                            return note
-                        raise OSError(note)
-                    if not written:
-                        raise OSError('未能从该删除记录读取数据')
-                    return ''
-                finally:
-                    timeout.cancel()
-                    process.kill()
+            _, note = self.stream_entry(image, entry, output.write)
+            return note
+
+    def stream_entry(self, image, entry, consume):
+        """一次读取，按目录长度处理数据块。删除项保留可恢复前缀。"""
+        limit = entry['size']
+        deleted = entry.get('deleted', False)
+        if limit == 0 and deleted:
+            return 0, ''
+        args = self.entry_args(image, entry)
+        with tempfile.TemporaryFile() as errors, buffered_output(self, 'icat', args, errors, limit) as (process, stream):
+            timeout = threading.Timer(max(300, limit // (1 << 20)), process.kill)
+            timeout.start()
+            try:
+                written = 0
+                while written < limit:
+                    block = stream.read(min(1 << 20, limit - written))
+                    if not block:
+                        break
+                    consume(block)
+                    written += len(block)
+                if written == limit and stream.read(1):
+                    if deleted:
+                        return written, '已按目录记录大小截取'
+                    raise ValueError('实际读取长度超过文件记录')
+                if process.wait():
+                    errors.seek(0)
+                    note = tsk_error(errors.read(2000)) or 'icat 未正常完成读取'
+                    if deleted and written:
+                        return written, note
+                    raise OSError(note)
+                if written != limit and not deleted:
+                    raise ValueError('实际读取长度与文件记录不符')
+                if deleted and not written:
+                    raise OSError('未能从该删除记录读取数据')
+                return written, ''
+            finally:
+                timeout.cancel()
+                process.kill()

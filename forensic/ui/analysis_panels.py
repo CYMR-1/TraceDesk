@@ -2,7 +2,7 @@
 from html import escape
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontDatabase
-from PySide6.QtWidgets import QHBoxLayout, QPushButton, QLabel, QLineEdit, QPlainTextEdit, QSplitter, QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QPushButton, QLabel, QLineEdit, QPlainTextEdit, QSplitter, QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 from ..core.formatting import display_time
 from ..core.findings import OPERATIONS
 from ..core.coverage import coverage_text, source_status, SOURCE_FIELDS
@@ -126,16 +126,30 @@ class TimelinePanel(RecordsPanel):
         self._offset = 0
         if self._start:
             result = ('大清单 · 点击生成时间线，在后台整理事件。', [])
-        hint, self._matches = result
+        hint, records, *task = result
+        self._search_task = task[0] if task else None
+        self._matches = range(len(records)) if self._search_task else records
         self.status.setToolTip(hint)
-        self._numbers = {id(row): number for number, row in enumerate(self._matches, 1)}
+        self._numbers = {} if self._search_task else {id(row): n for n, row in enumerate(records, 1)}
         self._current_number = '—'
-        super().set_text(result)
+        super().set_text((hint, records))
 
     def _search(self):
         query = self.search.text().strip().casefold()
+        if self._search_task:
+            records = self.records
+            if query:
+                self._search_task('筛选时间线', lambda: records.matching(query), self._set_matches)
+            else:
+                self._set_matches(range(len(records)))
+            return
         self._matches = ([r for r in self.records if query in str(r).casefold() or
                           query in str(r['time']).replace('T', ' ').casefold()] if query else self.records)
+        self._offset = 0
+        self._populate()
+
+    def _set_matches(self, positions):
+        self._matches = positions
         self._offset = 0
         self._populate()
 
@@ -154,7 +168,7 @@ class TimelinePanel(RecordsPanel):
     def _update_status(self, number=None):
         if number is not None:
             self._current_number = number
-        self.status.setText(f'MACB 时间线·UTC+8·当前 {self._current_number}/{len(self.records)}')
+        self.status.setText(f'MAC/B 时间线·UTC+8·当前 {self._current_number}/{len(self.records)}' if self.records else self.status.toolTip())
 
     def page_records(self, query):
         count = len(self._matches)
@@ -162,10 +176,13 @@ class TimelinePanel(RecordsPanel):
         self.back.setEnabled(self._offset > 0)
         self.forward.setEnabled(self._offset + 100 < count)
         self._update_status()
-        return self._matches[self._offset:self._offset + 100]
+        rows = self._matches[self._offset:self._offset + 100]
+        if self._search_task:
+            return [dict(self.records[index], number=index + 1) for index in rows]
+        return rows
 
     def columns(self, r):
-        return [str(self._numbers[id(r)]), display_time(r['time'], compact=True), r['event'], r['status'], str(r['offset']), str(r['inode']), r['path']]
+        return [str(r['number'] if self._search_task else self._numbers[id(r)]), display_time(r['time'], compact=True), r['event'], r['status'], str(r['offset']), str(r['inode']), r['path']]
 
     def details(self, r):
         fields = [('时间', display_time(r['time'], compact=True)), ('事件', r['event']), ('状态', r['status']),
@@ -186,11 +203,11 @@ class FindingsPanel(RecordsPanel):
     def details(self, items):
         first = items[0]
         d = first['details']
-        sections = [('证据来源', [('分区偏移（扇区）', d['offset']), ('inode', d['inode']), ('镜像 SHA-256', d['image_sha256'])])]
+        sections = [('证据来源', [('分区偏移（扇区）', d['offset']), ('inode', d['inode']), ('镜像 SHA-256', d['image_sha256'] or '记录时待固定')])]
         for r in reversed(items):
             details = r['details']
             rows = [('时间', display_time(r['timestamp'], compact=True)), ('操作人员', r['actor']), ('结果', r['result'])]
-            for key, title in [('note', '笔记'), ('size', '读取字节数'), ('recorded_size', '目录记录字节数'), ('sha256', '读取内容 SHA-256'), ('comparison', '对照文件'), ('comparison_sha256', '对照 SHA-256'), ('source_note', '来源状态'), ('read_note', '读取说明'), ('error', '错误')]:
+            for key, title in [('note', '笔记'), ('size', '读取字节数'), ('recorded_size', '目录记录字节数'), ('sha256', '读取内容 SHA-256'), ('comparison', '对照文件'), ('comparison_sha256', '对照 SHA-256'), ('source_note', '来源状态'), ('read_note', '读取说明'), ('source_verification', '操作时的完整性状态'), ('error', '错误')]:
                 if key in details:
                     rows.append((title, details[key]))
             sections.append((f"#{r['seq']} · {OPERATIONS[r['action']]}", rows))
@@ -208,7 +225,15 @@ class EvidencePanel(QWidget):
         raw = QWidget()
         raw_layout = QVBoxLayout(raw)
         raw_layout.setContentsMargins(0, 6, 0, 0)
-        raw_layout.addWidget(QLabel('分区布局与文件系统 · 原始解析结果'))
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel('分区布局与文件系统 · 原始解析结果'))
+        controls.addStretch()
+        self.partition = QComboBox()
+        self.details = QPushButton('导出完整 fsstat')
+        self.details.clicked.connect(lambda: self._export(self.partition.currentData()))
+        controls.addWidget(self.partition)
+        controls.addWidget(self.details)
+        raw_layout.addLayout(controls)
         self.text = QPlainTextEdit()
         self.text.setReadOnly(True)
         self.text.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
@@ -220,12 +245,22 @@ class EvidencePanel(QWidget):
 
     def set_text(self, data):
         evidence = data.get('evidence') if data else None
+        self._export = data.get('export_fsstat') if data else None
+        large = bool(evidence and evidence.get('large_image') and self._export)
+        self.details.setVisible(large)
+        self.partition.setVisible(large)
+        selected = self.partition.currentData()
+        self.partition.clear()
+        if large:
+            for p in evidence['partitions']:
+                self.partition.addItem(f"偏移 {p['offset']} 扇区", p['offset'])
+            self.partition.setCurrentIndex(max(0, self.partition.findData(selected)))
         if not evidence:
             self.summary.setHtml(page('镜像与文件系统', '加载 RAW 镜像或 E01 首段后查看摘要与覆盖范围。', []))
             self.text.clear()
             return
         scans = {s['offset']: s for s in data.get('partition_scans', [])}
-        sections = [('证据固定', [('镜像路径', evidence['path']), ('大小', f"{evidence['size']:,} 字节"), ('固定时间（UTC+8）', display_time(evidence['fixed_at'], compact=True)), ('SHA-256', evidence['sha256'])])]
+        sections = [('证据固定', [('镜像路径', evidence['path']), ('大小', f"{evidence['size']:,} 字节"), ('固定时间（UTC+8）', display_time(evidence['fixed_at'], compact=True) if evidence['fixed_at'] else '待固定'), ('SHA-256', evidence['sha256'] or '待固定')])]
         rows = []
         if evidence.get('format') == 'EWF':
             sections.append(('EWF 分段镜像', [('分段数', len(evidence['segments'])),

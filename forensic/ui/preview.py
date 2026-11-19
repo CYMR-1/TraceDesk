@@ -202,18 +202,19 @@ class FilePreview(QWidget):
         self._page_status = message
         self._update_controls()
 
-    def open_file(self, image, entry):
+    def open_file(self, image, entry, validate=None):
         self._reset_data()
         self._has_file = True
         self.source_note = deleted_source_note(entry)
-        self._source, self._entry = image, dict(entry)
+        self._source, self._entry, self._validate = image, dict(entry), validate
         self.size = entry['size']
         # 常见图片立即显示图片标签；未知类型保持当前标签直到文件头读取完成。
         if Path(entry.get('path', '')).suffix.lower() in IMAGE_SUFFIXES:
             self._set_image_mode(True)
         if self.size:
             self._page_status = self._image_status = '正在读取…'
-            self.reader = PreviewReader(image, entry, page_bytes=PAGE_BYTES, encoding=self.encoding.currentText())
+            self.reader = PreviewReader(image, entry, page_bytes=PAGE_BYTES, encoding=self.encoding.currentText(),
+                                        validate=validate)
         else:
             self._set_image_mode(False)
             self._page_status = '删除记录为 0 字节，无内容可显示' if entry.get('deleted') else '空文件（0 字节）'
@@ -292,7 +293,7 @@ class FilePreview(QWidget):
             self._image_error('图片超过 32 MiB 预览上限，可导出后查看')
             return
         # 复用后台只读读取器获取完整图片，字节分页仍由原读取器提供。
-        self.image_reader = PreviewReader(self._source, self._entry, page_bytes=MAX_IMAGE_BYTES)
+        self.image_reader = PreviewReader(self._source, self._entry, page_bytes=MAX_IMAGE_BYTES, validate=self._validate)
 
     def _image_error(self, message):
         self._image_status = ' · '.join(filter(None, (message, self.source_note)))

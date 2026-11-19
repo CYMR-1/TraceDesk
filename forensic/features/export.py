@@ -18,7 +18,7 @@ def export(context):
     def done(path):
         record = next(r for r in reversed(context.case().data['exports']) if r['path'] == str(path))
         title = '部分导出' if record['size'] < entry['size'] else '导出成功'
-        ExportResultDialog(context.root, path, title, deleted_export_summary(record)).exec()
+        ExportResultDialog(context.root, path, title, ' · '.join(filter(None, (deleted_export_summary(record), record.get('source_verification'))))).exec()
 
     context.task('校验并导出证据副本', lambda: context.case().export(entry), done)
 

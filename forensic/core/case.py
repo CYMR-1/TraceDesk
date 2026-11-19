@@ -1,4 +1,6 @@
 """案件隔离、证据固定、追加审计与报告。所有证据文件均以 rb 打开。"""
+import _winapi
+from contextlib import ExitStack
 import msvcrt
 import tempfile
 import hashlib
@@ -6,16 +8,22 @@ import gzip
 import json
 import os
 import re
+import subprocess
 import threading
 import uuid
 from itertools import count
+from collections import OrderedDict
 from pathlib import Path
 from .formatting import EAST_8, now, display_time, deleted_export_summary
 from .reporting import render_report
+from .timeline import TimelineEvents
 from .coverage import assess, SOURCE_FIELDS
 from ..engines.fat import fat_regions
 from ..engines import ewf
-from ..engines.tsk import TSK, can_export, entry_name, entry_status
+from ..engines.tsk import TSK, can_export, entry_name, tsk_error
+
+
+LARGE_IMAGE_BYTES = 1 << 30
 
 
 def canonical(value):
@@ -29,14 +37,15 @@ def save_json(path, value):
 
 
 def sha256(path, progress=None):
-    """固定 1 MiB 缓冲区，检查读取期间的文件身份和元数据变化。"""
+    """复用 4 MiB 缓冲区，检查读取期间的文件身份和元数据变化。"""
     digest = hashlib.sha256()
     with Path(path).open('rb') as source:
         before = os.fstat(source.fileno())
         done = 0
-        while block := source.read(1024 * 1024):
-            digest.update(block)
-            done += len(block)
+        buffer = memoryview(bytearray(min(4 << 20, max(1, before.st_size))))
+        while count := source.readinto(buffer):
+            digest.update(buffer[:count])
+            done += count
             if progress:
                 progress(done, before.st_size)
         after = os.fstat(source.fileno())
@@ -76,6 +85,14 @@ def case_folder_name(*fields):
 
 class Case:
     def __init__(self, folder, actor=None):
+        self.lock = threading.RLock()
+        self._source_handles = ExitStack()
+        self._source_paths = ()
+        self._session_verified = False
+        self._directory_cache = OrderedDict()
+        self._session_stamp = None
+        self.directory_entries = []
+        self.directory_location = None
         self.folder = Path(folder).resolve()
         metadata = self.folder / 'case.json'
         if not metadata.is_file():
@@ -106,10 +123,11 @@ class Case:
             if evidence is not None:
                 if not all(k in evidence for k in ('path','sha256','layout','partitions','fixed_at','size')):
                     raise ValueError('证据信息不完整')
+                if evidence['size'] >= LARGE_IMAGE_BYTES:
+                    evidence['large_image'] = True
             if not all((self.folder / k).is_dir() for k in ('reports','exports')):
                 raise ValueError('案件输出目录缺失')
             self.actor = actor or self.data['examiner']
-            self.lock = threading.RLock()
             self.check_audit()
             if not self._index and self.data['inventory']:
                 self.save(inventory=self.data['inventory'])
@@ -121,7 +139,11 @@ class Case:
             raise
 
     def close(self):
-        self._lease.close()
+        with self.lock:
+            self._source_handles.close()
+            self._source_paths = ()
+            self._session_verified = False
+            self._lease.close()
 
     @classmethod
     def create(cls, root, number, examiner, target, *, folder_name=None):
@@ -150,7 +172,7 @@ class Case:
         case.log('CASE_CREATE', number, '成功')
         return case
 
-    def save(self, **changes):
+    def save(self, *, cancel=None, **changes):
         if self._lease.closed:
             raise RuntimeError('案件已关闭')
         candidate = {**self.data, **changes}
@@ -161,7 +183,9 @@ class Case:
             index = f'inventory-{uuid.uuid4().hex}.jsonl.gz'
             try:
                 with gzip.open(self.folder / index, 'xt', encoding='utf-8', compresslevel=1, newline='\n') as stream:
-                    for entry in candidate['inventory']:
+                    for number, entry in enumerate(candidate['inventory']):
+                        if cancel is not None and number % 1024 == 0 and cancel.is_set():
+                            raise InterruptedError('已取消建立索引')
                         stream.write(canonical(entry) + '\n')
             except BaseException:
                 (self.folder / index).unlink(missing_ok=True)
@@ -172,6 +196,8 @@ class Case:
             metadata['inventory_file'] = index
             metadata['inventory_count'] = len(metadata.pop('inventory'))
         try:
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError('已取消建立索引')
             save_json(self.folder / 'case.json', metadata)
         except BaseException:
             if index and index != previous:
@@ -245,24 +271,35 @@ class Case:
                 if not length or not sector or int(sector[1]) != 512:
                     raise ValueError('无法确定受支持的 EWF 逻辑大小或扇区大小')
                 size = int(length[1])
-                baseline = ewf.logical(tsk, image, size, progress)
-                extra = dict(format='EWF', segments=ewf.physical(parts, sha256, progress),
-                             provenance=ewf.acquisition_info(image))
+                extra = dict(format='EWF', provenance=ewf.acquisition_info(image))
                 def boot_reader(offset):
                     result = tsk.run('img_cat', ['-i','ewf','-s',offset,'-e',offset,image], capture_output=True)
                     return result.stdout if result.returncode == 0 else b''
+            quick = size >= LARGE_IMAGE_BYTES
+            if quick:
+                paths = parts if is_ewf else [image]
+                extra.update(large_image=True, source_stamp=self._hold_source(paths), opened_at=now())
+                baseline = None
+                if not is_ewf and size != extra['source_stamp'][0][1]:
+                    raise ValueError('打开期间镜像大小发生变化')
+                if is_ewf:
+                    extra['segments'] = [dict(name=p.name, size=p.stat().st_size) for p in parts]
             else:
-                baseline = sha256(image, progress)
-            self.log('HASH_FIXED', image, '成功', sha256=baseline)
+                baseline = ewf.logical(tsk, image, size, progress) if is_ewf else sha256(image, progress)
+                if is_ewf:
+                    extra['segments'] = ewf.physical(parts, sha256, progress)
+                self.log('HASH_FIXED', image, '成功', sha256=baseline)
             layout, partitions = tsk.inspect(image)
             evidence = dict(path=str(image), size=size, sha256=baseline,
-                            fixed_at=now(), partitions=partitions, layout=layout, **extra)
+                            fixed_at=now() if baseline else None, partitions=partitions, layout=layout, **extra)
             evidence['coverage'] = assess(image, partitions, layout, logical_size=size, boot_reader=boot_reader)
             if is_ewf and ewf.snapshot(ewf.segments(image)) != stamp:
                 raise ValueError('分析期间 EWF 分段发生变化')
             self.save(evidence=evidence)
             self.log('IMAGE_LOAD', image, '成功', sha256=baseline, partitions=partitions)
         except Exception as error:
+            self._source_handles.close()
+            self._source_paths = ()
             self.log('IMAGE_LOAD', image, '失败', error=str(error))
             raise
 
@@ -270,6 +307,83 @@ class Case:
         if not self.data['evidence']:
             raise ValueError('请先加载镜像')
         return self.data['evidence']['path']
+
+    def _hold_source(self, paths):
+        # Windows 共享模式由内核对所有写入和删除打开请求强制执行。
+        paths = tuple(paths)
+        if not self._source_paths:
+            with ExitStack() as handles:
+                for path in paths:
+                    try:
+                        handle = _winapi.CreateFile(str(path), _winapi.GENERIC_READ, 1, 0,
+                                                    _winapi.OPEN_EXISTING, 0, 0)
+                    except OSError as error:
+                        raise OSError(f'无法取得镜像只读共享句柄，请关闭占用文件的写入程序：{path}') from error
+                    handles.callback(_winapi.CloseHandle, handle)
+                self._source_handles = handles.pop_all()
+                self._source_paths = paths
+        if paths != self._source_paths:
+            raise ValueError('镜像分段清单已变化')
+        return [list(row) for row in ewf.snapshot(paths)]
+
+    def check_source(self):
+        evidence = self.data['evidence']
+        paths = ewf.segments(self.image()) if evidence.get('format') == 'EWF' else [Path(self.image())]
+        with self.lock:
+            if self._lease.closed:
+                raise RuntimeError('案件已关闭')
+            stamp = self._hold_source(paths)
+        expected = evidence.get('source_stamp', self._session_stamp)
+        if expected is not None and stamp != expected:
+            raise ValueError('镜像身份、大小或修改时间与加载记录不一致')
+
+        self._session_stamp = stamp
+
+    @property
+    def browsing_directories(self):
+        return bool((self.data['evidence'] or {}).get('large_image') and not self.data.get('partition_scans'))
+
+    def browse_directory(self, offset, inode=None, path='', tsk=None):
+        evidence = self.data['evidence']
+        if not evidence or not self.browsing_directories or offset not in {p['offset'] for p in evidence['partitions']}:
+            raise ValueError('请选择快速浏览模式下的已识别分区')
+        self.check_source()
+        key = (offset, inode, path)
+        entries = self._directory_cache.pop(key, None)
+        if entries is None:
+            entries = (tsk or TSK()).directory(self.image(), offset, inode, path)
+            volumes = evidence.get('coverage', {}).get('volumes', [])
+            kind = next((v['filesystem'] for v in volumes if v['offset'] == offset), '')
+            for row in entries:
+                row['filesystem'] = kind
+            self.check_source()
+        if len(entries) <= 20000:
+            self._directory_cache[key] = entries
+            while len(self._directory_cache) > 8 or sum(map(len, self._directory_cache.values())) > 20000:
+                self._directory_cache.popitem(last=False)
+        self.directory_entries = entries
+        self.directory_location = (offset, inode, path)
+        return entries
+
+    def displayed_entries(self):
+        return self.directory_entries if self.browsing_directories else self.data['inventory']
+
+    def operation_check(self, progress=None):
+        evidence = self.data['evidence']
+        if not evidence or not evidence.get('large_image'):
+            return self.verify(progress)
+        self.check_source()
+        if evidence['sha256'] and not self._session_verified:
+            raise ValueError('案件已重新打开，请先校验完整性以确认本次会话的镜像。')
+        return True
+
+    def source_note(self):
+        if self.data['evidence'].get('large_image'):
+            if self.data['evidence']['sha256'] and not self._session_verified:
+                return '本次会话待复核，请点击“校验完整性”'
+            return ('本次会话已完成 SHA-256 读取，镜像持续拒写保护' if self._session_verified
+                    else '初步分析：仅核对源文件身份并持有拒写句柄，整镜像 SHA-256 待固定')
+        return ''
 
     def register_source(self, values):
         self.image()
@@ -279,28 +393,73 @@ class Case:
         self.log('SOURCE_REGISTER', self.image(), '登记', **source)
         self.save(evidence={**self.data['evidence'], 'provenance': source})
 
-    def verify(self, progress=None):
-        try:
-            evidence = self.data['evidence']
-            if evidence.get('format') == 'EWF':
-                parts = ewf.segments(self.image())
-                before = ewf.snapshot(parts)
-                ok = (ewf.physical(parts, sha256, progress) == evidence['segments']
-                      and before == ewf.snapshot(ewf.segments(self.image())))
-                method = '逐段复算封装 SHA-256，与首次逻辑流校验时的全部分段比对'
-                actual = evidence['sha256'] if ok else None
+    def measure_hash(self, progress=None):
+        """仅计算并返回结果，允许界面在后台读取期间继续浏览同一案件。"""
+        evidence = self.data['evidence']
+        image = self.image()
+        large = evidence.get('large_image')
+        if large:
+            self.check_source()
+        first = not evidence['sha256']
+        changes = {}
+        if evidence.get('format') == 'EWF':
+            parts = ewf.segments(image)
+            before = ewf.snapshot(parts)
+            physical_progress = progress
+            if first:
+                logical_size = evidence['size']
+                total = logical_size + sum(p.stat().st_size for p in parts)
+                actual = ewf.logical(TSK(), image, logical_size,
+                                     (lambda done, _: progress(done, total)) if progress else None)
+                if progress:
+                    physical_progress = lambda done, _: progress(logical_size + done, total)
             else:
-                actual = sha256(self.image(), progress)
-                ok = actual == evidence['sha256']
-                method = '复算 RAW SHA-256'
-            changes = {}
-            if ok and not evidence.get('coverage'):
-                changes['evidence'] = {**evidence, 'coverage': assess(self.image(), evidence['partitions'], evidence['layout'])}
-            self.save(verification=dict(time=now(), actual=actual, ok=ok, method=method), **changes)
-            self.log('HASH_VERIFY', self.image(), '通过' if ok else '不匹配', actual=actual, method=method)
-            return ok
+                actual = evidence['sha256']
+            segments = ewf.physical(parts, sha256, physical_progress)
+            if before != ewf.snapshot(ewf.segments(image)):
+                raise ValueError('校验期间 EWF 分段发生变化')
+            ok = first or segments == evidence['segments']
+            if first:
+                changes['segments'] = segments
+            if not ok:
+                actual = None
+            method = '逐段复算封装 SHA-256，与首次逻辑流校验时的全部分段比对'
+        else:
+            actual = sha256(image, progress)
+            ok = first or actual == evidence['sha256']
+            method = '复算 RAW SHA-256'
+        if large:
+            self.check_source()
+            if ok and 'source_stamp' not in evidence:
+                changes['source_stamp'] = self._session_stamp
+        if first:
+            changes.update(sha256=actual, fixed_at=now())
+            method = '首次完整读取并建立 SHA-256 基线'
+        if ok and not evidence.get('coverage'):
+            changes['coverage'] = assess(image, evidence['partitions'], evidence['layout'])
+        return dict(time=now(), actual=actual, ok=ok, method=method), changes
+
+    def accept_hash(self, measured):
+        verification, changes = measured
+        evidence = self.data['evidence']
+        if evidence.get('large_image'):
+            self.check_source()
+        self.save(verification=verification, **({'evidence': {**evidence, **changes}} if changes else {}))
+        ok = verification['ok']
+        if 'fixed_at' in changes:
+            self.log('HASH_FIXED', self.image(), '成功', sha256=verification['actual'])
+        else:
+            self.log('HASH_VERIFY', self.image(), '通过' if ok else '不匹配',
+                     actual=verification['actual'], method=verification['method'])
+        self._session_verified = bool(evidence.get('large_image') and ok)
+        return ok
+
+    def verify(self, progress=None):
+        self._session_verified = False
+        try:
+            return self.accept_hash(self.measure_hash(progress))
         except Exception as error:
-            self.log('HASH_VERIFY', self.data.get('evidence'), '失败', error=str(error))
+            self.log('HASH_VERIFY', self.image(), '失败', error=str(error))
             raise
 
     def scan(self, offset, tsk=None):
@@ -308,11 +467,11 @@ class Case:
         if offset not in allowed:
             raise ValueError('请选择已识别分区')
         try:
-            if not self.verify():
+            if not self.operation_check():
                 raise RuntimeError('镜像校验失败，禁止扫描')
             tool = tsk or TSK()
             info, entries = self._read_partition(tool, offset)
-            if not self.verify():
+            if not self.operation_check():
                 raise RuntimeError('扫描期间镜像变化，文件清单未保存')
             self.save(inventory=entries, fsstat=info, offset=offset,
                       partition_scans=[dict(offset=offset, status='ready', count=len(entries))])
@@ -322,18 +481,46 @@ class Case:
             self.log('FILE_BROWSE', str(offset), '失败', error=str(error))
             raise
 
-    def _read_partition(self, tool, offset):
-        info = tool.text('fsstat', ['-i', 'raw', '-o', offset, self.image()])
-        entries = tool.files(self.image(), offset)
+    def _read_partition(self, tool, offset, cancel=None):
+        args = ['-i', 'raw', '-o', offset, self.image()]
+        if self.data['evidence'].get('large_image'):
+            kind = tool.text('fsstat', ['-t', *args]).strip().upper()
+            info = f'File System Type: {kind}\n完整索引采用文件系统类型探测。'
+        else:
+            info = tool.text('fsstat', args)
+        entries = tool.files(self.image(), offset, cancel=cancel) if cancel is not None else tool.files(self.image(), offset)
         match = re.search(r'^File System Type:\s*(\S+)', info, re.M)
         for entry in entries:
             entry['filesystem'] = match[1] if match else ''
         try:
             if self.data['evidence'].get('format') != 'EWF':
-                entries.extend(fat_regions(self.image(), offset, info, entries))
+                entries.extend(fat_regions(self.image(), offset, info, entries, cancel=cancel))
+        except InterruptedError:
+            raise
         except (ValueError, OSError, OverflowError) as error:
             info += f'\nFAT 空间区域未能映射：{error}'
         return info, entries
+
+    def export_fsstat(self, offset):
+        evidence = self.data['evidence']
+        if offset not in {p['offset'] for p in evidence['partitions']}:
+            raise ValueError('请选择已识别分区')
+        self.check_source()
+        dest = self.folder / 'reports' / f'fsstat-{offset}-{uuid.uuid4().hex[:12]}.txt'
+        temporary = dest.with_suffix('.partial')
+        try:
+            with temporary.open('xb') as stream:
+                result = TSK().run('fsstat', ['-i', 'raw', '-o', offset, self.image()],
+                                   stdout=stream, stderr=subprocess.PIPE)
+            if result.returncode:
+                raise RuntimeError(tsk_error(result.stderr))
+            self.check_source()
+            temporary.rename(dest)
+            self.log('FSSTAT_EXPORT', dest.name, '成功', offset=offset, sha256=sha256(dest),
+                     source_verification=self.source_note())
+            return dest
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def needs_partition_scan(self):
         evidence = self.data['evidence']
@@ -343,11 +530,11 @@ class Case:
         scanned = {p['offset'] for p in self.data.get('partition_scans', [])}
         return expected != scanned
 
-    def scan_all(self, tsk=None, progress=None):
+    def scan_all(self, tsk=None, progress=None, *, cancel=None):
         """汇总全部分区；单个分区不可读时保留失败状态，不影响其他分区。"""
         image = self.image()
         def verify_stage(label):
-            return self.verify((lambda done, total: progress(label, done, total)) if progress else None)
+            return self.operation_check((lambda done, total: progress(label, done, total)) if progress else None)
         try:
             if not verify_stage('扫描前校验'):
                 raise RuntimeError('镜像校验失败，禁止扫描')
@@ -358,7 +545,9 @@ class Case:
                 if progress:
                     progress(f'扫描分区（偏移 {offset} 扇区）', 0, 0)
                 try:
-                    info, entries = self._read_partition(tool, offset)
+                    info, entries = self._read_partition(tool, offset, cancel)
+                except InterruptedError:
+                    raise
                 except (RuntimeError, OSError, ValueError, OverflowError) as error:
                     scans.append(dict(offset=offset, status='error', count=0, error=str(error)))
                     info = f'无法读取此分区：{error}'
@@ -372,12 +561,18 @@ class Case:
                 raise RuntimeError('扫描期间镜像变化，文件清单未保存')
             if progress:
                 progress('保存文件清单', 0, 0)
-            self.save(inventory=inventory, partition_scans=scans, offset=None,
+            self.save(cancel=cancel, inventory=inventory, partition_scans=scans, offset=None, index_verification=self.source_note(),
                       fsstat='\n\n'.join(sections))
+            self._directory_cache.clear()
+            self.directory_location = None
+            self.directory_entries = []
             failed = sum(p['status'] == 'error' for p in scans)
             self.log('PARTITIONS_SCAN', image, '部分分区不可读' if failed else '成功',
                      partitions=len(scans), failed=failed, count=len(inventory))
             return inventory
+        except InterruptedError:
+            self.log('PARTITIONS_SCAN', image, '已取消')
+            raise
         except Exception as error:
             self.log('PARTITIONS_SCAN', image, '失败', error=str(error))
             raise
@@ -386,8 +581,9 @@ class Case:
         suffix = suffix.strip().lower()
         if suffix and not suffix.startswith('.'):
             suffix = '.' + suffix
-        items = [f for f in self.data['inventory'] if (not suffix or f['path'].lower().endswith(suffix))
-                 and (keyword.lower() in f['path'].lower() or keyword.lower() in entry_name(f).lower())]
+        needle = keyword.lower()
+        items = [f for f in self.displayed_entries() if (not suffix or f['path'].lower().endswith(suffix))
+                 and (not needle or needle in f['path'].lower() or needle in entry_name(f).lower())]
         self.log('FILE_FILTER', suffix or '*', '成功', keyword=keyword, count=len(items))
         return items
 
@@ -396,7 +592,7 @@ class Case:
             return self._export(entry, tsk)
 
     def _export(self, entry, tsk):
-        if entry not in self.data['inventory'] or not can_export(entry):
+        if entry not in self.displayed_entries() or not can_export(entry):
             raise ValueError('请选择当前文件清单中的普通文件或已删除文件')
         name = export_filename(entry['path'])
         folder = self.folder / 'exports'
@@ -405,7 +601,7 @@ class Case:
         committed = False
         published = False
         try:
-            if not self.verify():
+            if not self.operation_check():
                 raise RuntimeError('原始镜像完整性校验失败，禁止导出')
             with tempfile.TemporaryDirectory(dir=folder) as staging:
                 partial = Path(staging) / 'copy'
@@ -415,12 +611,13 @@ class Case:
                 if deleted:
                     read_note = tool.export_deleted(self.image(), entry, partial)
                 else:
-                    tool.export(self.image(), entry['offset'], entry['inode'], partial)
+                    kwargs = {'size': entry['size']} if entry['size'] >= LARGE_IMAGE_BYTES else {}
+                    tool.export(self.image(), entry['offset'], entry['inode'], partial, **kwargs)
                 size = partial.stat().st_size
                 if not deleted and size != entry['size']:
                     raise RuntimeError('导出大小与文件元数据不一致')
                 digest = sha256(partial)
-                if not self.verify():
+                if not self.operation_check():
                     raise RuntimeError('导出期间原始镜像变化，副本不可采信')
                 try:
                     partial.rename(destination)  # Windows 原子重命名，目标已存在时失败。
@@ -431,6 +628,8 @@ class Case:
                 published = True
             record = dict(path=str(destination), source=entry['path'], inode=entry['inode'],
                           offset=entry['offset'], sha256=digest, size=size, time=now())
+            if self.source_note():
+                record.update(source_verification=self.source_note(), image_sha256=self.data['evidence']['sha256'])
             if deleted:
                 record.update(deleted=True, recorded_size=entry['size'], read_note=read_note,
                               reallocated=entry.get('reallocated', False),
@@ -449,14 +648,9 @@ class Case:
             raise
 
     def timeline_events(self):
-        events = []
-        for entry in self.data['inventory']:
-            for field, label in [('mtime','M 内容修改'), ('atime','A 访问'), ('ctime','C 元数据变更'), ('crtime','B 创建')]:
-                if entry[field] > 0:
-                    events.append(dict(time=display_time(entry[field]),
-                                       event=label, path=entry['path'], inode=entry['inode'],
-                                       offset=entry['offset'], status=entry_status(entry)))
-        return sorted(events, key=lambda row: row['time'])
+        timeline = TimelineEvents(self.data['inventory'])
+        return timeline if len(self.data['inventory']) > 1000 else list(timeline)
+
 
     def timeline(self):
         events = self.timeline_events()
@@ -471,7 +665,13 @@ class Case:
             raise
 
     def _write_report(self):
-        if not self.verify():
+        evidence = self.data['evidence']
+        if evidence and evidence.get('large_image'):
+            self.operation_check()
+            if not self._session_verified:
+                raise ValueError('生成正式报告前，请先在“校验完整性”中固定整镜像 SHA-256。')
+            conclusion = self.source_note() + '。完整读取时间见校验记录。'
+        elif not self.verify():
             conclusion = '不通过：镜像当前 SHA-256 与固定值不一致。'
         else:
             conclusion = ('通过：每个 EWF 分段摘要均与首次解码固定时一致。' if self.data['evidence'].get('format') == 'EWF'

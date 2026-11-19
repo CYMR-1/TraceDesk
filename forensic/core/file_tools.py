@@ -1,13 +1,12 @@
 """镜像内文件级取证操作；结果绑定镜像、分区、路径和 inode。"""
-from pathlib import Path
-from tempfile import TemporaryDirectory
+import hashlib
 
 from .case import sha256
 from ..engines.tsk import TSK, can_export, deleted_source_note
 
 
 def identity(case, entry):
-    if entry not in case.data['inventory'] or not can_export(entry):
+    if entry not in case.displayed_entries() or not can_export(entry):
         raise ValueError('请选择当前案件清单中的普通文件')
     return dict(image_sha256=case.data['evidence']['sha256'], offset=entry['offset'],
                 inode=entry['inode'], deleted=entry.get('deleted', False))
@@ -15,6 +14,9 @@ def identity(case, entry):
 
 def record_note(case, entry, text):
     reference = identity(case, entry)
+    if case.source_note():
+        case.operation_check()
+        reference['source_verification'] = case.source_note()
     if not text.strip():
         raise ValueError('记录内容不能为空')
     case.log('FILE_NOTE', entry['path'], '成功', **reference, note=text.strip())
@@ -27,20 +29,17 @@ def examine(case, entry, comparison=None, tool=None):
     if comparison is not None:
         details['comparison'] = str(comparison)
     try:
-        if not case.verify():
+        if not case.operation_check():
             raise ValueError('原始镜像校验失败')
+        if case.source_note():
+            details['source_verification'] = case.source_note()
         tool = tool or TSK()
-        with TemporaryDirectory(dir=case.folder) as tmp:
-            copy = Path(tmp) / 'content'
-            if entry.get('deleted'):
-                details['read_note'] = tool.export_deleted(case.image(), entry, copy)
-            else:
-                tool.export(case.image(), entry['offset'], entry['inode'], copy)
-            size = copy.stat().st_size
-            if not entry.get('deleted') and size != entry['size']:
-                raise ValueError('实际读取长度与文件记录不符')
-            details.update(size=size, sha256=sha256(copy))
-        if not case.verify():
+        digest = hashlib.sha256()
+        size, note = tool.stream_entry(case.image(), entry, digest.update)
+        if note:
+            details['read_note'] = note
+        details.update(size=size, sha256=digest.hexdigest())
+        if not case.operation_check():
             raise ValueError('读取期间原始镜像发生变化')
         result = '成功'
         if comparison is not None:
