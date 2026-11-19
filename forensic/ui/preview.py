@@ -62,6 +62,8 @@ class EncodingChoice(QComboBox):
         self.setObjectName('previewEncodingChoice')
         self.setView(QListView())
         self.addItems(PREVIEW_ENCODINGS)
+        self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setMaxVisibleItems(self.count())
 
     def showPopup(self):
@@ -102,9 +104,6 @@ class FilePreview(QWidget):
         self.encoding = EncodingChoice()
         self.encoding.currentTextChanged.connect(self.render)
         encoding_layout.addWidget(self.encoding)
-        self.encoding.ensurePolished()
-        metrics = self.encoding.fontMetrics()
-        self.encoding.setFixedWidth(max(metrics.horizontalAdvance(name) for name in PREVIEW_ENCODINGS) + 44)
         self.formats.set_actions(self.encoding_controls, (self.encoding,))
 
         bar = QHBoxLayout()

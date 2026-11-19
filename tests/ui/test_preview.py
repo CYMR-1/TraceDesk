@@ -13,7 +13,7 @@ from unittest.mock import patch
 from PySide6.QtCore import QBuffer, QIODevice, Qt, qInstallMessageHandler
 from PySide6.QtGui import QColor, QFontDatabase, QImage, QTextLayout
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QTreeWidgetItemIterator, QVBoxLayout
+from PySide6.QtWidgets import QApplication, QDialog, QMainWindow, QStyle, QStyleOptionComboBox, QTreeWidgetItemIterator, QVBoxLayout
 
 from forensic.ui.controller import App
 from forensic.ui.appearance import DesktopAppearance
@@ -275,6 +275,14 @@ class PreviewTests(unittest.TestCase):
         dialog.show()
         self.qt.processEvents()
         combo = preview.encoding
+        for encoding in PREVIEW_ENCODINGS:
+            combo.setCurrentText(encoding)
+            option = QStyleOptionComboBox()
+            combo.initStyleOption(option)
+            field = combo.style().subControlRect(QStyle.ComplexControl.CC_ComboBox, option,
+                                                 QStyle.SubControl.SC_ComboBoxEditField, combo)
+            self.assertGreaterEqual(field.width(), option.fontMetrics.horizontalAdvance(encoding), encoding)
+        combo.setCurrentIndex(0)
         combo.showPopup()
         self.qt.processEvents()
         view = combo.view()
