@@ -1,5 +1,6 @@
 """按操作显示已验证的审计链；原始记录可逐条查看。"""
 import json
+from PySide6.QtCore import Qt
 from ..core.formatting import display_time
 from ..ui.analysis_panels import RecordsPanel, page
 from .api import Feature, Panel
@@ -27,11 +28,39 @@ def render(context):
 class AuditPanel(RecordsPanel):
     def __init__(self, parent):
         super().__init__(parent, ['序号', '时间（UTC+8）', '操作人员', '操作', '结果', '对象'],
-                         [54, 153, 96, 135, 100], '搜索操作、人员、对象或结果')
+                         [68, 165, 96, 135, 100], '搜索操作、人员、对象或结果')
+        self._chronological = []
+        self._descending = True
+        self._sort_column = 0
+        header = self.table.header()
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
+        header.setSortIndicator(0, Qt.SortOrder.DescendingOrder)
+        header.sectionClicked.connect(self._toggle_sort)
+        for column in (0, 1):
+            self.table.headerItem().setToolTip(column, '单击切换正序/倒序')
+
+    def _sorted_records(self):
+        if self._sort_column == 1:
+            return sorted(self._chronological,
+                          key=lambda r: (display_time(r['timestamp']), r['seq']),
+                          reverse=self._descending)
+        return list(reversed(self._chronological)) if self._descending else list(self._chronological)
+
+    def _toggle_sort(self, column):
+        if column not in (0, 1):
+            return
+        self._descending = not self._descending
+        self._sort_column = column
+        order = Qt.SortOrder.DescendingOrder if self._descending else Qt.SortOrder.AscendingOrder
+        self.table.header().setSortIndicator(column, order)
+        self.records = self._sorted_records()
+        self._populate()
 
     def set_text(self, result):
         status, records = result
-        super().set_text((status, list(reversed(records))))
+        self._chronological = list(records)
+        super().set_text((status, self._sorted_records()))
 
     def columns(self, record):
         return [str(record['seq']), display_time(record['timestamp'], compact=True),

@@ -68,9 +68,12 @@ class App(QObject):
     def set_text(widget, value):
         widget.setPlainText(value)
 
+    def _background_busy(self):
+        return self.hash_runner.busy or any(getattr(panel, 'searching', False) for panel in self.view.panels.values())
+
     def available(self, case=True):
-        if not case and self.hash_runner.busy:
-            QMessageBox.information(self.root, '正在校验', '切换案件前请先取消校验或等待校验完成。')
+        if not case and self._background_busy():
+            QMessageBox.information(self.root, '正在处理', '切换案件前请先取消后台校验或内容搜索，或等待完成。')
             return False
         if self.busy:
             QMessageBox.information(self.root, '正在处理', '请等待当前任务完成。')
@@ -238,8 +241,8 @@ class App(QObject):
 
     def eventFilter(self, watched, event):
         if watched is self.root and event.type() == QEvent.Type.Close:
-            if self.busy or self.hash_runner.busy:
-                QMessageBox.information(self.root, '正在处理', '请等待取证任务完成，或取消后台校验后退出。')
+            if self.busy or self._background_busy():
+                QMessageBox.information(self.root, '正在处理', '请等待取证任务完成，或取消后台校验/搜索后退出。')
                 event.ignore()
                 return True
             self._shutdown()
@@ -251,6 +254,9 @@ class App(QObject):
         self._closed = True
         self._timer.stop()
         self._cancel_hash.set()
+        for panel in self.view.panels.values():
+            if hasattr(panel, 'shutdown'):
+                panel.shutdown()
         self.browser.cancel_display()
         self.preview.clear()
         if self.case:

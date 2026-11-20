@@ -360,7 +360,8 @@ class FileBrowserTests(QtTests):
         root, app = self.controller()
         panel = app.view.panels['review']
         headers = [panel.table.headerItem().text(i) for i in range(panel.table.columnCount())]
-        self.assertEqual(headers[:4], ['选择', '序号', '文件内字节偏移', '分区偏移'])
+        self.assertEqual(headers[:4], ['', '序号', '文件内字节偏移', '分区偏移'])
+        self.assertEqual(panel.header.check_state(), Qt.CheckState.Unchecked)
 
         logged = []
         case = SimpleNamespace(
@@ -399,17 +400,20 @@ class FileBrowserTests(QtTests):
             self.assertEqual(item.checkState(0), Qt.CheckState.Unchecked)
             self.assertTrue(item.flags() & Qt.ItemFlag.ItemIsUserCheckable)
 
-        # 单击第 0 列表头切换全选与取消全选，并同步按钮文案。
-        panel.toggle_all(0)
+        # 表头全选框切换全选与取消全选，并同步三态与按钮文案。
+        panel.header.toggled.emit(True)
+        self.assertEqual(panel.header.check_state(), Qt.CheckState.Checked)
         self.assertEqual(len(panel.checked_items()), 3)
         self.assertIn('3', panel.save_button.text())
-        panel.toggle_all(0)
+        panel.header.toggled.emit(False)
+        self.assertEqual(panel.header.check_state(), Qt.CheckState.Unchecked)
         self.assertEqual(len(panel.checked_items()), 0)
         self.assertEqual(panel.save_button.text(), '将所选命中保存为取证发现')
 
-        # 勾选第 1、3 条后批量保存为取证发现。
+        # 部分勾选时表头全选框进入半选态，并支持批量保存为取证发现。
         panel.table.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
         panel.table.topLevelItem(2).setCheckState(0, Qt.CheckState.Checked)
+        self.assertEqual(panel.header.check_state(), Qt.CheckState.PartiallyChecked)
         self.assertIn('2', panel.save_button.text())
         panel.bookmark()
         self.assertEqual([(a[1], k['file_byte']) for a, k in logged], [('DOCS/A.TXT', 5), ('DOCS/C.TXT', 30)])
@@ -418,6 +422,7 @@ class FileBrowserTests(QtTests):
         logged.clear()
         panel.table.topLevelItem(0).setCheckState(0, Qt.CheckState.Unchecked)
         panel.table.topLevelItem(2).setCheckState(0, Qt.CheckState.Unchecked)
+        self.assertEqual(panel.header.check_state(), Qt.CheckState.Unchecked)
         panel.table.setCurrentItem(panel.table.topLevelItem(1))
         panel.bookmark()
         self.assertEqual([(a[1], k['file_byte']) for a, k in logged], [('DOCS/B.TXT', 12)])
@@ -426,6 +431,139 @@ class FileBrowserTests(QtTests):
         with patch('forensic.features.review.QDialog') as dialog_cls:
             panel.preview(panel.table.topLevelItem(0), 0)
             dialog_cls.assert_not_called()
+
+    def test_review_panel_streams_hits_and_allows_actions_during_search(self):
+        import threading
+        import time
+
+        root, app = self.controller()
+        panel = app.view.panels['review']
+        logged = []
+        case = SimpleNamespace(
+            data={'evidence': {'sha256': 'b' * 64}},
+            log=lambda *args, **kwargs: logged.append((args, kwargs)),
+            image=lambda: 'demo.dd',
+            source_note=lambda: '只读保护中',
+            close=lambda: None,
+        )
+        panel.context = SimpleNamespace(
+            case=lambda: case,
+            available=lambda: True,
+            selected_entry=lambda: None,
+            refresh=lambda: None,
+            task=lambda label, work, cb=None: (work(), cb(None) if cb else None),
+        )
+        panel.case = case
+        panel.query.setText('note')
+
+        first_sent = threading.Event()
+        release = threading.Event()
+        e1 = dict(path='DOCS/LIVE1.TXT', offset=2048, inode='20', deleted=False)
+        e2 = dict(path='DOCS/LIVE2.TXT', offset=2048, inode='21', deleted=False)
+        h1 = (e1, 4, '00 01', '02 03')
+        h2 = (e2, 9, '10 11', '12 13')
+
+        def fake_search(c, query, encoding, control, progress, *, selected=None, on_hit=None):
+            progress('搜索文件内容', 1, 2)
+            on_hit([h1])
+            first_sent.set()
+            release.wait(5)
+            on_hit([h2])
+            record = dict(
+                query=query, encoding=encoding, needle='6e6f7465',
+                image_sha256='b' * 64, verification='只读保护中',
+                status='完成', visited=2, eligible=2, errors=[],
+                hits=[dict(source_note=''), dict(source_note='')],
+            )
+            return record, [h1, h2], 'search_live.json'
+
+        with patch('forensic.features.review.search', side_effect=fake_search):
+            panel.start()
+            self.assertTrue(first_sent.wait(5))
+            panel._poll_search()
+            # 搜索进行中即可看到已命中条目，且可勾选、保存与预览。
+            self.assertTrue(panel.searching)
+            self.assertFalse(panel.search_button.isEnabled())
+            self.assertTrue(panel.cancel_button.isEnabled())
+            self.assertEqual(panel.table.topLevelItemCount(), 1)
+            self.assertEqual(panel.table.topLevelItem(0).text(5), 'DOCS/LIVE1.TXT')
+
+            panel.table.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
+            self.assertEqual(panel.header.check_state(), Qt.CheckState.Checked)
+            panel.bookmark()
+            self.assertEqual([(a[1], k['file_byte']) for a, k in logged], [('DOCS/LIVE1.TXT', 4)])
+
+            with patch('forensic.features.review.QDialog.exec', return_value=0) as exec_mock, \
+                    patch('forensic.features.review.FilePreview.open_file') as open_mock:
+                panel.preview(panel.table.topLevelItem(0), 2)
+                exec_mock.assert_called_once()
+                open_mock.assert_called_once()
+                self.assertEqual(open_mock.call_args.args[1]['path'], 'DOCS/LIVE1.TXT')
+
+            release.set()
+            deadline = time.monotonic() + 5
+            while panel.searching and time.monotonic() < deadline:
+                panel._poll_search()
+                time.sleep(0.01)
+
+        # 搜索完成后追加剩余命中且保留先前勾选状态。
+        self.assertFalse(panel.searching)
+        self.assertTrue(panel.search_button.isEnabled())
+        self.assertFalse(panel.cancel_button.isEnabled())
+        self.assertEqual(panel.table.topLevelItemCount(), 2)
+        self.assertEqual(panel.table.topLevelItem(0).checkState(0), Qt.CheckState.Checked)
+        self.assertEqual(panel.table.topLevelItem(1).checkState(0), Qt.CheckState.Unchecked)
+        self.assertEqual(panel.header.check_state(), Qt.CheckState.PartiallyChecked)
+
+    def test_timeline_and_audit_toggle_sort_order_on_number_and_time(self):
+        root, app = self.controller()
+        # 1. MACB 时间线（含大清单跨页倒序/正序切换）
+        timeline = app.view.panels['timeview']
+        rows = [dict(time=f'2026-11-20T00:{i // 60:02d}:{i % 60:02d}+08:00', event='M 内容修改',
+                     status='现存', offset=2048, inode=str(i), path=f'file_{i}.txt')
+                for i in range(1, 151)]
+        timeline.set_text(('时间线', rows, lambda label, work, cb: cb(work())))
+        self.assertEqual(timeline.table.topLevelItem(0).text(0), '1')
+        self.assertEqual(timeline.table.header().sortIndicatorOrder(), Qt.SortOrder.AscendingOrder)
+
+        # 点击“序号”切换为倒序，跨页首行应为第 150 条，翻页后应为第 50 条。
+        timeline._toggle_sort(0)
+        self.assertEqual(timeline.table.header().sortIndicatorSection(), 0)
+        self.assertEqual(timeline.table.header().sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
+        self.assertEqual(timeline.table.topLevelItem(0).text(0), '150')
+        timeline._move(1)
+        self.assertEqual(timeline.table.topLevelItem(0).text(0), '50')
+
+        # 点击“时间（UTC+8）”切回正序并回到首页。
+        timeline._toggle_sort(1)
+        self.assertEqual(timeline.table.header().sortIndicatorSection(), 1)
+        self.assertEqual(timeline.table.header().sortIndicatorOrder(), Qt.SortOrder.AscendingOrder)
+        self.assertEqual(timeline.table.topLevelItem(0).text(0), '1')
+
+        # 点击非序号/时间列不改变排序。
+        timeline._toggle_sort(2)
+        self.assertEqual(timeline.table.topLevelItem(0).text(0), '1')
+
+        # 2. 审计日志（默认倒序，点击序号或时间切换正序/倒序，刷新后保持排序方向）
+        audit = app.view.panels['audit']
+        records = [dict(seq=i, timestamp=f'2026-11-20T1{i}:00:00+08:00', actor='测试', action='FILE_NOTE',
+                        result='成功', subject=f'f{i}.txt', details={}, previous='0' * 64, hash=str(i) * 64)
+                   for i in range(1, 4)]
+        audit.set_text(('日志校验通过', records))
+        self.assertEqual([audit.table.topLevelItem(i).text(0) for i in range(3)], ['3', '2', '1'])
+
+        audit._toggle_sort(0)
+        self.assertEqual(audit.table.header().sortIndicatorOrder(), Qt.SortOrder.AscendingOrder)
+        self.assertEqual([audit.table.topLevelItem(i).text(0) for i in range(3)], ['1', '2', '3'])
+
+        # 刷新后保持用户选择的正序。
+        audit.set_text(('日志校验通过', records))
+        self.assertEqual([audit.table.topLevelItem(i).text(0) for i in range(3)], ['1', '2', '3'])
+
+        audit._toggle_sort(1)
+        self.assertEqual(audit.table.header().sortIndicatorSection(), 1)
+        self.assertEqual(audit.table.header().sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
+        self.assertEqual([audit.table.topLevelItem(i).text(0) for i in range(3)], ['3', '2', '1'])
 
 
 class NewCaseDialogTests(QtTests):

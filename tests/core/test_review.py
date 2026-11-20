@@ -192,9 +192,12 @@ class ReviewTests(unittest.TestCase):
         hardlink = dict(readme, path='HARDLINK/README_DUP.TXT')
         case.data['inventory'].append(hardlink)
         single_rec, single_hits, _ = search(case, 'forensic', 'UTF-8', SearchControl(), lambda *_: None)
+        streamed = []
         with patch.object(content_search, 'POOL_MIN_ENTRIES', 1), patch.object(content_search, 'WORKERS', 2):
-            multi_rec, multi_hits, _ = search(case, 'forensic', 'UTF-8', SearchControl(), lambda *_: None)
+            multi_rec, multi_hits, _ = search(case, 'forensic', 'UTF-8', SearchControl(), lambda *_: None,
+                                              on_hit=streamed.extend)
         self.assertEqual(single_rec['hits'], multi_rec['hits'])
+        self.assertEqual(streamed, multi_hits)
         paths = [e['path'] for e, *_ in multi_hits]
         self.assertIn('README.TXT', paths)
         self.assertIn('HARDLINK/README_DUP.TXT', paths)

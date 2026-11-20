@@ -118,12 +118,34 @@ class TimelinePanel(RecordsPanel):
         self.forward.clicked.connect(lambda: self._move(1))
         self._matches = []
         self._offset = 0
+        self._descending = False
+        self._sort_column = 0
+        header = self.table.header()
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
+        header.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+        header.sectionClicked.connect(self._toggle_sort)
+        for column in (0, 1):
+            self.table.headerItem().setToolTip(column, '单击切换正序/倒序')
+
+    def _toggle_sort(self, column):
+        if column not in (0, 1):
+            return
+        self._descending = not self._descending
+        self._sort_column = column
+        order = Qt.SortOrder.DescendingOrder if self._descending else Qt.SortOrder.AscendingOrder
+        self.table.header().setSortIndicator(column, order)
+        self._offset = 0
+        self._populate()
 
     def set_text(self, result):
         self._start = result if callable(result) else None
         self.build.setVisible(self._start is not None)
         self.search.clear()
         self._offset = 0
+        self._descending = False
+        self._sort_column = 0
+        self.table.header().setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         if self._start:
             result = ('大清单 · 点击生成时间线，在后台整理事件。', [])
         hint, records, *task = result
@@ -176,7 +198,12 @@ class TimelinePanel(RecordsPanel):
         self.back.setEnabled(self._offset > 0)
         self.forward.setEnabled(self._offset + 100 < count)
         self._update_status()
-        rows = self._matches[self._offset:self._offset + 100]
+        if self._descending:
+            end = count - self._offset
+            start = max(0, end - 100)
+            rows = list(reversed(self._matches[start:end]))
+        else:
+            rows = self._matches[self._offset:self._offset + 100]
         if self._search_task:
             return [dict(self.records[index], number=index + 1) for index in rows]
         return rows

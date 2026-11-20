@@ -32,10 +32,10 @@ __all__ = ['Cancelled', 'EntryStream', 'SearchControl', 'matches', 'pattern', 'p
 # 读取进程数：EWF 解压以 CPU 为瓶颈，留出核心给界面与系统，同时控制内存占用。
 WORKERS = max(1, min(12, (os.cpu_count() or 2) - 1))
 POOL_MIN_ENTRIES = 512      # 条目较少时直接在本进程读取，省去子进程启动开销。
-WIN_INIT_FILES = 4096       # 首个窗口偏小，常见关键词可更快命中上限并提前停止。
-WIN_MAX_FILES = 16384       # 后续窗口扩大，提高 MFT 顺序局部性与多核饱和度。
-WIN_INIT_BYTES = 256 << 20
-WIN_MAX_BYTES = 1024 << 20
+WIN_INIT_FILES = 2048       # 首个窗口偏小，尽快流式产出首批命中并支持提前达到上限。
+WIN_MAX_FILES = 8192        # 后续窗口扩大，兼顾 MFT 顺序局部性、多核饱和度与实时命中刷新。
+WIN_INIT_BYTES = 128 << 20
+WIN_MAX_BYTES = 512 << 20
 PIECE_SPLIT_MIN = 64 << 20  # 达到此大小的普通文件切分为多段并行读取。
 PIECE_BYTES = 32 << 20
 ICAT_THREADS = 8            # icat 为外部子进程，可用线程并发等待。
@@ -422,7 +422,7 @@ def scan_entries(tool, image, entries, needle, control, progress, limit, *, work
             max_win_bytes = min(WIN_MAX_BYTES, max_win_bytes * 2)
 
 
-def search(case, query, encoding, control, progress, *, limit=1000, selected=None):
+def search(case, query, encoding, control, progress, *, limit=1000, selected=None, on_hit=None):
     needle = pattern(query, encoding)
     tool = TSK()
     image = case.image()
@@ -453,7 +453,11 @@ def search(case, query, encoding, control, progress, *, limit=1000, selected=Non
                 verification = case.source_note()
             with closing(scan_entries(tool, image, entries, needle, control, progress, limit)) as results:
                 for found, error in results:
-                    hits.extend(found[:limit - len(hits)])
+                    batch = found[:limit - len(hits)]
+                    if batch:
+                        hits.extend(batch)
+                        if on_hit is not None:
+                            on_hit(batch)
                     if len(hits) == limit:
                         state = f'达到 {limit} 条上限，未搜索全部内容'
                         break
