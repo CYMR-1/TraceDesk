@@ -1,8 +1,8 @@
 """公共输入弹窗：取消在底部左侧，确认操作在右侧。"""
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFileDialog, QGridLayout, QHBoxLayout,
-    QInputDialog, QWidget,
+    QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout,
+    QInputDialog, QLineEdit, QWidget,
 )
 
 
@@ -77,5 +77,30 @@ def enter_note(parent, title, label):
     try:
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         return dialog.textValue(), accepted
+    finally:
+        dialog.deleteLater()
+
+
+def edit_evidence_source(parent, field_labels, provenance):
+    """登记证据来源与交付方 SHA-256 的公共弹窗。"""
+    dialog = QDialog(parent)
+    dialog.setWindowTitle('登记证据来源')
+    dialog.setMinimumWidth(580)
+    form = QFormLayout(dialog)
+    form.setContentsMargins(16, 14, 16, 14)
+    form.setSpacing(10)
+    fields = {}
+    for key, label in field_labels.items():
+        fields[key] = QLineEdit((provenance or {}).get(key, ''))
+        form.addRow(label, fields[key])
+    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+    form.addRow(buttons)
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    dialog.resize(600, 270)
+    try:
+        if dialog.exec():
+            return {key: field.text() for key, field in fields.items()}
+        return None
     finally:
         dialog.deleteLater()

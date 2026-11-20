@@ -2,10 +2,11 @@
 from threading import Event
 from PySide6.QtWidgets import QMessageBox
 
+from ..core.coverage import SOURCE_FIELDS, source_status
 from ..core.formatting import display_time
 from ..core.browser_index import prepare
 from ..paths import EVIDENCE_DIR
-from ..ui.dialogs import RAW_IMAGE_FILTER, choose_file
+from ..ui.dialogs import RAW_IMAGE_FILTER, choose_file, edit_evidence_source
 from ..ui.analysis_panels import EvidencePanel
 from ..ui.views import ExportResultDialog
 from .api import Action, Feature, Panel
@@ -103,6 +104,19 @@ def information(context):
     return text + '\n\n' + case.data.get('fsstat', '')
 
 
+def register_source(context, on_saved=None):
+    if not context.available():
+        return
+    case = context.case()
+    if not case.data['evidence']:
+        QMessageBox.information(context.root, '提示', '请先加载镜像。')
+        return
+    values = edit_evidence_source(context.root, SOURCE_FIELDS, case.data['evidence'].get('provenance'))
+    if values is not None:
+        callback = on_saved or (lambda _: None)
+        context.task('登记来源', lambda: case.register_source(values), callback)
+
+
 def panel_data(context):
     case = context.case()
     if not case:
@@ -111,7 +125,8 @@ def panel_data(context):
         if context.available():
             context.task('读取完整文件系统详情', lambda: case.export_fsstat(offset),
                          lambda path: ExportResultDialog(context.root, path, '文件系统详情已导出').exec())
-    return {**case.data, 'export_fsstat': export_details}
+    return {**case.data, 'export_fsstat': export_details,
+            'register_source': lambda: register_source(context)}
 
 
 def information_version(context):

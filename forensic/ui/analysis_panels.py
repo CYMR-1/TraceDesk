@@ -343,7 +343,18 @@ class FindingsPanel(RecordsPanel):
 class EvidencePanel(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
+        self._register_source = None
         layout = QVBoxLayout(self)
+        top = QHBoxLayout()
+        header_label = QLabel('镜像摘要与证据来源')
+        header_label.setProperty('role', 'section')
+        top.addWidget(header_label)
+        top.addStretch(1)
+        self.source_button = QPushButton('登记证据来源')
+        self.source_button.setEnabled(False)
+        self.source_button.clicked.connect(lambda: self._register_source() if self._register_source else None)
+        top.addWidget(self.source_button)
+        layout.addLayout(top)
         split = QSplitter(Qt.Orientation.Vertical)
         self.summary = QTextBrowser()
         self.summary.setOpenExternalLinks(False)
@@ -367,11 +378,13 @@ class EvidencePanel(QWidget):
         raw_layout.addWidget(self.text)
         split.addWidget(raw)
         split.setSizes([400, 300])
-        layout.addWidget(split)
+        layout.addWidget(split, 1)
 
     def set_text(self, data):
         evidence = data.get('evidence') if data else None
         self._export = data.get('export_fsstat') if data else None
+        self._register_source = data.get('register_source') if data else None
+        self.source_button.setEnabled(bool(evidence and self._register_source))
         large = bool(evidence and evidence.get('large_image') and self._export)
         self.details.setVisible(large)
         self.partition.setVisible(large)

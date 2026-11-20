@@ -4,9 +4,9 @@ import queue
 from time import monotonic
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
-                               QLabel, QLineEdit, QMessageBox, QPushButton,
-                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit,
+                               QMessageBox, QPushButton, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from ..core.content_search import SearchControl, pattern, search
 from ..core.coverage import SOURCE_FIELDS, source_status
@@ -14,10 +14,11 @@ from ..core.preview import PAGE_BYTES
 from ..core.review import build_bundle
 from ..core.tasks import TaskRunner
 from ..engines.tsk import deleted_source_note
+from ..ui.dialogs import edit_evidence_source
 from ..ui.filter_header import FilterHeaderView
 from ..ui.preview import FilePreview
 from ..ui.views import ExportResultDialog
-from .api import Feature, Panel
+from .api import Action, Feature, Panel
 
 LIVE_DRAIN_LIMIT = 500
 
@@ -52,10 +53,14 @@ class ReviewPanel(QWidget):
         self.search_button = QPushButton('搜索')
         self.search_button.clicked.connect(self.toggle_search)
         tools.addWidget(self.search_button)
-        for title, callback in [('登记证据来源', self.source), ('导出复核包', self.bundle)]:
-            button = QPushButton(title)
-            button.clicked.connect(callback)
-            tools.addWidget(button)
+        self.exclude_button = QPushButton('排除所选项')
+        self.exclude_button.setToolTip('在本次搜索中排除勾选（或当前选中）的命中')
+        self.exclude_button.clicked.connect(self.exclude_selected)
+        tools.addWidget(self.exclude_button)
+        self.save_button = QPushButton('保存为取证发现')
+        self.save_button.setToolTip('将勾选（或当前选中）的命中保存为取证发现')
+        self.save_button.clicked.connect(self.bookmark)
+        tools.addWidget(self.save_button)
         layout.addLayout(tools)
         self.query.returnPressed.connect(self.start)
         self.status = QLabel()
@@ -77,15 +82,6 @@ class ReviewPanel(QWidget):
         self.table.itemDoubleClicked.connect(self.preview)
         self.table.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.table, 1)
-
-        actions = QHBoxLayout()
-        self.exclude_button = QPushButton('在本次搜索中排除所选项')
-        self.exclude_button.clicked.connect(self.exclude_selected)
-        self.save_button = QPushButton('将所选命中保存为取证发现')
-        self.save_button.clicked.connect(self.bookmark)
-        actions.addWidget(self.exclude_button, 1)
-        actions.addWidget(self.save_button, 2)
-        layout.addLayout(actions)
 
     @property
     def searching(self):
@@ -120,8 +116,8 @@ class ReviewPanel(QWidget):
             self.header.set_check_state(Qt.CheckState.Checked)
         else:
             self.header.set_check_state(Qt.CheckState.PartiallyChecked)
-        self.save_button.setText(f'将勾选的 {checked} 条命中保存为取证发现' if checked else '将所选命中保存为取证发现')
-        self.exclude_button.setText(f'在本次搜索中排除勾选的 {checked} 项' if checked else '在本次搜索中排除所选项')
+        self.save_button.setText(f'保存为取证发现 ({checked})' if checked else '保存为取证发现')
+        self.exclude_button.setText(f'排除所选项 ({checked})' if checked else '排除所选项')
 
     def _on_item_changed(self, item, column):
         if column != 0:
@@ -498,32 +494,27 @@ class ReviewPanel(QWidget):
     def source(self):
         if not self.ready():
             return
-        dialog = QDialog(self)
-        dialog.setWindowTitle('登记证据来源')
-        dialog.setMinimumWidth(580)
-        form = QFormLayout(dialog)
-        form.setContentsMargins(16, 14, 16, 14)
-        form.setSpacing(10)
-        fields = {}
-        for key, label in SOURCE_FIELDS.items():
-            fields[key] = QLineEdit(self.case.data['evidence'].get('provenance', {}).get(key, ''))
-            form.addRow(label, fields[key])
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        form.addRow(buttons)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        dialog.resize(600, 270)
-        if dialog.exec():
-            values = {k: field.text() for k, field in fields.items()}
+        values = edit_evidence_source(self, SOURCE_FIELDS, self.case.data['evidence'].get('provenance'))
+        if values is not None:
             self.context.task('登记来源', lambda: self.case.register_source(values),
                               lambda _: self.status.setText(source_status(self.case.data['evidence'])))
-        dialog.deleteLater()
 
     def bundle(self):
-        if self.ready():
-            self.context.task('校验并生成复核包', lambda: build_bundle(self.case),
-                              lambda path: ExportResultDialog(self, path, '复核包已生成').exec())
+        export_bundle(self.context)
 
 
-FEATURE = Feature('review', requires=('evidence', 'files'), panels=(
+def export_bundle(context):
+    if not context.available():
+        return
+    case = context.case()
+    if not case.data['evidence']:
+        QMessageBox.information(context.root, '提示', '请先加载镜像。')
+        return
+    context.task('校验并生成复核包', lambda: build_bundle(case),
+                 lambda path: ExportResultDialog(context.root, path, '复核包已生成').exec())
+
+
+FEATURE = Feature('review', requires=('evidence', 'files'), actions=(
+    Action('export_bundle', export_bundle, '导出复核包', 'header'),
+), panels=(
     Panel('review', '内容搜索与复核', lambda ctx: ctx, lambda ctx: id(ctx.case()), ReviewPanel),))

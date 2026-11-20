@@ -1,19 +1,10 @@
 """按操作显示已验证的审计链；原始记录可逐条查看。"""
 import json
 from PySide6.QtCore import Qt
+from ..core.findings import ACTION_TITLES as TITLES
 from ..core.formatting import display_time
 from ..ui.analysis_panels import RecordsPanel, page
 from .api import Feature, Panel
-
-TITLES = {
-    'CONTENT_SEARCH': '搜索文件内容', 'SOURCE_REGISTER': '登记证据来源', 'REVIEW_EXPORT': '生成复核包',
-    'CASE_CREATE': '新建案件', 'CASE_OPEN': '打开案件', 'IMAGE_LOAD_BEGIN': '开始载入镜像',
-    'IMAGE_LOAD': '载入镜像', 'HASH_FIXED': '固定镜像摘要', 'HASH_VERIFY': '校验镜像完整性',
-    'FILE_BROWSE': '读取分区文件', 'PARTITIONS_SCAN': '扫描所有分区', 'FILE_FILTER': '筛选文件',
-    'FILE_EXPORT': '导出文件', 'TIMELINE': '生成时间线', 'REPORT_GENERATE': '生成报告',
-    'FILE_NOTE': '记录取证发现', 'FILE_COMPARE': '比对文件副本', 'FILE_HASH': '计算文件摘要',
-    'FINDINGS_EXPORT': '导出取证发现',
-}
 
 
 def render(context):

@@ -365,7 +365,12 @@ class FileBrowserTests(QtTests):
         self.assertEqual(panel.header.filter_columns(), (3,))
         self.assertEqual(panel.header.check_state(), Qt.CheckState.Unchecked)
         self.assertEqual(panel.search_button.text(), '搜索')
+        self.assertEqual(panel.exclude_button.text(), '排除所选项')
+        self.assertEqual(panel.save_button.text(), '保存为取证发现')
         self.assertFalse(hasattr(panel, 'cancel_button'))
+        # 导出复核包位于顶部标题栏（紧邻生成 Markdown 报告），登记证据来源位于镜像与文件系统页。
+        self.assertEqual([b.text() for b in app.view.buttons][-2:], ['生成 Markdown 报告', '导出复核包'])
+        self.assertEqual(app.view.panels['info'].source_button.text(), '登记证据来源')
 
         logged = []
         case = SimpleNamespace(
@@ -412,7 +417,8 @@ class FileBrowserTests(QtTests):
         panel.header.toggled.emit(False)
         self.assertEqual(panel.header.check_state(), Qt.CheckState.Unchecked)
         self.assertEqual(len(panel.checked_items()), 0)
-        self.assertEqual(panel.save_button.text(), '将所选命中保存为取证发现')
+        self.assertEqual(panel.save_button.text(), '保存为取证发现')
+        self.assertEqual(panel.exclude_button.text(), '排除所选项')
 
         # 部分勾选时表头全选框进入半选态，并支持批量保存为取证发现。
         panel.table.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
