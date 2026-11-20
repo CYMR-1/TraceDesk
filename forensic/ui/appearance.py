@@ -177,6 +177,15 @@ class DesktopAppearance:
             QTreeView::item:selected, QTableView::item:selected {
                 background: #dff3eb; color: #145b4a;
             }
+            QTreeView::indicator {
+                width: 15px; height: 15px; border-radius: 4px;
+                border: 1px solid #b8c7bf; background: #ffffff;
+            }
+            QTreeView::indicator:hover { border-color: #087f6b; }
+            QTreeView::indicator:checked {
+                background: #087f6b; border-color: #087f6b;
+                image: url("@CHECK@");
+            }
             QHeaderView::section {
                 background: #f3f6f5; color: #5b6d64; padding: 9px 6px;
                 border: none; border-bottom: 1px solid #dfe7e2;
@@ -195,7 +204,8 @@ class DesktopAppearance:
             QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
             QScrollBar::add-page, QScrollBar::sub-page { background: none; }
             QToolTip { background: #ffffff; color: #24332f; border: 1px solid #b6c9be; padding: 6px; }
-        '''.replace('@CHEVRON@', (ASSET_DIR / 'chevron-down.svg').as_posix()))
+        '''.replace('@CHEVRON@', (ASSET_DIR / 'chevron-down.svg').as_posix())
+           .replace('@CHECK@', (ASSET_DIR / 'check-mark.svg').as_posix()))
         return self
 
     @staticmethod

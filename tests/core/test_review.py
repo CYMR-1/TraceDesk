@@ -5,10 +5,16 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 from zipfile import ZipFile
 
+import pytsk3
+
 from forensic.core.case import Case
+from forensic.core import content_search
 from forensic.core.content_search import matches, pattern, protected_source, search, SearchControl
+from forensic.core.search_worker import _non_sparse_intervals
 from forensic.core.coverage import assess, source_status
 from forensic.core.file_tools import record_note
 from forensic.core.review import build_bundle
@@ -147,3 +153,49 @@ class ReviewTests(unittest.TestCase):
                     writer.flush()
             with self.assertRaisesRegex(ValueError, '镜像摘要'):
                 search(case, '61', 'HEX', SearchControl(), modify)
+
+    def test_sparse_intervals_boundary_and_guards(self):
+        sparse = pytsk3.TSK_FS_ATTR_RUN_FLAG_SPARSE
+        nonres = pytsk3.TSK_FS_ATTR_NONRES
+
+        class FakeAttr:
+            def __init__(self, flags, runs):
+                self.info = SimpleNamespace(flags=flags)
+                self._runs = runs
+
+            def __iter__(self):
+                return iter(self._runs)
+
+        run = lambda offset, length, flags=0: SimpleNamespace(offset=offset, len=length, flags=flags)
+        # 无数据 run（如 $BadClus:$Bad）必须回退 icat。
+        self.assertIsNone(_non_sparse_intervals(FakeAttr(nonres, []), 4096, 8192, b'ab', 0, 8192))
+        # 稀疏区前后的非稀疏 run 应向前回退 len(needle)-1 字节以覆盖跨界匹配。
+        attr = FakeAttr(nonres, [run(0, 10, sparse), run(10, 2, 0), run(12, 10, sparse)])
+        self.assertEqual(_non_sparse_intervals(attr, 4096, 22 * 4096, b'\x00ABC', 0, 22 * 4096),
+                         [(10 * 4096 - 3, 12 * 4096)])
+        # 全稀疏文件搜索非零模式时无需读取。
+        self.assertEqual(_non_sparse_intervals(FakeAttr(nonres, [run(0, 10, sparse)]), 4096, 40960, b'ab', 0, 40960), [])
+        # 搜索全零或压缩属性不得跳过稀疏 run。
+        self.assertEqual(_non_sparse_intervals(attr, 4096, 22 * 4096, b'\x00\x00', 0, 22 * 4096), [(0, 22 * 4096)])
+        comp = FakeAttr(nonres | pytsk3.TSK_FS_ATTR_COMP, [run(0, 10, sparse), run(10, 2, 0)])
+        self.assertEqual(_non_sparse_intervals(comp, 4096, 12 * 4096, b'ab', 0, 12 * 4096), [(0, 12 * 4096)])
+
+    def test_hardlink_dedup_and_multiprocess_parity(self):
+        image = self.root / 'parity.dd'
+        create(image)
+        case = Case.create(self.root / 'cases', '3', 'test', 'parity')
+        self.addCleanup(case.close)
+        case.load(image)
+        case.scan_all()
+        readme = next(e for e in case.data['inventory'] if e['path'] == 'README.TXT')
+        # 模拟同一 (offset, inode) 的硬链接条目，验证只读取一次且两条路径均按原顺序产出命中。
+        hardlink = dict(readme, path='HARDLINK/README_DUP.TXT')
+        case.data['inventory'].append(hardlink)
+        single_rec, single_hits, _ = search(case, 'forensic', 'UTF-8', SearchControl(), lambda *_: None)
+        with patch.object(content_search, 'POOL_MIN_ENTRIES', 1), patch.object(content_search, 'WORKERS', 2):
+            multi_rec, multi_hits, _ = search(case, 'forensic', 'UTF-8', SearchControl(), lambda *_: None)
+        self.assertEqual(single_rec['hits'], multi_rec['hits'])
+        paths = [e['path'] for e, *_ in multi_hits]
+        self.assertIn('README.TXT', paths)
+        self.assertIn('HARDLINK/README_DUP.TXT', paths)
+        self.assertLess(paths.index('README.TXT'), paths.index('HARDLINK/README_DUP.TXT'))

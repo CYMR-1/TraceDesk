@@ -41,13 +41,22 @@ class ReviewPanel(QWidget):
         self.table = QTreeWidget()
         self.table.setRootIsDecorated(False)
         self.table.header().setObjectName('recordHeader')
-        self.table.setHeaderLabels(['文件内字节偏移', '分区偏移', 'inode', '镜像内路径', '前文 HEX', '后文 HEX'])
-        self.table.setColumnWidth(3, 320)
+        self.table.setHeaderLabels(['选择', '序号', '文件内字节偏移', '分区偏移', 'inode', '镜像内路径', '前文 HEX', '后文 HEX'])
+        self.table.headerItem().setToolTip(0, '单击切换全选/取消全选')
+        self.table.header().setSectionsClickable(True)
+        self.table.header().sectionClicked.connect(self.toggle_all)
+        for column, width in ((0, 56), (1, 64), (5, 320)):
+            self.table.setColumnWidth(column, width)
         self.table.itemDoubleClicked.connect(self.preview)
+        self.table.itemChanged.connect(self._update_save_button)
         layout.addWidget(self.table, 1)
-        save = QPushButton('将所选命中保存为取证发现')
-        save.clicked.connect(self.bookmark)
-        layout.addWidget(save)
+        self.save_button = QPushButton('将所选命中保存为取证发现')
+        self.save_button.clicked.connect(self.bookmark)
+        layout.addWidget(self.save_button)
+
+    def _update_save_button(self, *_):
+        count = len(self.checked_items())
+        self.save_button.setText(f'将勾选的 {count} 条命中保存为取证发现' if count else '将所选命中保存为取证发现')
 
     def set_text(self, context):
         self.context = context
@@ -55,6 +64,7 @@ class ReviewPanel(QWidget):
         if self.case is not case or not self.status.text():
             self.table.clear()
             self.hits = []
+            self._update_save_button()
             self.status.setText('搜索当前清单中的普通文件及删除记录，不含未分配空间。双击命中定位原始字节。')
         self.case = case
 
@@ -83,6 +93,7 @@ class ReviewPanel(QWidget):
         self.control = control
         self.table.clear()
         self.hits = []
+        self._update_save_button()
         self.status.setText('正在后台搜索；进度见窗口底部。')
         def work():
             try:
@@ -101,14 +112,25 @@ class ReviewPanel(QWidget):
             self.status.setText('搜索失败：' + result)
             return
         self.record, self.hits, self.name = result
+        items = []
         for index, (entry, pos, before, after) in enumerate(self.hits):
-            item = QTreeWidgetItem(self.table, [str(pos), str(entry['offset']), str(entry['inode']), entry['path'], before, after])
+            item = QTreeWidgetItem(['', str(index + 1), str(pos), str(entry['offset']), str(entry['inode']),
+                                    entry['path'], before, after])
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.CheckState.Unchecked)
             item.setData(0, Qt.ItemDataRole.UserRole, index)
+            items.append(item)
+        self.table.blockSignals(True)
+        try:
+            self.table.addTopLevelItems(items)
+        finally:
+            self.table.blockSignals(False)
+        self._update_save_button()
         self.status.setText(f"{self.record['status']} · 已处理 {self.record['visited']}/{self.record['eligible']} 项 · "
                             f"命中 {len(self.hits)} 条 · 读取失败 {len(self.record['errors'])} 项。{self.record['verification']}。清单及失败明细：reports/{self.name}")
 
     def preview(self, item, column):
-        if not self.ready():
+        if column == 0 or not self.ready():
             return
         entry, pos, _, _ = self.hits[item.data(0, Qt.ItemDataRole.UserRole)]
         dialog = QDialog(self)
@@ -152,20 +174,39 @@ class ReviewPanel(QWidget):
             view.clear()
             dialog.deleteLater()
 
-    def bookmark(self):
-        item = self.table.currentItem()
-        if item is None or not self.ready():
+    def checked_items(self):
+        return [item for item in map(self.table.topLevelItem, range(self.table.topLevelItemCount()))
+                if item.checkState(0) == Qt.CheckState.Checked]
+
+    def toggle_all(self, column):
+        if column != 0 or not self.table.topLevelItemCount():
             return
-        entry, pos, before, after = self.hits[item.data(0, Qt.ItemDataRole.UserRole)]
-        reference = self.record['hits'][item.data(0, Qt.ItemDataRole.UserRole)]
+        count = self.table.topLevelItemCount()
+        state = Qt.CheckState.Unchecked if len(self.checked_items()) == count else Qt.CheckState.Checked
+        self.table.blockSignals(True)
+        try:
+            for row in range(count):
+                self.table.topLevelItem(row).setCheckState(0, state)
+        finally:
+            self.table.blockSignals(False)
+        self._update_save_button()
+
+    def bookmark(self):
+        items = self.checked_items() or ([self.table.currentItem()] if self.table.currentItem() else [])
+        if not items or not self.ready():
+            return
+        record, name = self.record, self.name
+        selected = [(self.hits[i], record['hits'][i]) for i in (item.data(0, Qt.ItemDataRole.UserRole) for item in items)]
         def save():
-            self.case.log('FILE_NOTE', entry['path'], '成功', offset=entry['offset'], inode=entry['inode'],
-                          deleted=entry['deleted'], image_sha256=self.record['image_sha256'],
-                          source_verification=self.record['verification'],
-                          note=f"内容命中：{self.record['query']}；{self.record['encoding']}；文件内字节偏移 {pos}",
-                          file_byte=pos, needle=self.record['needle'], before=before, after=after, search_record=self.name,
-                          source_note=reference['source_note'], reallocated=entry.get('reallocated', False))
-        self.context.task('保存命中记录', save, lambda _: self.status.setText('已保存，可在“取证发现”中查看。'))
+            for (entry, pos, before, after), reference in selected:
+                self.case.log('FILE_NOTE', entry['path'], '成功', offset=entry['offset'], inode=entry['inode'],
+                              deleted=entry['deleted'], image_sha256=record['image_sha256'],
+                              source_verification=record['verification'],
+                              note=f"内容命中：{record['query']}；{record['encoding']}；文件内字节偏移 {pos}",
+                              file_byte=pos, needle=record['needle'], before=before, after=after, search_record=name,
+                              source_note=reference['source_note'], reallocated=entry.get('reallocated', False))
+        self.context.task('保存命中记录', save,
+                          lambda _: self.status.setText(f'已保存 {len(selected)} 条命中，可在“取证发现”中查看。'))
 
     def source(self):
         if not self.ready():

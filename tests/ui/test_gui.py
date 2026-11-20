@@ -356,6 +356,77 @@ class FileBrowserTests(QtTests):
         self.assertFalse(browser.export_button.isEnabled())
         app.preview.open_file.assert_called_once()
 
+    def test_review_panel_shows_checkbox_and_sequence_and_saves_checked_hits(self):
+        root, app = self.controller()
+        panel = app.view.panels['review']
+        headers = [panel.table.headerItem().text(i) for i in range(panel.table.columnCount())]
+        self.assertEqual(headers[:4], ['选择', '序号', '文件内字节偏移', '分区偏移'])
+
+        logged = []
+        case = SimpleNamespace(
+            data={'evidence': {'sha256': 'a' * 64}},
+            log=lambda *args, **kwargs: logged.append((args, kwargs)),
+            image=lambda: 'demo.dd',
+            close=lambda: None,
+        )
+        panel.context = SimpleNamespace(
+            case=lambda: case,
+            available=lambda: True,
+            task=lambda label, work, cb=None: (work(), cb(None) if cb else None),
+        )
+        panel.case = case
+
+        entries = [
+            dict(path='DOCS/A.TXT', offset=2048, inode='10', deleted=False),
+            dict(path='DOCS/B.TXT', offset=2048, inode='11', deleted=False),
+            dict(path='DOCS/C.TXT', offset=2048, inode='12', deleted=True, reallocated=False),
+        ]
+        hits = [(entries[0], 5, '00 01', '02 03'), (entries[1], 12, 'aa bb', 'cc dd'), (entries[2], 30, '', 'ff')]
+        record = dict(
+            query='note', encoding='UTF-8', needle='6e6f7465',
+            image_sha256='a' * 64, verification='测试校验',
+            status='完成', visited=3, eligible=3, errors=[],
+            hits=[dict(source_note=''), dict(source_note=''), dict(source_note='已删除，原内容可能已覆盖')],
+        )
+        panel.finished((record, hits, 'search_test.json'))
+
+        self.assertEqual(panel.table.topLevelItemCount(), 3)
+        for row in range(3):
+            item = panel.table.topLevelItem(row)
+            self.assertEqual(item.text(0), '')
+            self.assertEqual(item.text(1), str(row + 1))
+            self.assertEqual(item.text(2), str(hits[row][1]))
+            self.assertEqual(item.checkState(0), Qt.CheckState.Unchecked)
+            self.assertTrue(item.flags() & Qt.ItemFlag.ItemIsUserCheckable)
+
+        # 单击第 0 列表头切换全选与取消全选，并同步按钮文案。
+        panel.toggle_all(0)
+        self.assertEqual(len(panel.checked_items()), 3)
+        self.assertIn('3', panel.save_button.text())
+        panel.toggle_all(0)
+        self.assertEqual(len(panel.checked_items()), 0)
+        self.assertEqual(panel.save_button.text(), '将所选命中保存为取证发现')
+
+        # 勾选第 1、3 条后批量保存为取证发现。
+        panel.table.topLevelItem(0).setCheckState(0, Qt.CheckState.Checked)
+        panel.table.topLevelItem(2).setCheckState(0, Qt.CheckState.Checked)
+        self.assertIn('2', panel.save_button.text())
+        panel.bookmark()
+        self.assertEqual([(a[1], k['file_byte']) for a, k in logged], [('DOCS/A.TXT', 5), ('DOCS/C.TXT', 30)])
+
+        # 未勾选时回退保存当前选中行。
+        logged.clear()
+        panel.table.topLevelItem(0).setCheckState(0, Qt.CheckState.Unchecked)
+        panel.table.topLevelItem(2).setCheckState(0, Qt.CheckState.Unchecked)
+        panel.table.setCurrentItem(panel.table.topLevelItem(1))
+        panel.bookmark()
+        self.assertEqual([(a[1], k['file_byte']) for a, k in logged], [('DOCS/B.TXT', 12)])
+
+        # 双击选择框列不应触发字节预览对话框。
+        with patch('forensic.features.review.QDialog') as dialog_cls:
+            panel.preview(panel.table.topLevelItem(0), 0)
+            dialog_cls.assert_not_called()
+
 
 class NewCaseDialogTests(QtTests):
     def dialog(self):
