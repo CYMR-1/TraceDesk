@@ -170,11 +170,14 @@ class McpWorkflowTests(unittest.TestCase):
                 'note': '文件内偏移 5 处包含字节 6E 6F 74 65 (note)',
             },
         )
-        self.assertEqual(noted['actor'], '张取证 (MCP)')
+        self.assertEqual(noted['actor'], '张取证')
+        self.assertEqual(noted['origin'], 'mcp')
+        self.assertEqual(noted['origin_label'], 'MCP')
 
         findings = self._call_json('tracedesk_list_findings', {'case_dir': case_dir, 'keyword': '6E 6F 74 65'})
         self.assertEqual(findings['total'], 1)
         self.assertEqual(findings['items'][0]['path'], 'DOCS/CASE.TXT')
+        self.assertEqual(findings['items'][0]['records'][-1]['origin_label'], 'MCP')
 
         exported_findings = self._call_json('tracedesk_export_findings', {'case_dir': case_dir})
         self.assertEqual(exported_findings['exported_count'], 1, exported_findings)
@@ -187,23 +190,56 @@ class McpWorkflowTests(unittest.TestCase):
         self.assertGreaterEqual(timeline['total'], 1)
         self.assertEqual(timeline['items'][0]['event'], 'M 内容修改')
 
-        audit = self._call_json(
+        # 补充一条人工操作，验证同一案件中人工与 MCP 审计日志能严格区分与筛选
+        manual_case = Case(case_dir)
+        try:
+            manual_case.verify()
+        finally:
+            manual_case.close()
+
+        audit_mcp = self._call_json(
             'tracedesk_query_audit_log',
-            {'case_dir': case_dir, 'actor_filter': '(MCP)', 'sort_order': 'desc'},
+            {'case_dir': case_dir, 'origin': 'mcp', 'sort_order': 'desc'},
         )
-        self.assertTrue(audit['audit_chain_valid'])
-        self.assertGreaterEqual(audit['total'], 5)
+        self.assertTrue(audit_mcp['audit_chain_valid'])
+        self.assertGreaterEqual(audit_mcp['total'], 5)
+        self.assertTrue(all(item['origin'] == 'mcp' and item['origin_label'] == 'MCP' for item in audit_mcp['items']))
+        self.assertEqual(audit_mcp['origin_counts']['manual'], 1)
+        self.assertEqual(audit_mcp['origin_counts']['mcp'], audit_mcp['total'])
+
+        audit_manual = self._call_json(
+            'tracedesk_query_audit_log',
+            {'case_dir': case_dir, 'origin': 'manual'},
+        )
+        self.assertEqual(audit_manual['total'], 1)
+        self.assertEqual(audit_manual['items'][0]['origin'], 'manual')
+        self.assertEqual(audit_manual['items'][0]['origin_label'], '人工')
+        self.assertEqual(audit_manual['items'][0]['action'], 'HASH_VERIFY')
+
+        audit_md = self._call_text('tracedesk_query_audit_log', {'case_dir': case_dir})
+        self.assertIn('[MCP]', audit_md)
+        self.assertIn('[人工]', audit_md)
 
         report = self._call_json('tracedesk_generate_report', {'case_dir': case_dir})
         report_path = Path(report['report_path'])
         self.assertTrue(report_path.is_file())
         report_text = report_path.read_text(encoding='utf-8')
         self.assertIn('6E 6F 74 65', report_text)
+        self.assertIn('| 序号 | 时间 (UTC+8) | 来源 | 操作人员 | 操作 | 对象 | 结果 |', report_text)
+        self.assertIn('| 人工 |', report_text)
+        self.assertIn('| MCP |', report_text)
 
+        # 验证篡改 audit.jsonl 中的 origin（例如把 MCP 伪造成 manual）会被审计哈希链检测拦截
         bundle = self._call_json('tracedesk_build_review_bundle', {'case_dir': case_dir})
         bundle_path = Path(bundle['bundle_path'])
         self.assertTrue(bundle_path.is_file())
         verify_bundle_zip(bundle_path, bundle['sha256'])
+
+        audit_file = Path(case_dir) / 'audit.jsonl'
+        tampered = audit_file.read_text(encoding='utf-8').replace('"origin":"mcp"', '"origin":"manual"', 1)
+        audit_file.write_text(tampered, encoding='utf-8')
+        tamper_err = self._call_text('tracedesk_query_audit_log', {'case_dir': case_dir})
+        self.assertIn('不完整或被修改', tamper_err)
 
     def test_boundaries_and_lock_contention_return_actionable_errors(self):
         created = self._call_json(

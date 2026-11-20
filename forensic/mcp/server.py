@@ -106,13 +106,19 @@ class SortOrder(str, Enum):
     DESC = 'desc'
 
 
+class AuditOriginFilter(str, Enum):
+    ALL = 'all'
+    MANUAL = 'manual'
+    MCP = 'mcp'
+
+
 class _BaseInput(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, validate_assignment=True, extra='forbid')
 
 
 class _CaseBaseInput(_BaseInput):
     case_dir: str = Field(..., min_length=1, description='案件目录路径（绝对路径、相对案件库文件夹名，或 case.json 路径）')
-    actor: Optional[str] = Field(default=None, max_length=80, description='可选操作人员标识，写入审计日志；省略时默认使用“取证人员 (MCP)”')
+    actor: Optional[str] = Field(default=None, max_length=80, description='可选操作人员标识，写入审计日志；无论是否指定，MCP 调用均在审计链中固定标记为 MCP 来源')
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description='输出格式：markdown 或 json')
 
 
@@ -138,6 +144,7 @@ class CreateCaseInput(_BaseInput):
     target: str = Field(..., min_length=1, max_length=200, description='取证对象说明，例如 FAT16 演示镜像')
     cases_root: Optional[str] = Field(default=None, description='可选案件库根目录，省略时使用项目默认 cases 目录')
     folder_name: Optional[str] = Field(default=None, max_length=180, description='可选自定义案件目录名，省略时自动按“编号-人员-对象”生成')
+    actor: Optional[str] = Field(default=None, max_length=80, description='可选操作人员标识（默认使用取证人员，审计来源固定标记为 MCP）')
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN, description='输出格式：markdown 或 json')
 
 
@@ -234,6 +241,7 @@ class QueryTimelineInput(_CaseBaseInput):
 
 
 class QueryAuditLogInput(_CaseBaseInput):
+    origin: AuditOriginFilter = Field(default=AuditOriginFilter.ALL, description='按操作来源筛选：all（全部）/ manual（人工）/ mcp（MCP）')
     action: Optional[str] = Field(default=None, description='按操作代码或中文名称筛选，例如 FILE_EXPORT 或 导出文件')
     actor_filter: Optional[str] = Field(default=None, description='按操作人员关键词筛选')
     result: Optional[str] = Field(default=None, description='按结果筛选，例如 成功 / 失败 / 通过')
@@ -297,7 +305,7 @@ def _render_summary_md(data: dict[str, Any]) -> str:
         f'- **取证人员**：{data["examiner"]} · **取证对象**：{data["target"]}',
         f'- **创建时间（UTC+8）**：{data["created"]}',
         f'- **清单条目**：{data["inventory_count"]} · **已导出**：{data["exports_count"]} · **取证发现**：{data["findings_file_count"]} 个文件（{data["findings_record_count"]} 条记录）',
-        f'- **审计链**：校验通过（共 {data["audit_count"]} 条，尾部锚点 `{data["audit_head"][:16]}…`）' if data['audit_head'] else '- **审计链**：暂无记录',
+        f'- **审计链**：校验通过（共 {data["audit_count"]} 条：人工 {data["audit_origin_counts"]["manual"]} · MCP {data["audit_origin_counts"]["mcp"]}，尾部锚点 `{data["audit_head"][:16]}…`）' if data['audit_head'] else '- **审计链**：暂无记录',
     ]
     ev = data.get('evidence')
     if not ev:
@@ -402,7 +410,7 @@ def _render_findings_md(data: dict[str, Any]) -> str:
             d = r['details']
             note = f' · 笔记：{d["note"]}' if d.get('note') else ''
             digest = f' · SHA-256：`{d["sha256"]}`' if d.get('sha256') else ''
-            lines.append(f'  - `#{r["seq"]}` {r["timestamp"]} · {r["actor"]} · {r["operation"]} · **{r["result"]}**{note}{digest}')
+            lines.append(f'  - `#{r["seq"]}` {r["timestamp"]} · [{r["origin_label"]}] · {r["actor"]} · {r["operation"]} · **{r["result"]}**{note}{digest}')
         lines.append('')
     if data['has_more']:
         lines.append(f'> 还有更多发现，请使用 `offset={data["next_offset"]}` 继续翻页。')
@@ -431,9 +439,11 @@ def _render_timeline_md(data: dict[str, Any]) -> str:
 
 
 def _render_audit_md(data: dict[str, Any]) -> str:
+    counts = data.get('origin_counts', {})
     lines = [
         '# 审计日志（哈希链核验通过）',
         f'- 尾部锚点：`{data["audit_head"] or "无"}`',
+        f'- 来源统计：人工 {counts.get("manual", 0)} 条 · MCP {counts.get("mcp", 0)} 条',
         f'- 匹配总数：{data["total"]} · 当前返回：{data["count"]}（offset={data["offset"]}，排序：{data["sort_order"]}）',
         '',
     ]
@@ -442,7 +452,7 @@ def _render_audit_md(data: dict[str, Any]) -> str:
         return '\n'.join(lines)
     for r in data['items']:
         lines.append(
-            f'- `#{r["seq"]}` {r["timestamp"]} · **{r["action_title"]}** (`{r["action"]}`) · {r["actor"]} · {r["result"]} · 对象：`{r["subject"]}`'
+            f'- `#{r["seq"]}` {r["timestamp"]} · **[{r["origin_label"]}]** · **{r["action_title"]}** (`{r["action"]}`) · {r["actor"]} · {r["result"]} · 对象：`{r["subject"]}`'
         )
     if data['has_more']:
         lines.append(f'\n> 还有更多日志，请使用 `offset={data["next_offset"]}` 继续翻页。')
@@ -558,6 +568,7 @@ def create_server(
                 target=params.target,
                 cases_root=params.cases_root,
                 folder_name=params.folder_name,
+                actor=params.actor,
             )
             return _format_output(data, params.response_format, lambda d: _render_simple_kv_md('已创建新案件', d))
         except Exception as error:
@@ -899,11 +910,12 @@ def create_server(
         ),
     )
     async def tracedesk_query_audit_log(params: QueryAuditLogInput) -> str:
-        """核验审计哈希链及尾部锚点，并按操作、操作人员、结果和关键词分页检索审计日志。"""
+        """核验审计哈希链及尾部锚点，并按来源（人工/MCP）、操作、操作人员、结果和关键词分页检索审计日志。"""
         try:
             data = await _run_sync(
                 service.query_audit_log,
                 case_dir=params.case_dir,
+                origin=params.origin.value,
                 action=params.action,
                 actor_filter=params.actor_filter,
                 result=params.result,

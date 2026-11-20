@@ -9,7 +9,14 @@ from ..core.case import Case
 from ..core.content_search import SearchControl, search as run_content_search
 from ..core.coverage import SOURCE_FIELDS, coverage_text, source_status
 from ..core.file_tools import examine as examine_entry, record_note
-from ..core.findings import ACTION_TITLES, OPERATIONS, export_findings as do_export_findings, group_findings
+from ..core.findings import (
+    ACTION_TITLES,
+    OPERATIONS,
+    audit_origin,
+    audit_origin_label,
+    export_findings as do_export_findings,
+    group_findings,
+)
 from ..core.formatting import display_time
 from ..core.preview import PAGE_BYTES, PREVIEW_ENCODINGS, PreviewReader, preview_rows, preview_text
 from ..core.review import build_bundle
@@ -95,7 +102,7 @@ class CaseService:
         folder = self.resolve_case_dir(case_dir)
         explicit_actor = (actor or self.default_actor or '').strip() or None
         try:
-            case = Case(folder, actor=explicit_actor)
+            case = Case(folder, actor=explicit_actor, origin='mcp')
         except RuntimeError as error:
             message = str(error)
             if '占用' in message or '加锁' in message:
@@ -105,8 +112,6 @@ class CaseService:
                 ) from error
             raise
         try:
-            if explicit_actor is None:
-                case.actor = f"{case.data['examiner']} (MCP)"
             yield case
         finally:
             case.close()
@@ -236,9 +241,19 @@ class CaseService:
         target: str,
         cases_root: str | None = None,
         folder_name: str | None = None,
+        actor: str | None = None,
     ) -> dict[str, Any]:
         root = Path(cases_root).resolve() if cases_root else self.cases_root
-        case = Case.create(root, number, examiner, target, folder_name=folder_name)
+        explicit_actor = (actor or self.default_actor or '').strip() or None
+        case = Case.create(
+            root,
+            number,
+            examiner,
+            target,
+            folder_name=folder_name,
+            actor=explicit_actor,
+            origin='mcp',
+        )
         try:
             return {
                 'case_dir': str(case.folder),
@@ -246,6 +261,8 @@ class CaseService:
                 'number': case.data['number'],
                 'examiner': case.data['examiner'],
                 'target': case.data['target'],
+                'origin': 'mcp',
+                'origin_label': 'MCP',
                 'created': display_time(case.data['created']),
             }
         finally:
@@ -257,6 +274,7 @@ class CaseService:
             data = case.data
             evidence = data.get('evidence')
             findings_groups = group_findings(records)
+            mcp_count = sum(1 for r in records if audit_origin(r) == 'mcp')
             summary: dict[str, Any] = {
                 'case_dir': str(case.folder),
                 'id': data['id'],
@@ -271,6 +289,7 @@ class CaseService:
                 'findings_file_count': len(findings_groups),
                 'findings_record_count': sum(len(items) for items in findings_groups.values()),
                 'audit_count': len(records),
+                'audit_origin_counts': {'manual': len(records) - mcp_count, 'mcp': mcp_count},
                 'audit_head': records[-1]['hash'] if records else '',
                 'audit_chain_valid': True,
                 'evidence': None,
@@ -663,6 +682,8 @@ class CaseService:
                 'case_dir': str(case.folder),
                 'seq': latest['seq'],
                 'timestamp': display_time(latest['timestamp']),
+                'origin': audit_origin(latest),
+                'origin_label': audit_origin_label(latest),
                 'actor': latest['actor'],
                 'path': entry['path'],
                 'partition_offset': entry['offset'],
@@ -738,6 +759,8 @@ class CaseService:
                         {
                             'seq': r['seq'],
                             'timestamp': display_time(r['timestamp']),
+                            'origin': audit_origin(r),
+                            'origin_label': audit_origin_label(r),
                             'actor': r['actor'],
                             'action': r['action'],
                             'operation': OPERATIONS.get(r['action'], r['action']),
@@ -813,6 +836,7 @@ class CaseService:
         self,
         *,
         case_dir: str,
+        origin: str = 'all',
         action: str | None = None,
         actor_filter: str | None = None,
         result: str | None = None,
@@ -825,6 +849,9 @@ class CaseService:
         with self.open_case(case_dir, actor=actor) as case:
             records = case.check_audit()
             audit_head = records[-1]['hash'] if records else ''
+            mcp_total = sum(1 for r in records if audit_origin(r) == 'mcp')
+            origin_counts = {'manual': len(records) - mcp_total, 'mcp': mcp_total}
+            origin_filter = origin.strip().lower() if origin else 'all'
             action_cf = action.strip().casefold() if action else None
             actor_cf = actor_filter.strip().casefold() if actor_filter else None
             result_cf = result.strip().casefold() if result else None
@@ -832,6 +859,10 @@ class CaseService:
 
             matched = []
             for r in records:
+                rec_origin = audit_origin(r)
+                rec_origin_label = audit_origin_label(r)
+                if origin_filter in ('manual', 'mcp') and rec_origin != origin_filter:
+                    continue
                 title = ACTION_TITLES.get(r['action'], r['action'])
                 if action_cf and r['action'].casefold() != action_cf and title.casefold() != action_cf:
                     continue
@@ -842,7 +873,7 @@ class CaseService:
                 formatted_time = display_time(r['timestamp'])
                 if query_cf:
                     blob = json.dumps(
-                        [r['seq'], formatted_time, r['actor'], r['action'], title, r['subject'], r['result'], r['details']],
+                        [r['seq'], formatted_time, rec_origin, rec_origin_label, r['actor'], r['action'], title, r['subject'], r['result'], r['details']],
                         ensure_ascii=False,
                     ).casefold()
                     if query_cf not in blob:
@@ -850,6 +881,8 @@ class CaseService:
                 matched.append({
                     'seq': r['seq'],
                     'timestamp': formatted_time,
+                    'origin': rec_origin,
+                    'origin_label': rec_origin_label,
                     'actor': r['actor'],
                     'action': r['action'],
                     'action_title': title,
@@ -867,6 +900,7 @@ class CaseService:
                 'case_dir': str(case.folder),
                 'audit_chain_valid': True,
                 'audit_head': audit_head,
+                'origin_counts': origin_counts,
                 'sort_order': sort_order,
                 **_paginate(matched, limit=limit, offset=offset),
             }

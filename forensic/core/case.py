@@ -15,6 +15,7 @@ from itertools import count
 from collections import OrderedDict
 from pathlib import Path
 from .formatting import EAST_8, now, display_time, deleted_export_summary
+from .findings import AUDIT_ORIGINS
 from .reporting import render_report
 from .timeline import TimelineEvents
 from .coverage import assess, SOURCE_FIELDS
@@ -84,7 +85,10 @@ def case_folder_name(*fields):
 
 
 class Case:
-    def __init__(self, folder, actor=None):
+    def __init__(self, folder, actor=None, *, origin='manual'):
+        if origin not in AUDIT_ORIGINS:
+            raise ValueError(f'未知审计来源：{origin}')
+        self.origin = origin
         self.lock = threading.RLock()
         self._source_handles = ExitStack()
         self._source_paths = ()
@@ -146,10 +150,12 @@ class Case:
             self._lease.close()
 
     @classmethod
-    def create(cls, root, number, examiner, target, *, folder_name=None):
+    def create(cls, root, number, examiner, target, *, folder_name=None, actor=None, origin='manual'):
         fields = (number, examiner, target)
         if not all(isinstance(field, str) and field.strip() for field in fields):
             raise ValueError('案件编号、取证人员和取证对象不能为空')
+        if origin not in AUDIT_ORIGINS:
+            raise ValueError(f'未知审计来源：{origin}')
         root = Path(root).resolve()
         root.mkdir(parents=True, exist_ok=True)
         name = folder_name if folder_name is not None else case_folder_name(*fields)
@@ -168,7 +174,7 @@ class Case:
         save_json(folder / 'case.json', dict(id=uuid.uuid4().hex, number=number, examiner=examiner,
                   target=target, created=now(), evidence=None, inventory=[], exports=[]))
         (folder / 'audit.jsonl').touch()
-        case = cls(folder)
+        case = cls(folder, actor=actor, origin=origin)
         case.log('CASE_CREATE', number, '成功')
         return case
 
@@ -235,7 +241,7 @@ class Case:
             raise RuntimeError('案件已关闭')
         with self.lock:
             records = self.check_audit()
-            record = dict(seq=len(records)+1, timestamp=now(), actor=self.actor, action=action,
+            record = dict(seq=len(records)+1, timestamp=now(), actor=self.actor, origin=self.origin, action=action,
                           subject=str(subject), result=result, details=details,
                           previous=records[-1]['hash'] if records else '0'*64)
             record['hash'] = hashlib.sha256(canonical(record).encode()).hexdigest()

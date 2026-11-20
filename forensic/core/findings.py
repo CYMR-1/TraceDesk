@@ -7,6 +7,7 @@ from ..engines.tsk import can_export
 
 
 OPERATIONS = {'FILE_NOTE': '取证笔记', 'FILE_HASH': '计算摘要', 'FILE_COMPARE': '比对副本'}
+AUDIT_ORIGINS = {'manual': '人工', 'mcp': 'MCP'}
 ACTION_TITLES = {
     'CONTENT_SEARCH': '搜索文件内容', 'SOURCE_REGISTER': '登记证据来源', 'REVIEW_EXPORT': '生成复核包',
     'CASE_CREATE': '新建案件', 'CASE_OPEN': '打开案件', 'IMAGE_LOAD_BEGIN': '开始载入镜像',
@@ -16,6 +17,22 @@ ACTION_TITLES = {
     'FILE_NOTE': '记录取证发现', 'FILE_COMPARE': '比对文件副本', 'FILE_HASH': '计算文件摘要',
     'FINDINGS_EXPORT': '导出取证发现',
 }
+
+
+def audit_origin(record):
+    """返回标准审计来源标识：'manual'（人工）或 'mcp'（MCP）；兼容旧版无 origin 字段的记录。"""
+    origin = record.get('origin')
+    if origin in AUDIT_ORIGINS:
+        return origin
+    actor = str(record.get('actor', '')).strip()
+    if '(MCP)' in actor.upper() or actor.upper() == 'MCP':
+        return 'mcp'
+    return 'manual'
+
+
+def audit_origin_label(record):
+    """返回审计来源中文标记：'人工' 或 'MCP'。"""
+    return AUDIT_ORIGINS[audit_origin(record)]
 
 
 def group_findings(records):
@@ -45,7 +62,7 @@ def findings_text(records):
                  f'来源镜像 SHA-256：{image_hash or "记录时待固定"}']
         for r in items:
             d = r['details']
-            lines.append(f"#{r['seq']}  {display_time(r['timestamp'], compact=True)}  "
+            lines.append(f"#{r['seq']}  {display_time(r['timestamp'], compact=True)}  [{audit_origin_label(r)}]  "
                          f"{r['actor']}  {OPERATIONS[r['action']]}  {r['result']}")
             if 'size' in d:
                 lines.append(f"  读取 {d['size']} / {d['recorded_size']} 字节")
@@ -131,7 +148,7 @@ def export_findings(case, groups):
             lines.append(f"- 导出说明：{error}")
         for r in items:
             rd = r['details']
-            lines.append(f"  - `#{r['seq']}` {display_time(r['timestamp'], compact=True)} · {r['actor']} · {OPERATIONS[r['action']]} · {r['result']}")
+            lines.append(f"  - `#{r['seq']}` {display_time(r['timestamp'], compact=True)} · [{audit_origin_label(r)}] · {r['actor']} · {OPERATIONS[r['action']]} · {r['result']}")
             for field, title in (('note', '笔记'), ('file_byte', '文件内字节偏移'), ('sha256', 'SHA-256'),
                                  ('comparison', '对照文件'), ('comparison_sha256', '对照 SHA-256'),
                                  ('source_note', '来源状态'), ('source_verification', '完整性状态'),

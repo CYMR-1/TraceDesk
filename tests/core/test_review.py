@@ -234,5 +234,5 @@ class ReviewTests(unittest.TestCase):
         self.assertIn('| 分区偏移 | 路径 | 状态 | inode | 字节数 | M (UTC+8) | A (UTC+8) | C (UTC+8) | B (UTC+8) |', report_text)
         self.assertIn('## 内容搜索记录', report_text)
         self.assertIn('### 1. README.TXT', report_text)
-        self.assertIn('| 序号 | 时间 (UTC+8) | 操作人员 | 操作 | 对象 | 结果 |', report_text)
+        self.assertIn('| 序号 | 时间 (UTC+8) | 来源 | 操作人员 | 操作 | 对象 | 结果 |', report_text)
         self.assertIn('导出取证发现', report_text)

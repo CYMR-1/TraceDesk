@@ -643,23 +643,31 @@ class FileBrowserTests(QtTests):
         self.assertEqual(timeline.table.topLevelItemCount(), 1)
         self.assertEqual(timeline.table.topLevelItem(0).text(6), 'b.txt')
 
-        # 3. 审计日志：操作人员、操作、结果下拉筛选。
+        # 3. 审计日志：来源（人工/MCP）、操作人员、操作、结果下拉筛选。
         audit = app.view.panels['audit']
-        self.assertEqual(audit.header.filter_columns(), (2, 3, 4))
+        self.assertEqual(audit.header.filter_columns(), (2, 3, 4, 5))
         records = [
-            dict(seq=1, timestamp='2026-11-20T10:00:00+08:00', actor='张三', action='CASE_CREATE',
+            dict(seq=1, timestamp='2026-11-20T10:00:00+08:00', origin='manual', actor='张三', action='CASE_CREATE',
                  result='成功', subject='c1', details={}, previous='0' * 64, hash='1' * 64),
-            dict(seq=2, timestamp='2026-11-20T11:00:00+08:00', actor='李四', action='FILE_EXPORT',
+            dict(seq=2, timestamp='2026-11-20T11:00:00+08:00', origin='mcp', actor='李四', action='FILE_EXPORT',
                  result='失败', subject='a.txt', details={}, previous='1' * 64, hash='2' * 64),
         ]
         audit.set_text(('日志校验通过', records))
-        audit.header.set_filter_value(2, '李四')
+        self.assertEqual(audit.header.filter_options(2), ['MCP', '人工'])
+        audit.header.set_filter_value(2, 'MCP')
         self.assertEqual(audit.table.topLevelItemCount(), 1)
-        self.assertEqual(audit.table.topLevelItem(0).text(3), '导出文件')
-        audit.header.set_filter_value(4, '成功')
+        self.assertEqual(audit.table.topLevelItem(0).text(2), 'MCP')
+        self.assertEqual(audit.table.topLevelItem(0).text(3), '李四')
+        self.assertEqual(audit.table.topLevelItem(0).text(4), '导出文件')
+        audit.header.set_filter_value(3, '李四')
+        self.assertEqual(audit.table.topLevelItemCount(), 1)
+        audit.header.set_filter_value(5, '成功')
         self.assertEqual(audit.table.topLevelItemCount(), 0)
         audit.header.clear_filters(emit=True)
         self.assertEqual(audit.table.topLevelItemCount(), 2)
+        audit._open_detail(audit.table.topLevelItem(0), 0)
+        self.assertIn('操作来源', audit.text.toPlainText())
+        self.assertIn('MCP', audit.text.toPlainText())
 
 
 class NewCaseDialogTests(QtTests):

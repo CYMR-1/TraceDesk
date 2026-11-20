@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--actor',
         default=os.environ.get('TRACEDESK_MCP_ACTOR', ''),
-        help='默认写入审计链的操作人员标识（省略时使用“取证人员 (MCP)”）。',
+        help='默认写入审计链的操作人员标识（省略时使用案件取证人员；审计来源固定标记为 MCP）。',
     )
     return parser
 

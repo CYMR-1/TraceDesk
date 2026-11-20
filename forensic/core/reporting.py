@@ -1,6 +1,6 @@
 """Markdown 报告内容生成；不进行证据读写、校验或审计写入。"""
 from .coverage import SOURCE_FIELDS, coverage_text, source_status
-from .findings import ACTION_TITLES, OPERATIONS, group_findings
+from .findings import ACTION_TITLES, OPERATIONS, audit_origin, audit_origin_label, group_findings
 from .formatting import deleted_export_summary, display_time, now
 from ..engines.tsk import entry_status
 
@@ -183,7 +183,7 @@ def render_report(data, records, conclusion):
                 d = r['details']
                 lines.append(
                     f'- **`#{r["seq"]}` {display_time(r["timestamp"], compact=True)}** · '
-                    f'{_cell(r["actor"])} · {OPERATIONS[r["action"]]} · **{_cell(r["result"])}**'
+                    f'[{audit_origin_label(r)}] · {_cell(r["actor"])} · {OPERATIONS[r["action"]]} · **{_cell(r["result"])}**'
                 )
                 if 'size' in d:
                     lines.append(f'  - 读取长度：{d["size"]:,} / {d["recorded_size"]:,} 字节')
@@ -202,20 +202,23 @@ def render_report(data, records, conclusion):
 
     # 审计日志摘要
     shown_audit = records[-100:]
+    mcp_count = sum(1 for row in records if audit_origin(row) == 'mcp')
+    manual_count = len(records) - mcp_count
     lines.extend([
         '',
         '## 审计日志摘要',
         '',
-        f'审计链验证通过；共 **{len(records)}** 条记录'
+        f'审计链验证通过；共 **{len(records)}** 条记录（人工 {manual_count} 条 · MCP {mcp_count} 条）'
         + (f'（下方展示最近 {len(shown_audit)} 条）' if len(records) > len(shown_audit) else '')
         + f'；尾部哈希锚点：`{records[-1]["hash"]}`。',
         '',
-        '| 序号 | 时间 (UTC+8) | 操作人员 | 操作 | 对象 | 结果 |',
-        '| ---: | --- | --- | --- | --- | --- |',
+        '| 序号 | 时间 (UTC+8) | 来源 | 操作人员 | 操作 | 对象 | 结果 |',
+        '| ---: | --- | --- | --- | --- | --- | --- |',
     ])
     for row in shown_audit:
         title = ACTION_TITLES.get(row['action'], row['action'])
-        fields = [row['seq'], display_time(row['timestamp']), row['actor'], title, row['subject'], row['result']]
+        fields = [row['seq'], display_time(row['timestamp']), audit_origin_label(row),
+                  row['actor'], title, row['subject'], row['result']]
         lines.append('| ' + ' | '.join(map(_cell, fields)) + ' |')
 
     lines.extend([

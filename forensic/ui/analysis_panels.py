@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QPushButton, QLabel, QLineEdit, QPlainTextEdit, QSplitter, QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
 from ..core.formatting import display_time
-from ..core.findings import OPERATIONS
+from ..core.findings import OPERATIONS, audit_origin_label
 from ..core.coverage import coverage_text, source_status, SOURCE_FIELDS
 from .filter_header import FilterHeaderView
 from .pagination import PageLabel
@@ -91,12 +91,16 @@ class RecordsPanel(QWidget):
             columns = self.columns(record)
             item = QTreeWidgetItem(self.table, columns)
             item.setData(0, Qt.ItemDataRole.UserRole, record)
+            self.style_item(item, record)
             if record == selected:
                 self.table.setCurrentItem(item)
         if not self.table.topLevelItemCount():
             self.text.hide()
         elif self.table.currentItem() is None and not self.text.isHidden():
             self.text.setHtml(page('选择一条记录查看详情', f'当前显示 {self.table.topLevelItemCount()} 条', []))
+
+    def style_item(self, item, record):
+        """子类可覆盖以自定义单行单元格样式。"""
 
     def page_records(self, query):
         filters = self.header.active_filters() if isinstance(self.header, FilterHeaderView) else {}
@@ -332,7 +336,8 @@ class FindingsPanel(RecordsPanel):
         sections = [('证据来源', [('分区偏移（扇区）', d['offset']), ('inode', d['inode']), ('镜像 SHA-256', d['image_sha256'] or '记录时待固定')])]
         for r in reversed(items):
             details = r['details']
-            rows = [('时间', display_time(r['timestamp'], compact=True)), ('操作人员', r['actor']), ('结果', r['result'])]
+            rows = [('时间', display_time(r['timestamp'], compact=True)),
+                    ('操作来源', audit_origin_label(r)), ('操作人员', r['actor']), ('结果', r['result'])]
             for key, title in [('note', '笔记'), ('size', '读取字节数'), ('recorded_size', '目录记录字节数'), ('sha256', '读取内容 SHA-256'), ('comparison', '对照文件'), ('comparison_sha256', '对照 SHA-256'), ('source_note', '来源状态'), ('read_note', '读取说明'), ('source_verification', '操作时的完整性状态'), ('error', '错误')]:
                 if key in details:
                     rows.append((title, details[key]))
