@@ -301,8 +301,8 @@ class FindingsPanel(RecordsPanel):
         self._original = []
         self._numbers = {}
         self._descending = False
-        self._sort_column = 0
-        self.header.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+        self._sort_column = 6
+        self.header.setSortIndicator(6, Qt.SortOrder.AscendingOrder)
         self.header.sort_requested.connect(self._toggle_sort)
         controls = QHBoxLayout()
         self.layout().removeWidget(self.status)
@@ -337,7 +337,10 @@ class FindingsPanel(RecordsPanel):
     def set_text(self, result):
         status, records, *extra = result
         self._export_callback = extra[0] if extra else None
-        self._original = list(records)
+        self._original = sorted(
+            records,
+            key=lambda items: (display_time(items[-1]['timestamp']), items[-1]['seq']),
+        )
         self._numbers = {id(items): index for index, items in enumerate(self._original, 1)}
         super().set_text((status, self._sorted_records()))
 

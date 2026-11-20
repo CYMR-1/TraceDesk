@@ -612,7 +612,7 @@ class FileBrowserTests(QtTests):
     def test_header_dropdown_filters_across_analysis_panels_and_findings_export(self):
         root, app = self.controller()
 
-        # 1. 取证发现：序号/最近记录正倒序切换 + 状态、分区偏移下拉筛选 + 一键导出仅导出当前展示结果。
+        # 1. 取证发现：默认按最近记录（UTC+8）正序（早的在前）+ 序号/最近记录正倒序切换 + 状态、分区偏移下拉筛选 + 一键导出。
         findings = app.view.panels['findings']
         self.assertEqual(findings.header.filter_columns(), (2, 3))
         exported_groups = []
@@ -622,25 +622,26 @@ class FileBrowserTests(QtTests):
                    subject='b.txt', details=dict(offset=104448, inode='11', deleted=True, image_sha256='a' * 64))]
         findings.set_text(('取证发现', [g1, g2], exported_groups.append))
         self.assertTrue(findings.export_button.isEnabled())
-        self.assertEqual([findings.table.topLevelItem(i).text(0) for i in range(2)], ['1', '2'])
-        # 单击序号列切为倒序
-        findings._toggle_sort(0)
-        self.assertEqual(findings.table.header().sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
-        self.assertEqual([findings.table.topLevelItem(i).text(0) for i in range(2)], ['2', '1'])
-        self.assertEqual([findings.table.topLevelItem(i).text(1) for i in range(2)], ['b.txt', 'a.txt'])
-        # 单击最近记录列按时间正序（g2 时间早于 g1）
-        findings._toggle_sort(6)
+        # 默认按最近记录（UTC+8）早的排在前面：g2（11:00）在前，g1（12:00）在后
         self.assertEqual(findings.table.header().sortIndicatorSection(), 6)
         self.assertEqual(findings.table.header().sortIndicatorOrder(), Qt.SortOrder.AscendingOrder)
+        self.assertEqual([findings.table.topLevelItem(i).text(0) for i in range(2)], ['1', '2'])
+        self.assertEqual([findings.table.topLevelItem(i).text(1) for i in range(2)], ['b.txt', 'a.txt'])
+        # 单击最近记录列切为倒序（晚的在前）
+        findings._toggle_sort(6)
+        self.assertEqual(findings.table.header().sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
         self.assertEqual([findings.table.topLevelItem(i).text(0) for i in range(2)], ['2', '1'])
-        # 再切回序号正序
+        self.assertEqual([findings.table.topLevelItem(i).text(1) for i in range(2)], ['a.txt', 'b.txt'])
+        # 单击序号列切为正序
         findings._toggle_sort(0)
-        findings._toggle_sort(0)
+        self.assertEqual(findings.table.header().sortIndicatorSection(), 0)
+        self.assertEqual(findings.table.header().sortIndicatorOrder(), Qt.SortOrder.AscendingOrder)
+        self.assertEqual([findings.table.topLevelItem(i).text(0) for i in range(2)], ['1', '2'])
         self.assertEqual(findings.header.filter_options(2), ['已删除', '现存'])
         self.assertEqual(findings.header.filter_options(3), ['2048', '104448'])
         findings.header.set_filter_value(2, '已删除')
         self.assertEqual(findings.table.topLevelItemCount(), 1)
-        self.assertEqual(findings.table.topLevelItem(0).text(0), '2')
+        self.assertEqual(findings.table.topLevelItem(0).text(0), '1')
         self.assertEqual(findings.table.topLevelItem(0).text(1), 'b.txt')
         findings.export_button.click()
         self.assertEqual(exported_groups, [[g2]])
