@@ -137,7 +137,7 @@ TraceDesk 内置标准 Model Context Protocol（MCP）服务端 `tracedesk_mcp`�
 
 ### 桌面端配置与本地 HTTP 托管
 
-点击工作台顶部标题栏的 **MCP 服务** 按钮，可直接查看和一键复制 `stdio` / `Streamable HTTP` 客户端配置 JSON、启动命令与全部 19 个工具清单，并在桌面端内直接启停本地 `127.0.0.1` Streamable HTTP MCP 服务（关闭桌面窗口时自动停止）。当桌面端已打开某个案件并持有 `case.lock` 时，外部 MCP 客户端操作同一案件前请先在桌面端关闭或切换案件。
+点击工作台顶部标题栏的 **MCP 服务** 按钮，可直接查看和一键复制 `stdio` / `Streamable HTTP` 客户端配置 JSON、启动命令与全部 19 个工具清单，并在桌面端内直接启停本地 `127.0.0.1` Streamable HTTP MCP 服务（关闭桌面窗口时自动停止）。当桌面端已打开某个案件并持有 `case.lock` 时，弹窗顶部会显示提示并提供 **释放当前案件锁** 一键按钮，点击即可关闭当前案件并释放锁供外部 MCP 客户端接入。
 
 ## 第三方依赖与 AI 参与
 

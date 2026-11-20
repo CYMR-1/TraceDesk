@@ -35,6 +35,8 @@ def directory_listing(case, offset, inode=None, path=''):
 
 def resume_partitions(context):
     case = context.case()
+    if case is None:
+        return
     if (case.data.get('evidence') or {}).get('large_image'):
         if case.browsing_directories:
             def first_root():

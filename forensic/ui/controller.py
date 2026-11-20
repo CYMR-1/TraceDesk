@@ -215,6 +215,13 @@ class App(QObject):
 
     def refresh(self, reset=False):
         if not self.case:
+            if reset:
+                self.summary.setText('尚未打开案件。新建案件并加载镜像，或打开已有案件继续分析。')
+                self.summary.setToolTip('')
+                self.browser.set_context(None, [], '', None)
+                self.display([])
+                self.features.refresh_panels(self.view.panels, reset=True)
+                self.status.setText('已释放案件锁 · 可由外部 MCP 客户端操作或重新打开案件')
             return
         data = self.case.data
         evidence = data['evidence']

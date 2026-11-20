@@ -54,10 +54,11 @@ def shutdown_mcp(context) -> None:
 class McpDialog(QDialog):
     """MCP 服务端配置与本地 Streamable HTTP 启停对话框。"""
 
-    def __init__(self, parent, manager: LocalHttpMcpManager, active_case=None):
+    def __init__(self, parent, manager: LocalHttpMcpManager, active_case=None, release_case=None):
         super().__init__(parent)
         self.manager = manager
         self.active_case = active_case
+        self._release_case = release_case
         self.setWindowTitle('MCP 服务配置 · TraceDesk')
         self.resize(780, 580)
 
@@ -92,18 +93,29 @@ class McpDialog(QDialog):
         self.status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         card_layout.addWidget(self.status_label)
 
-        if active_case is not None:
-            case_number = active_case.data.get('number', '')
-            lock_tip = QLabel(
-                f'提示：桌面端当前已打开案件「{case_number}」并持有 case.lock。'
-                '外部 MCP 客户端需要操作同一案件时，请先在桌面端关闭或切换案件。'
-            )
-            lock_tip.setWordWrap(True)
-            lock_tip.setStyleSheet(
-                'background: #f8f4ea; color: #6e5218; border: 1px solid #eadcc0; '
-                'border-radius: 6px; padding: 6px 10px;'
-            )
-            card_layout.addWidget(lock_tip)
+        self.lock_banner = QFrame()
+        self.lock_banner.setObjectName('mcpLockBanner')
+        self.lock_banner.setStyleSheet(
+            'QFrame#mcpLockBanner { background: #f8f4ea; border: 1px solid #eadcc0; border-radius: 6px; }'
+        )
+        lock_layout = QHBoxLayout(self.lock_banner)
+        lock_layout.setContentsMargins(10, 6, 10, 6)
+        lock_layout.setSpacing(10)
+        self.lock_label = QLabel()
+        self.lock_label.setWordWrap(True)
+        self.lock_label.setStyleSheet('color: #6e5218; background: transparent;')
+        lock_layout.addWidget(self.lock_label, 1)
+        self.release_case_button = QPushButton('释放当前案件锁')
+        self.release_case_button.setStyleSheet(
+            'QPushButton { background: #fffaf0; color: #6e5218; border: 1px solid #d9c08c; '
+            'border-radius: 6px; padding: 4px 10px; font-weight: 600; }'
+            'QPushButton:hover { background: #f3e8cf; border-color: #c5a463; }'
+            'QPushButton:pressed { background: #ead9b5; }'
+        )
+        self.release_case_button.clicked.connect(self._on_release_case)
+        lock_layout.addWidget(self.release_case_button)
+        card_layout.addWidget(self.lock_banner)
+        self._refresh_lock_banner()
 
         controls = QHBoxLayout()
         controls.setSpacing(8)
@@ -295,6 +307,27 @@ class McpDialog(QDialog):
         finally:
             self._refresh_state()
 
+    def _refresh_lock_banner(self) -> None:
+        if self.active_case is None:
+            self.lock_banner.hide()
+            return
+        case_number = self.active_case.data.get('number', '')
+        self.lock_label.setText(
+            f'提示：桌面端当前已打开案件「{case_number}」并持有 case.lock。'
+            '外部 MCP 客户端操作同一案件前，可点击右侧按钮一键释放案件锁。'
+        )
+        self.release_case_button.setVisible(self._release_case is not None)
+        self.lock_banner.show()
+
+    def _on_release_case(self) -> None:
+        if self.active_case is None or self._release_case is None:
+            return
+        case_number = self.active_case.data.get('number', '')
+        if self._release_case():
+            self.active_case = None
+            self._refresh_lock_banner()
+            self.feedback_label.setText(f'已关闭案件「{case_number}」并释放 case.lock，现在可由外部 MCP 客户端操作')
+
     def _copy_text(self, text: str, notice: str) -> None:
         clipboard = QApplication.clipboard()
         if clipboard is not None:
@@ -303,7 +336,20 @@ class McpDialog(QDialog):
 
 
 def show_mcp_dialog(context):
-    dialog = McpDialog(context.root, get_manager(context), active_case=context.case())
+    def release_active_case() -> bool:
+        if context.case() is None:
+            return True
+        if not context.available(False):
+            return False
+        context.replace_case(None)
+        return True
+
+    dialog = McpDialog(
+        context.root,
+        get_manager(context),
+        active_case=context.case(),
+        release_case=release_active_case,
+    )
     try:
         dialog.exec()
     finally:
