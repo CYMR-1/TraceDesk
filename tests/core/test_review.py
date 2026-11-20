@@ -238,7 +238,7 @@ class ReviewTests(unittest.TestCase):
         self.assertIn('导出取证发现', report_text)
 
     def test_bundle_missing_exports_chinese_error_and_selective_export(self):
-        from forensic.core.review import inspect_bundle_exports
+        from forensic.core.review import inspect_bundle_exports, inspect_bundle_searches
         image = self.root / 'evidence' / 'selective.dd'
         create(image)
         case = Case.create(self.root / 'cases', 'SEL-1', '测试人员', '选择性复核包')
@@ -251,20 +251,26 @@ class ReviewTests(unittest.TestCase):
         p1 = case.export(readme)
         p2 = case.export(notes)
         p3 = case.export(case_txt)
-        # 删除第 2 个导出副本以模拟本地缺失
+        _, _, search1_name = search(case, 'note', 'UTF-8', SearchControl(), lambda *_: None)
+        _, _, search2_name = search(case, 'TraceDesk', 'UTF-8', SearchControl(), lambda *_: None)
+        # 删除第 2 个导出副本与第 1 个搜索记录以模拟本地缺失
         p2.unlink()
+        (case.folder / 'reports' / search1_name).unlink()
 
         rows = inspect_bundle_exports(case)
         self.assertEqual([r['exists'] for r in rows], [True, False, True])
+        search_rows = inspect_bundle_searches(case)
+        self.assertEqual([r['exists'] for r in search_rows], [False, True])
 
-        # 默认打包应抛出清晰的中文缺失清单
+        # 默认打包应抛出清晰的中文缺失清单（同时列出缺失副本与缺失搜索记录）
         with self.assertRaises(FileNotFoundError) as raised:
             build_bundle(case)
         self.assertIn('NOTES.TXT', str(raised.exception))
+        self.assertIn(search1_name, str(raised.exception))
         self.assertIn('缺失', str(raised.exception))
 
-        # 自由选择仅导出第 1 个副本（跳过缺失的第 2 个以及未勾选的第 3 个），并独立核验 ZIP
-        bundle = build_bundle(case, selected_indices=[1])
+        # 自由选择仅导出第 1 个副本和第 2 条搜索记录，并独立核验 ZIP
+        bundle = build_bundle(case, selected_indices=[1], selected_search_indices=[2])
         expected_sha = bundle.with_suffix('.zip.sha256').read_text(encoding='utf-8').split()[0]
         verify_bundle(bundle, expected_sha)
         with ZipFile(bundle) as archive:
@@ -272,9 +278,13 @@ class ReviewTests(unittest.TestCase):
             self.assertEqual([item['source'] for item in manifest['exports']], ['README.TXT'])
             omitted = {item['export_index']: item['reason'] for item in manifest['omitted_exports']}
             self.assertEqual(omitted, {2: '本地副本缺失', 3: '导出复核包时未勾选'})
-            self.assertIn('omitted_exports', archive.read('复核说明.txt').decode('utf-8'))
+            omitted_s = {item['search_index']: item['reason'] for item in manifest['omitted_searches']}
+            self.assertEqual(omitted_s, {1: '本地搜索记录缺失'})
+            self.assertIn('searches/' + search2_name, archive.namelist())
+            self.assertNotIn('searches/' + search1_name, archive.namelist())
+            self.assertIn('omitted_searches', archive.read('复核说明.txt').decode('utf-8'))
 
-        # skip_missing=True 应打包所有现存副本（#1 和 #3）
+        # skip_missing=True 应打包所有现存副本（#1 和 #3）及现存搜索记录（#2）
         bundle2 = build_bundle(case, skip_missing=True)
         expected_sha2 = bundle2.with_suffix('.zip.sha256').read_text(encoding='utf-8').split()[0]
         verify_bundle(bundle2, expected_sha2)
@@ -283,3 +293,5 @@ class ReviewTests(unittest.TestCase):
             self.assertEqual([item['source'] for item in manifest2['exports']], ['README.TXT', 'DOCS/CASE.TXT'])
             self.assertEqual(len(manifest2['omitted_exports']), 1)
             self.assertEqual(manifest2['omitted_exports'][0]['reason'], '本地副本缺失')
+            self.assertEqual(len(manifest2['omitted_searches']), 1)
+            self.assertEqual(manifest2['omitted_searches'][0]['reason'], '本地搜索记录缺失')

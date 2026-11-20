@@ -6,14 +6,16 @@ from time import monotonic
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFrame, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
-                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
+                               QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from ..core.content_search import SearchControl, pattern, search
 from ..core.coverage import SOURCE_FIELDS, source_status
 from ..core.formatting import display_time
 from ..core.preview import PAGE_BYTES
-from ..core.review import build_bundle, format_missing_exports, inspect_bundle_exports
+from ..core.review import (build_bundle, format_missing_exports, inspect_bundle_exports,
+                           inspect_bundle_searches)
 from ..core.tasks import TaskRunner
 from ..engines.tsk import deleted_source_note
 from ..ui.dialogs import edit_evidence_source
@@ -506,16 +508,20 @@ class ReviewPanel(QWidget):
 
 
 class BundleExportDialog(QDialog):
-    """导出复核包前展示缺失副本清单并允许自由勾选要打入复核包的导出副本。"""
+    """导出复核包前展示缺失材料清单（导出副本与搜索记录）并允许自由勾选要纳入的材料。"""
 
-    def __init__(self, parent, rows):
+    def __init__(self, parent, rows, search_rows=()):
         super().__init__(parent)
         self.rows = list(rows)
+        self.search_rows = list(search_rows)
         self.missing_rows = [row for row in self.rows if not row['exists']]
         self.available_rows = [row for row in self.rows if row['exists']]
+        self.missing_searches = [row for row in self.search_rows if not row['exists']]
+        self.available_searches = [row for row in self.search_rows if row['exists']]
         self._only_missing = False
-        self.setWindowTitle('导出复核包 · 选择导出副本')
-        self.resize(860, 560)
+        self._only_missing_searches = False
+        self.setWindowTitle('导出复核包 · 选择纳入材料')
+        self.resize(900, 620)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -527,111 +533,110 @@ class BundleExportDialog(QDialog):
         banner_layout.setSpacing(6)
         self.banner_label = QLabel()
         self.banner_label.setWordWrap(True)
-        if self.missing_rows:
+        has_missing = bool(self.missing_rows or self.missing_searches)
+        if has_missing:
             banner.setStyleSheet(
                 'QFrame#bundleExportBanner { background: #f8f4ea; border: 1px solid #eadcc0; border-radius: 6px; }'
             )
-            self.banner_label.setStyleSheet('color: #6e5218; background: transparent;')
-            missing_preview = '\n'.join(
-                f'• #{row["index"]}  {row["display_path"]}（来源：{row["source"]}，{row["size"]:,} 字节）'
-                for row in self.missing_rows
-            )
+            self.banner_label.setStyleSheet('color: #6e5218; background: transparent; font-weight: 600;')
+            parts = []
+            if self.missing_rows:
+                parts.append(f'{len(self.missing_rows)} 条历史导出副本')
+            if self.missing_searches:
+                parts.append(f'{len(self.missing_searches)} 条历史内容搜索记录')
             self.banner_label.setText(
-                f'检测到 {len(self.missing_rows)} 条历史导出副本在本地 exports 目录中缺失'
-                '（可能已被手动清理或被安全软件隔离）。缺失项已标红且不可勾选；'
-                '您可以自由勾选现存副本继续生成复核包，未纳入项会如实记入 manifest.json 的 omitted_exports：\n'
-                + missing_preview
+                f'检测到 {" 与 ".join(parts)} 在本地目录中缺失（可能已被手动清理或被安全软件隔离）。'
+                '缺失项已标红且不可勾选；您可以自由勾选现存材料继续生成复核包，未纳入项会如实记入 manifest.json：'
             )
+            banner_layout.addWidget(self.banner_label)
+            self.missing_text = QPlainTextEdit()
+            self.missing_text.setReadOnly(True)
+            self.missing_text.setPlainText(format_missing_exports(self.missing_rows, self.missing_searches))
+            self.missing_text.setMaximumHeight(112)
+            self.missing_text.setStyleSheet(
+                'QPlainTextEdit { background: #fffcf5; color: #6e5218; border: 1px solid #eadcc0; '
+                'border-radius: 5px; padding: 4px 6px; font-size: 12px; }'
+            )
+            banner_layout.addWidget(self.missing_text)
         else:
             banner.setStyleSheet(
                 'QFrame#bundleExportBanner { background: #eaf6f0; border: 1px solid #c8e6d7; border-radius: 6px; }'
             )
             self.banner_label.setStyleSheet('color: #086b55; background: transparent;')
             self.banner_label.setText(
-                f'共 {len(self.available_rows)} 条历史导出副本均完整存在。默认全部勾选，您可自由取消不需要打入复核包的副本；'
-                '未勾选项将记入 manifest.json 的 omitted_exports。'
+                f'全部历史导出副本（{len(self.available_rows)} 条）与内容搜索记录（{len(self.available_searches)} 条）均完整存在。'
+                '默认全部勾选，您可自由取消不需要打入复核包的条目。'
             )
-        banner_layout.addWidget(self.banner_label)
+            banner_layout.addWidget(self.banner_label)
+            self.missing_text = None
         layout.addWidget(banner)
 
+        self.tabs = QTabWidget()
+
+        # Tab 1: 导出副本
+        exports_tab = QWidget()
+        exports_layout = QVBoxLayout(exports_tab)
+        exports_layout.setContentsMargins(8, 8, 8, 8)
+        exports_layout.setSpacing(8)
         toolbar = QHBoxLayout()
         toolbar.setSpacing(8)
         self.select_all_button = QPushButton('全选可用副本')
         self.select_all_button.setProperty('role', 'soft')
-        self.select_all_button.clicked.connect(lambda: self._set_all_checked(True))
+        self.select_all_button.clicked.connect(lambda: self._set_all_checked(self.table, True))
         self.select_none_button = QPushButton('全不选')
-        self.select_none_button.clicked.connect(lambda: self._set_all_checked(False))
+        self.select_none_button.clicked.connect(lambda: self._set_all_checked(self.table, False))
         toolbar.addWidget(self.select_all_button)
         toolbar.addWidget(self.select_none_button)
 
         self.toggle_missing_button = QPushButton(f'仅看缺失项 ({len(self.missing_rows)})')
         self.toggle_missing_button.clicked.connect(self._toggle_missing_filter)
-        self.copy_missing_button = QPushButton('复制缺失清单')
-        self.copy_missing_button.clicked.connect(self._copy_missing)
         self.toggle_missing_button.setVisible(bool(self.missing_rows))
-        self.copy_missing_button.setVisible(bool(self.missing_rows))
         toolbar.addWidget(self.toggle_missing_button)
-        toolbar.addWidget(self.copy_missing_button)
         toolbar.addStretch(1)
-        layout.addLayout(toolbar)
+        exports_layout.addLayout(toolbar)
 
-        self.table = QTreeWidget()
-        self.table.setRootIsDecorated(False)
-        self.table.setAlternatingRowColors(True)
-        self.table.setUniformRowHeights(True)
-        self.table.setHeaderLabels(['', '序号', '副本状态', '本地副本路径', '镜像内路径', '字节数', '导出时间（UTC+8）'])
-        self.table.headerItem().setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
-        self.table.headerItem().setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
-        for row in self.rows:
-            status_text = '正常' if row['exists'] else '缺失'
-            item = QTreeWidgetItem([
-                '',
-                str(row['index']),
-                status_text,
-                row['display_path'],
-                row['source'],
-                f'{row["size"]:,}',
-                display_time(row['time'], compact=True) if row['time'] else '未记录',
-            ])
-            item.setData(0, Qt.ItemDataRole.UserRole, row)
-            item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
-            item.setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
-            item.setTextAlignment(5, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            if row['exists']:
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setCheckState(0, Qt.CheckState.Checked)
-                item.setForeground(2, QBrush(QColor('#086b55')))
-                item.setBackground(2, QBrush(QColor('#eaf6f0')))
-            else:
-                item.setFlags((item.flags() | Qt.ItemFlag.ItemIsUserCheckable) & ~Qt.ItemFlag.ItemIsEnabled)
-                item.setCheckState(0, Qt.CheckState.Unchecked)
-                item.setForeground(2, QBrush(QColor('#b64262')))
-                item.setBackground(2, QBrush(QColor('#fdf0f3')))
-                font = item.font(2)
-                font.setBold(True)
-                item.setFont(2, font)
-                item.setToolTip(3, row['missing_reason'])
-            self.table.addTopLevelItem(item)
+        self.table = self._build_exports_table()
+        exports_layout.addWidget(self.table, 1)
+        self.tabs.addTab(exports_tab, self._tab_title('导出副本', len(self.available_rows), len(self.missing_rows)))
 
-        header = self.table.header()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.setColumnWidth(0, 38)
-        self.table.setColumnWidth(1, 56)
-        self.table.setColumnWidth(2, 76)
-        self.table.setColumnWidth(3, 210)
-        self.table.itemChanged.connect(lambda *_: self._update_summary())
-        layout.addWidget(self.table, 1)
+        # Tab 2: 内容搜索记录
+        self.search_table = self._build_searches_table()
+        self.select_all_searches_button = QPushButton('全选可用记录')
+        self.select_all_searches_button.setProperty('role', 'soft')
+        self.select_all_searches_button.clicked.connect(lambda: self._set_all_checked(self.search_table, True))
+        self.select_none_searches_button = QPushButton('全不选')
+        self.select_none_searches_button.clicked.connect(lambda: self._set_all_checked(self.search_table, False))
+        self.toggle_missing_searches_button = QPushButton(f'仅看缺失项 ({len(self.missing_searches)})')
+        self.toggle_missing_searches_button.clicked.connect(self._toggle_missing_search_filter)
+        self.toggle_missing_searches_button.setVisible(bool(self.missing_searches))
+        if self.search_rows:
+            searches_tab = QWidget()
+            searches_layout = QVBoxLayout(searches_tab)
+            searches_layout.setContentsMargins(8, 8, 8, 8)
+            searches_layout.setSpacing(8)
+            s_toolbar = QHBoxLayout()
+            s_toolbar.setSpacing(8)
+            s_toolbar.addWidget(self.select_all_searches_button)
+            s_toolbar.addWidget(self.select_none_searches_button)
+            s_toolbar.addWidget(self.toggle_missing_searches_button)
+            s_toolbar.addStretch(1)
+            searches_layout.addLayout(s_toolbar)
+            searches_layout.addWidget(self.search_table, 1)
+            self.tabs.addTab(
+                searches_tab,
+                self._tab_title('内容搜索记录', len(self.available_searches), len(self.missing_searches)),
+            )
+
+        layout.addWidget(self.tabs, 1)
 
         footer = QHBoxLayout()
         self.summary_label = QLabel()
         self.summary_label.setProperty('role', 'muted')
         footer.addWidget(self.summary_label, 1)
+        self.copy_missing_button = QPushButton('复制缺失清单')
+        self.copy_missing_button.clicked.connect(self._copy_missing)
+        self.copy_missing_button.setVisible(has_missing)
+        footer.addWidget(self.copy_missing_button)
         cancel_btn = QPushButton('取消')
         cancel_btn.clicked.connect(self.reject)
         self.confirm_button = QPushButton('生成复核包')
@@ -642,17 +647,114 @@ class BundleExportDialog(QDialog):
         layout.addLayout(footer)
         self._update_summary()
 
-    def _set_all_checked(self, checked):
+    @staticmethod
+    def _tab_title(name, available, missing):
+        return f'{name}（可用 {available} · 缺失 {missing}）' if missing else f'{name}（{available}）'
+
+    def _style_material_item(self, item, row, status_col, tip_col):
+        item.setData(0, Qt.ItemDataRole.UserRole, row)
+        item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+        item.setTextAlignment(status_col, Qt.AlignmentFlag.AlignCenter)
+        if row['exists']:
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.CheckState.Checked)
+            item.setForeground(status_col, QBrush(QColor('#086b55')))
+            item.setBackground(status_col, QBrush(QColor('#eaf6f0')))
+        else:
+            item.setFlags((item.flags() | Qt.ItemFlag.ItemIsUserCheckable) & ~Qt.ItemFlag.ItemIsEnabled)
+            item.setCheckState(0, Qt.CheckState.Unchecked)
+            item.setForeground(status_col, QBrush(QColor('#b64262')))
+            item.setBackground(status_col, QBrush(QColor('#fdf0f3')))
+            font = item.font(status_col)
+            font.setBold(True)
+            item.setFont(status_col, font)
+            item.setToolTip(tip_col, row['missing_reason'])
+
+    def _build_exports_table(self):
+        table = QTreeWidget()
+        table.setRootIsDecorated(False)
+        table.setAlternatingRowColors(True)
+        table.setUniformRowHeights(True)
+        table.setHeaderLabels(['', '序号', '副本状态', '本地副本路径', '镜像内路径', '字节数', '导出时间（UTC+8）'])
+        table.headerItem().setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+        table.headerItem().setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
+        for row in self.rows:
+            item = QTreeWidgetItem([
+                '',
+                str(row['index']),
+                '正常' if row['exists'] else '缺失',
+                row['display_path'],
+                row['source'],
+                f'{row["size"]:,}',
+                display_time(row['time'], compact=True) if row['time'] else '未记录',
+            ])
+            item.setTextAlignment(5, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self._style_material_item(item, row, 2, 3)
+            table.addTopLevelItem(item)
+        header = table.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        table.setColumnWidth(0, 38)
+        table.setColumnWidth(1, 56)
+        table.setColumnWidth(2, 76)
+        table.setColumnWidth(3, 210)
+        table.itemChanged.connect(lambda *_: self._update_summary())
+        return table
+
+    def _build_searches_table(self):
+        table = QTreeWidget()
+        table.setRootIsDecorated(False)
+        table.setAlternatingRowColors(True)
+        table.setUniformRowHeights(True)
+        table.setHeaderLabels(['', '序号', '文件状态', '本地记录路径', '搜索内容', '编码', '命中数', '搜索时间（UTC+8）'])
+        table.headerItem().setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+        table.headerItem().setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
+        for row in self.search_rows:
+            item = QTreeWidgetItem([
+                '',
+                str(row['index']),
+                '正常' if row['exists'] else '缺失',
+                row['display_path'],
+                str(row['query']),
+                str(row['encoding']),
+                str(row['hits']),
+                display_time(row['time'], compact=True) if row['time'] else '未记录',
+            ])
+            item.setTextAlignment(6, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self._style_material_item(item, row, 2, 3)
+            table.addTopLevelItem(item)
+        header = table.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+        table.setColumnWidth(0, 38)
+        table.setColumnWidth(1, 56)
+        table.setColumnWidth(2, 76)
+        table.setColumnWidth(3, 250)
+        table.itemChanged.connect(lambda *_: self._update_summary())
+        return table
+
+    def _set_all_checked(self, table, checked):
         state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
-        self.table.blockSignals(True)
+        table.blockSignals(True)
         try:
-            for i in range(self.table.topLevelItemCount()):
-                item = self.table.topLevelItem(i)
+            for i in range(table.topLevelItemCount()):
+                item = table.topLevelItem(i)
                 row = item.data(0, Qt.ItemDataRole.UserRole)
                 if row['exists']:
                     item.setCheckState(0, state)
         finally:
-            self.table.blockSignals(False)
+            table.blockSignals(False)
         self._update_summary()
 
     def _toggle_missing_filter(self):
@@ -663,26 +765,48 @@ class BundleExportDialog(QDialog):
             item.setHidden(self._only_missing and row['exists'])
         self.toggle_missing_button.setText('显示全部' if self._only_missing else f'仅看缺失项 ({len(self.missing_rows)})')
 
+    def _toggle_missing_search_filter(self):
+        self._only_missing_searches = not self._only_missing_searches
+        for i in range(self.search_table.topLevelItemCount()):
+            item = self.search_table.topLevelItem(i)
+            row = item.data(0, Qt.ItemDataRole.UserRole)
+            item.setHidden(self._only_missing_searches and row['exists'])
+        self.toggle_missing_searches_button.setText(
+            '显示全部' if self._only_missing_searches else f'仅看缺失项 ({len(self.missing_searches)})'
+        )
+
     def _copy_missing(self):
         clipboard = QApplication.clipboard()
         if clipboard is not None:
-            clipboard.setText(format_missing_exports(self.missing_rows))
-        self.summary_label.setText('已复制缺失副本清单到剪贴板')
+            clipboard.setText(format_missing_exports(self.missing_rows, self.missing_searches))
+        self.summary_label.setText('已复制缺失材料清单到剪贴板')
 
-    def selected_indices(self):
+    @staticmethod
+    def _checked_indices(table):
         chosen = []
-        for i in range(self.table.topLevelItemCount()):
-            item = self.table.topLevelItem(i)
+        for i in range(table.topLevelItemCount()):
+            item = table.topLevelItem(i)
             row = item.data(0, Qt.ItemDataRole.UserRole)
             if row['exists'] and item.checkState(0) == Qt.CheckState.Checked:
                 chosen.append(row['index'])
         return chosen
 
+    def selected_indices(self):
+        return self._checked_indices(self.table)
+
+    def selected_search_indices(self):
+        return self._checked_indices(self.search_table)
+
     def _update_summary(self):
-        chosen = len(self.selected_indices())
-        missing = len(self.missing_rows)
-        extra = f'；另有 {missing} 条缺失副本将记入 omitted_exports' if missing else ''
-        self.summary_label.setText(f'已选 {chosen} / {len(self.available_rows)} 个可用副本{extra}')
+        parts = [f'导出副本 {len(self.selected_indices())}/{len(self.available_rows)}']
+        if self.missing_rows:
+            parts[-1] += f'（缺失 {len(self.missing_rows)}）'
+        if self.search_rows:
+            s_text = f'搜索记录 {len(self.selected_search_indices())}/{len(self.available_searches)}'
+            if self.missing_searches:
+                s_text += f'（缺失 {len(self.missing_searches)}）'
+            parts.append(s_text)
+        self.summary_label.setText('已选：' + '  ·  '.join(parts))
 
 
 def export_bundle(context):
@@ -694,21 +818,28 @@ def export_bundle(context):
         return
     try:
         rows = inspect_bundle_exports(case)
+        search_rows = inspect_bundle_searches(case)
     except Exception as error:
-        QMessageBox.critical(context.root, '检查导出副本失败', str(error))
+        QMessageBox.critical(context.root, '检查复核包材料失败', str(error))
         return
     selected_indices = None
-    if rows:
-        dialog = BundleExportDialog(context.root, rows)
+    selected_search_indices = None
+    if rows or search_rows:
+        dialog = BundleExportDialog(context.root, rows, search_rows)
         try:
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
             selected_indices = dialog.selected_indices()
+            selected_search_indices = dialog.selected_search_indices()
         finally:
             dialog.deleteLater()
     context.task(
         '校验并生成复核包',
-        lambda: build_bundle(case, selected_indices=selected_indices),
+        lambda: build_bundle(
+            case,
+            selected_indices=selected_indices,
+            selected_search_indices=selected_search_indices,
+        ),
         lambda path: ExportResultDialog(context.root, path, '复核包已生成').exec(),
     )
 

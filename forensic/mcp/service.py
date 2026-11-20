@@ -986,6 +986,7 @@ class CaseService:
         *,
         case_dir: str,
         selected_export_indices: list[int] | None = None,
+        selected_search_indices: list[int] | None = None,
         skip_missing_exports: bool = False,
         verify_large_image: bool = False,
         actor: str | None = None,
@@ -995,6 +996,7 @@ class CaseService:
             bundle_path = build_bundle(
                 case,
                 selected_indices=selected_export_indices,
+                selected_search_indices=selected_search_indices,
                 skip_missing=skip_missing_exports,
             )
             sha_file = bundle_path.with_suffix('.zip.sha256')
@@ -1007,4 +1009,7 @@ class CaseService:
                 'included_exports': latest['details'].get('included_exports', 0),
                 'omitted_exports': latest['details'].get('omitted_exports', 0),
                 'missing_exports': latest['details'].get('missing_exports', 0),
+                'included_searches': latest['details'].get('included_searches', 0),
+                'omitted_searches': latest['details'].get('omitted_searches', 0),
+                'missing_searches': latest['details'].get('missing_searches', 0),
             }

@@ -271,9 +271,13 @@ class ReviewBundleInput(ReportActionInput):
         default=None,
         description='可选要纳入复核包的导出记录序号列表（从 1 开始）；省略时默认纳入全部历史导出',
     )
+    selected_search_indices: Optional[list[int]] = Field(
+        default=None,
+        description='可选要纳入复核包的内容搜索记录序号列表（从 1 开始）；省略时默认纳入全部历史搜索记录',
+    )
     skip_missing_exports: bool = Field(
         default=False,
-        description='本地 exports 目录中存在缺失副本时，是否自动跳过缺失项并在 manifest.json 的 omitted_exports 中标注（默认 false）',
+        description='本地 exports/reports 目录中存在缺失副本或搜索记录时，是否自动跳过缺失项并在 manifest.json 中标注（默认 false）',
     )
 
 
@@ -1035,6 +1039,7 @@ def create_server(
                 service.build_review_bundle,
                 case_dir=params.case_dir,
                 selected_export_indices=params.selected_export_indices,
+                selected_search_indices=params.selected_search_indices,
                 skip_missing_exports=params.skip_missing_exports,
                 verify_large_image=params.verify_large_image,
                 actor=params.actor,

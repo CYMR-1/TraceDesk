@@ -730,16 +730,27 @@ class NewCaseDialogTests(QtTests):
             dict(index=3, display_path='exports\\CASE.TXT', source='DOCS/CASE.TXT', size=38,
                  time='2026-11-21T01:02:00+08:00', exists=True, missing_reason=''),
         ]
-        dialog = BundleExportDialog(root, rows)
+        search_rows = [
+            dict(index=1, seq=14, name='search_missing.json', display_path='reports\\search_missing.json',
+                 query='4d 5a', encoding='HEX', hits=10, result='完成', sha256='0' * 64,
+                 time='2026-11-21T01:03:00+08:00', exists=False, missing_reason='本地搜索记录缺失（reports\\search_missing.json）'),
+            dict(index=2, seq=15, name='search_ok.json', display_path='reports\\search_ok.json',
+                 query='note', encoding='UTF-8', hits=1, result='完成', sha256='1' * 64,
+                 time='2026-11-21T01:04:00+08:00', exists=True, missing_reason=''),
+        ]
+        dialog = BundleExportDialog(root, rows, search_rows)
         self.addCleanup(dialog.deleteLater)
 
-        # 顶部清晰列出中文缺失清单，且默认勾选全部现存副本；复选框列与序号列分离不省略
-        self.assertIn('QuickCryptoOTFE.exe', dialog.banner_label.text())
-        self.assertIn('缺失', dialog.banner_label.text())
+        # 顶部清晰列出中文缺失清单（导出副本 + 搜索记录），且默认勾选全部现存材料；复选框列与序号列分离不省略
+        self.assertIn('QuickCryptoOTFE.exe', dialog.missing_text.toPlainText())
+        self.assertIn('search_missing.json', dialog.missing_text.toPlainText())
         self.assertEqual(dialog.selected_indices(), [1, 3])
+        self.assertEqual(dialog.selected_search_indices(), [2])
         self.assertEqual([dialog.table.topLevelItem(i).text(1) for i in range(3)], ['1', '2', '3'])
         self.assertEqual(dialog.table.topLevelItem(1).text(2), '缺失')
         self.assertFalse(bool(dialog.table.topLevelItem(1).flags() & Qt.ItemFlag.ItemIsEnabled))
+        self.assertEqual([dialog.search_table.topLevelItem(i).text(1) for i in range(2)], ['1', '2'])
+        self.assertEqual(dialog.search_table.topLevelItem(0).text(2), '缺失')
 
         # “仅看缺失项”筛选与复制缺失清单
         dialog.toggle_missing_button.click()
@@ -750,15 +761,21 @@ class NewCaseDialogTests(QtTests):
         fake_clipboard = Mock()
         with patch('forensic.features.review.QApplication.clipboard', return_value=fake_clipboard):
             dialog.copy_missing_button.click()
-        self.assertIn('QuickCryptoOTFE.exe', fake_clipboard.setText.call_args.args[0])
+        copied = fake_clipboard.setText.call_args.args[0]
+        self.assertIn('QuickCryptoOTFE.exe', copied)
+        self.assertIn('search_missing.json', copied)
 
-        # 自由勾选/取消勾选副本
+        # 自由勾选/取消勾选副本与搜索记录
         dialog.select_none_button.click()
         self.assertEqual(dialog.selected_indices(), [])
         dialog.table.topLevelItem(2).setCheckState(0, Qt.CheckState.Checked)
         self.assertEqual(dialog.selected_indices(), [3])
         dialog.select_all_button.click()
         self.assertEqual(dialog.selected_indices(), [1, 3])
+        dialog.select_none_searches_button.click()
+        self.assertEqual(dialog.selected_search_indices(), [])
+        dialog.select_all_searches_button.click()
+        self.assertEqual(dialog.selected_search_indices(), [2])
 
 
 if __name__ == '__main__':
