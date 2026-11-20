@@ -6,7 +6,7 @@ if not exist ".venv\Scripts\python.exe" (
     if errorlevel 1 goto failed
 )
 
-".venv\Scripts\python.exe" -c "import pytsk3, pyewf; from PySide6.QtWidgets import QApplication" >nul 2>&1
+".venv\Scripts\python.exe" -c "import pytsk3, pyewf, mcp; from PySide6.QtWidgets import QApplication" >nul 2>&1
 if errorlevel 1 goto install_dependencies
 goto run
 

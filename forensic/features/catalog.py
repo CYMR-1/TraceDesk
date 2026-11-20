@@ -14,6 +14,7 @@ MODULES = {
     'timeline': 'forensic.features.timeline',
     'audit': 'forensic.features.audit',
     'help': 'forensic.features.help',
+    'mcp': 'forensic.features.mcp',
     'review': 'forensic.features.review',
 }
 

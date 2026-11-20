@@ -101,7 +101,7 @@ class WorkbenchView(QObject):
 
     def set_busy(self, busy):
         for key, button in self.action_buttons.items():
-            if key != 'help':
+            if key not in ('help', 'mcp'):
                 button.setEnabled(not busy)
         self.browser.set_busy(busy)
         self.progress.setRange(0, 0 if busy else 100)

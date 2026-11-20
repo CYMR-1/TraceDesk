@@ -3,6 +3,7 @@
 PySide6>=6.8,<7
 pytsk3==20260715
 libewf-python==20260924
+mcp>=1.9,<2
 
 # The Sleuth Kit 4.15.0 二进制文件已随项目放置在 tools/ 目录下，
 # 无需通过 pip 安装。

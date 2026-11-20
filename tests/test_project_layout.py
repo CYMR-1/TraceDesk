@@ -47,7 +47,7 @@ window.close()
         TEST_WORK_DIR.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=TEST_WORK_DIR) as folder:
             root = Path(folder)
-            included = ['main.py', 'requirements.txt', 'README.md', '启动取证工作台.bat', '.gitignore',
+            included = ['main.py', 'mcp_server.py', 'requirements.txt', 'README.md', '启动取证工作台.bat', '.gitignore',
                         'forensic/core/__init__.py', 'forensic/core/case.py', 'forensic/engines/tsk.py',
                         'forensic/ui/controller.py', 'forensic/assets/tracedesk.ico',
                         'tests/ui/__init__.py', 'docs/README.md', 'docs/目录结构.md', 'docs/设计与验收说明.md',

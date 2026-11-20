@@ -2,5 +2,5 @@
 
 ENABLED_FEATURES = (
     'cases', 'evidence', 'files',  # 基础工作流，不能禁用。
-    'export', 'file_tools', 'report', 'timeline', 'audit', 'help', 'review',
+    'export', 'file_tools', 'report', 'timeline', 'audit', 'help', 'mcp', 'review',
 )

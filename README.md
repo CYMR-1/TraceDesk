@@ -6,8 +6,9 @@
 
 | 位置 | 用途 |
 | --- | --- |
-| `main.py`、`启动取证工作台.bat` | 启动入口 |
+| `main.py`、`mcp_server.py`、`启动取证工作台.bat` | 桌面工作台与 MCP 服务端启动入口 |
 | `forensic/core/` | 案件、哈希、审计、导出、报告和后台任务 |
+| `forensic/mcp/` | MCP 服务端业务编排、FastMCP 工具定义与本地 HTTP 托管 |
 | `forensic/features/` | 启用清单、功能命令、按钮和页面 |
 | `forensic/engines/` | TSK 适配与 FAT 文件系统分析 |
 | `forensic/ui/` | PySide6 控制器、窗口、文件树和内容预览 |
@@ -110,6 +111,34 @@ python -m venv .venv
 
 超过 1,000 项时，右侧文件列表按每页 100 项显示，筛选覆盖当前范围的所有页。左侧文件树由完整清单建立，展开目录即可查看其全部子项；点选文件会自动定位到右侧对应页。大案件的 MAC/B 时间线按需在后台生成，每条记录的序号在翻页和筛选后保持不变；在 MACB 时间线和审计日志中单击“序号”或“时间（UTC+8）”表头可切换正序/倒序；在取证发现、内容搜索与复核、MACB 时间线和审计日志中，事件、状态、分区偏移、操作人员、操作、结果列表头均支持下拉筛选。单击记录在顶部显示序号，双击在下方打开详情。文件列表、时间线和文件内容预览均可双击页码直接跳页。文件清单、已生成的时间线仍需放入内存，不能仅凭镜像容量推定可处理的文件数量。
 
+## MCP 服务端接入
+
+TraceDesk 内置标准 Model Context Protocol（MCP）服务端 `tracedesk_mcp`，将完整电子数据取证工作流暴露为 **19 个工具**与 **2 个资源**（`tracedesk://cases`、`tracedesk://guide/workflow`），供 Claude Desktop、Cursor、Antigravity 等外部 AI 客户端调用：
+
+- **案件管理**：`tracedesk_list_cases`、`tracedesk_create_case`、`tracedesk_get_case_summary`
+- **证据镜像**：`tracedesk_load_image`、`tracedesk_verify_integrity`、`tracedesk_register_source`、`tracedesk_scan_partitions`
+- **文件分析**：`tracedesk_list_files`、`tracedesk_preview_file`、`tracedesk_search_content`、`tracedesk_examine_file`
+- **发现、时间线与审计**：`tracedesk_record_finding`、`tracedesk_list_findings`、`tracedesk_query_timeline`、`tracedesk_query_audit_log`
+- **导出与报告**：`tracedesk_export_file`、`tracedesk_export_findings`、`tracedesk_generate_report`、`tracedesk_build_review_bundle`
+
+所有工具严格遵守 TraceDesk 证据保护边界：源镜像只读打开且禁止位于案件库内；同名或跨分区文件通过 `partition_offset`、`inode` 和 `deleted` 唯一定位；所有受控写操作都会追加到案件 SHA-256 审计链（默认以“取证人员 (MCP)”区分来源），每次调用结束后及时释放 `case.lock`。
+
+### 命令行启动
+
+```powershell
+# stdio 模式（默认，推荐由本地 MCP 客户端按需拉起）
+.\.venv\Scripts\python.exe mcp_server.py
+
+# 本地 Streamable HTTP 模式（仅允许监听 127.0.0.1 / localhost，启用 DNS 重绑定防护）
+.\.venv\Scripts\python.exe mcp_server.py --transport streamable-http --host 127.0.0.1 --port 8765 --path /mcp
+```
+
+也可通过 `.\.venv\Scripts\python.exe -m forensic.mcp` 启动，并支持 `--cases-dir`、`--actor` 参数（或环境变量 `TRACEDESK_CASES_DIR`、`TRACEDESK_MCP_ACTOR`）。
+
+### 桌面端配置与本地 HTTP 托管
+
+点击工作台顶部标题栏的 **MCP 服务** 按钮，可直接查看和一键复制 `stdio` / `Streamable HTTP` 客户端配置 JSON、启动命令与全部 19 个工具清单，并在桌面端内直接启停本地 `127.0.0.1` Streamable HTTP MCP 服务（关闭桌面窗口时自动停止）。当桌面端已打开某个案件并持有 `case.lock` 时，外部 MCP 客户端操作同一案件前请先在桌面端关闭或切换案件。
+
 ## 第三方依赖与 AI 参与
 
 The Sleuth Kit 4.15.0 Windows 官方发行包来自：
@@ -122,6 +151,6 @@ https://github.com/sleuthkit/sleuthkit/releases/download/sleuthkit-4.15.0/sleuth
 
 发行包的许可证及第三方组件许可证完整保留于 `tools/sleuthkit-4.15.0-win32/licenses/`，分发时必须一并保留。TSK 未作二进制修改；通过独立进程调用。
 
-桌面界面使用 Qt for Python 官方 PySide6（Qt 6）及其随包依赖，由 `requirements.txt` 安装到项目 `.venv`。官方文档与许可入口：[Qt for Python](https://doc.qt.io/qtforpython-6/)、[Commercial Use](https://doc.qt.io/qtforpython-6/commercial/index.html)。上游提供 LGPLv3/GPLv3 和商业许可选项，具体组件适用许可及第三方声明以安装包所附文件为准。本工程通过 Python 导入使用，未修改 PySide6 或 Qt 二进制文件；源码工程包不包含 `.venv`，运行前需安装依赖，若另行分发运行库应一并保留其许可证和声明。
+桌面界面使用 Qt for Python 官方 PySide6（Qt 6）及其随包依赖，MCP 服务端使用官方 Python SDK（`mcp`），均由 `requirements.txt` 安装到项目 `.venv`。官方文档与许可入口：[Qt for Python](https://doc.qt.io/qtforpython-6/)、[Commercial Use](https://doc.qt.io/qtforpython-6/commercial/index.html)。上游提供 LGPLv3/GPLv3 和商业许可选项，具体组件适用许可及第三方声明以安装包所附文件为准。本工程通过 Python 导入使用，未修改 PySide6 或 Qt 二进制文件；源码工程包不包含 `.venv`，运行前需安装依赖，若另行分发运行库应一并保留其许可证和声明。
 
 AI 使用说明：Codex 主要用于辅助代码实现与调试、界面调整、测试及技术文档整理。个人学习心得、姓名学号和对项目的理解由本人据实补充。

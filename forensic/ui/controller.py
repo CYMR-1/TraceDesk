@@ -257,6 +257,7 @@ class App(QObject):
         for panel in self.view.panels.values():
             if hasattr(panel, 'shutdown'):
                 panel.shutdown()
+        self.features.shutdown()
         self.browser.cancel_display()
         self.preview.clear()
         if self.case:

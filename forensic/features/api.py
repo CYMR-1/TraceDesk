@@ -44,6 +44,7 @@ class Feature:
     panels: tuple[Panel, ...] = ()
     requires: tuple[str, ...] = ()
     case_changed: Callable | None = None
+    shutdown: Callable | None = None
 
 
 class FeatureRegistry:
@@ -90,6 +91,11 @@ class FeatureRegistry:
         for feature in self.features:
             if feature.case_changed:
                 feature.case_changed(self.context)
+
+    def shutdown(self):
+        for feature in self.features:
+            if feature.shutdown:
+                feature.shutdown(self.context)
 
     def refresh_panels(self, widgets, *, reset=False):
         for key, panel in self.panels.items():
