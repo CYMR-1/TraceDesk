@@ -131,7 +131,7 @@ def _scan_intervals(file, attr_args, size, intervals, needle, limit, control, pr
                 break
             if pos >= h_lo:
                 found.append((pos, before, after))
-                if len(found) == limit:
+                if limit is not None and len(found) == limit:
                     return found
     return found
 

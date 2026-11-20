@@ -204,6 +204,14 @@ class DesktopAppearance:
             QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
             QScrollBar::add-page, QScrollBar::sub-page { background: none; }
             QToolTip { background: #ffffff; color: #24332f; border: 1px solid #b6c9be; padding: 6px; }
+            QMenu {
+                background: #ffffff; color: #24332f; border: 1px solid #d4ded9;
+                border-radius: 6px; padding: 4px;
+            }
+            QMenu::item { padding: 5px 24px 5px 12px; border-radius: 4px; }
+            QMenu::item:selected { background: #dff3eb; color: #145b4a; }
+            QMenu::item:disabled { color: #98a29d; }
+            QMenu::separator { height: 1px; background: #e6ece9; margin: 4px 6px; }
         '''.replace('@CHEVRON@', (ASSET_DIR / 'chevron-down.svg').as_posix())
            .replace('@CHECK@', (ASSET_DIR / 'check-mark.svg').as_posix()))
         return self

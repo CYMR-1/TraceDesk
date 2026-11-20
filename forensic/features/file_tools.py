@@ -3,8 +3,9 @@ from PySide6.QtWidgets import QMessageBox
 from ..ui.dialogs import choose_file, enter_note
 from ..core.file_tools import examine, record_note
 from ..engines.tsk import can_export
-from ..core.findings import OPERATIONS
+from ..core.findings import OPERATIONS, export_findings
 from ..ui.analysis_panels import FindingsPanel
+from ..ui.views import ExportResultDialog
 from .api import Action, Feature, Panel
 
 
@@ -54,8 +55,28 @@ def findings(context):
             d = r['details']
             key = (r['subject'], d['offset'], d['inode'], d['deleted'], d['image_sha256'])
             groups.setdefault(key, []).append(r)
+
+    def export_all(visible_groups):
+        if not context.available():
+            return
+        if not visible_groups:
+            QMessageBox.information(context.root, '提示', '当前没有可导出的取证发现。')
+            return
+        if not case.data.get('evidence'):
+            QMessageBox.information(context.root, '提示', '请先加载镜像。')
+            return
+
+        def done(result):
+            summary, exported_count, failed = result
+            note = f'已导出 {exported_count} 个证据文件至 exports 目录，并生成汇总清单。'
+            if failed:
+                note += f'\n另有 {len(failed)} 项未能导出，详见汇总清单。'
+            ExportResultDialog(context.root, summary, '取证发现已导出', note).exec()
+
+        context.task('一键导出取证发现', lambda: export_findings(case, visible_groups), done)
+
     return (f'取证发现 · {len(groups)} 个文件 · 日志链校验通过' if groups else
-            '尚无取证发现 · 右键文件可记录笔记、计算摘要或比对副本'), list(groups.values())
+            '尚无取证发现 · 右键文件可记录笔记、计算摘要或比对副本'), list(groups.values()), export_all
 
 
 FEATURE = Feature('file_tools', requires=('files',),

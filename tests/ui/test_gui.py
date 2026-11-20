@@ -361,7 +361,11 @@ class FileBrowserTests(QtTests):
         panel = app.view.panels['review']
         headers = [panel.table.headerItem().text(i) for i in range(panel.table.columnCount())]
         self.assertEqual(headers[:4], ['', '序号', '文件内字节偏移', '分区偏移'])
+        self.assertEqual(panel.header._check_label, '全选')
+        self.assertEqual(panel.header.filter_columns(), (3,))
         self.assertEqual(panel.header.check_state(), Qt.CheckState.Unchecked)
+        self.assertEqual(panel.search_button.text(), '搜索')
+        self.assertFalse(hasattr(panel, 'cancel_button'))
 
         logged = []
         case = SimpleNamespace(
@@ -432,6 +436,40 @@ class FileBrowserTests(QtTests):
             panel.preview(panel.table.topLevelItem(0), 0)
             dialog_cls.assert_not_called()
 
+        # 分区偏移表头下拉筛选与排除所选项。
+        entries_multi = [
+            dict(path='BOOT/A.MUI', offset=2048, inode='10', deleted=False),
+            dict(path='WIN/B.DLL', offset=104448, inode='11', deleted=False),
+            dict(path='WIN/C.EXE', offset=104448, inode='12', deleted=False),
+        ]
+        hits_multi = [(entries_multi[0], 10, '', ''), (entries_multi[1], 20, '', ''), (entries_multi[2], 30, '', '')]
+        rec_multi = dict(record, hits=[dict(source_note='')] * 3)
+        panel._reset_results()
+        panel.finished((rec_multi, hits_multi, 'search_multi.json'))
+        self.assertEqual(panel.header.filter_options(3), ['2048', '104448'])
+        panel.header.set_filter_value(3, '104448')
+        self.assertTrue(panel.table.topLevelItem(0).isHidden())
+        self.assertFalse(panel.table.topLevelItem(1).isHidden())
+        self.assertFalse(panel.table.topLevelItem(2).isHidden())
+        # 全选仅作用于当前筛选出的可见项，排除所选项仅移除已勾选的可见项。
+        panel.header.toggled.emit(True)
+        self.assertEqual(len(panel.checked_items()), 2)
+        panel.exclude_selected()
+        self.assertEqual(panel.table.topLevelItemCount(), 1)
+        panel.header.set_filter_value(3, None)
+        self.assertEqual(panel.table.topLevelItem(0).text(5), 'BOOT/A.MUI')
+        self.assertEqual(panel.table.topLevelItem(0).text(1), '1')
+        self.assertEqual(panel.header.filter_options(3), ['2048'])
+
+        # 登记证据来源对话框默认尺寸应足以完整展示 64 位 SHA-256。
+        sizes = []
+        def capture_exec(dlg):
+            sizes.append((dlg.width(), dlg.height()))
+            return 0
+        with patch.object(QDialog, 'exec', capture_exec):
+            panel.source()
+        self.assertEqual(sizes, [(600, 270)])
+
     def test_review_panel_streams_hits_and_allows_actions_during_search(self):
         import threading
         import time
@@ -463,7 +501,7 @@ class FileBrowserTests(QtTests):
         h1 = (e1, 4, '00 01', '02 03')
         h2 = (e2, 9, '10 11', '12 13')
 
-        def fake_search(c, query, encoding, control, progress, *, selected=None, on_hit=None):
+        def fake_search(c, query, encoding, control, progress, *, limit=None, selected=None, on_hit=None):
             progress('搜索文件内容', 1, 2)
             on_hit([h1])
             first_sent.set()
@@ -478,13 +516,13 @@ class FileBrowserTests(QtTests):
             return record, [h1, h2], 'search_live.json'
 
         with patch('forensic.features.review.search', side_effect=fake_search):
-            panel.start()
+            panel.toggle_search()
             self.assertTrue(first_sent.wait(5))
             panel._poll_search()
-            # 搜索进行中即可看到已命中条目，且可勾选、保存与预览。
+            # 搜索进行中按钮变为“取消搜索”，且可勾选、保存、预览与排除。
             self.assertTrue(panel.searching)
-            self.assertFalse(panel.search_button.isEnabled())
-            self.assertTrue(panel.cancel_button.isEnabled())
+            self.assertEqual(panel.search_button.text(), '取消搜索')
+            self.assertTrue(panel.search_button.isEnabled())
             self.assertEqual(panel.table.topLevelItemCount(), 1)
             self.assertEqual(panel.table.topLevelItem(0).text(5), 'DOCS/LIVE1.TXT')
 
@@ -506,10 +544,10 @@ class FileBrowserTests(QtTests):
                 panel._poll_search()
                 time.sleep(0.01)
 
-        # 搜索完成后追加剩余命中且保留先前勾选状态。
+        # 搜索完成后按钮恢复“搜索”，追加剩余命中且保留先前勾选状态。
         self.assertFalse(panel.searching)
+        self.assertEqual(panel.search_button.text(), '搜索')
         self.assertTrue(panel.search_button.isEnabled())
-        self.assertFalse(panel.cancel_button.isEnabled())
         self.assertEqual(panel.table.topLevelItemCount(), 2)
         self.assertEqual(panel.table.topLevelItem(0).checkState(0), Qt.CheckState.Checked)
         self.assertEqual(panel.table.topLevelItem(1).checkState(0), Qt.CheckState.Unchecked)
@@ -564,6 +602,58 @@ class FileBrowserTests(QtTests):
         self.assertEqual(audit.table.header().sortIndicatorSection(), 1)
         self.assertEqual(audit.table.header().sortIndicatorOrder(), Qt.SortOrder.DescendingOrder)
         self.assertEqual([audit.table.topLevelItem(i).text(0) for i in range(3)], ['3', '2', '1'])
+
+    def test_header_dropdown_filters_across_analysis_panels_and_findings_export(self):
+        root, app = self.controller()
+
+        # 1. 取证发现：状态、分区偏移下拉筛选 + 一键导出仅导出当前展示结果。
+        findings = app.view.panels['findings']
+        self.assertEqual(findings.header.filter_columns(), (1, 2))
+        exported_groups = []
+        g1 = [dict(seq=1, timestamp='2026-11-20T10:00:00+08:00', actor='测试', action='FILE_NOTE', result='成功',
+                   subject='a.txt', details=dict(offset=2048, inode='10', deleted=False, image_sha256='a' * 64))]
+        g2 = [dict(seq=2, timestamp='2026-11-20T11:00:00+08:00', actor='测试', action='FILE_NOTE', result='成功',
+                   subject='b.txt', details=dict(offset=104448, inode='11', deleted=True, image_sha256='a' * 64))]
+        findings.set_text(('取证发现', [g1, g2], exported_groups.append))
+        self.assertTrue(findings.export_button.isEnabled())
+        self.assertEqual(findings.header.filter_options(1), ['已删除', '现存'])
+        self.assertEqual(findings.header.filter_options(2), ['2048', '104448'])
+        findings.header.set_filter_value(1, '已删除')
+        self.assertEqual(findings.table.topLevelItemCount(), 1)
+        self.assertEqual(findings.table.topLevelItem(0).text(0), 'b.txt')
+        findings.export_button.click()
+        self.assertEqual(exported_groups, [[g2]])
+
+        # 2. MACB 时间线：事件、状态、分区偏移下拉筛选。
+        timeline = app.view.panels['timeview']
+        self.assertEqual(timeline.header.filter_columns(), (2, 3, 4))
+        rows = [
+            dict(time='2026-11-20T10:00:00+08:00', event='M 内容修改', status='现存', offset=2048, inode='1', path='a.txt'),
+            dict(time='2026-11-20T11:00:00+08:00', event='B 创建', status='已删除', offset=104448, inode='2', path='b.txt'),
+        ]
+        timeline.set_text(('时间线', rows))
+        self.assertEqual(timeline.header.filter_options(4), ['2048', '104448'])
+        timeline.header.set_filter_value(2, 'B 创建')
+        self.assertEqual(timeline.table.topLevelItemCount(), 1)
+        self.assertEqual(timeline.table.topLevelItem(0).text(6), 'b.txt')
+
+        # 3. 审计日志：操作人员、操作、结果下拉筛选。
+        audit = app.view.panels['audit']
+        self.assertEqual(audit.header.filter_columns(), (2, 3, 4))
+        records = [
+            dict(seq=1, timestamp='2026-11-20T10:00:00+08:00', actor='张三', action='CASE_CREATE',
+                 result='成功', subject='c1', details={}, previous='0' * 64, hash='1' * 64),
+            dict(seq=2, timestamp='2026-11-20T11:00:00+08:00', actor='李四', action='FILE_EXPORT',
+                 result='失败', subject='a.txt', details={}, previous='1' * 64, hash='2' * 64),
+        ]
+        audit.set_text(('日志校验通过', records))
+        audit.header.set_filter_value(2, '李四')
+        self.assertEqual(audit.table.topLevelItemCount(), 1)
+        self.assertEqual(audit.table.topLevelItem(0).text(3), '导出文件')
+        audit.header.set_filter_value(4, '成功')
+        self.assertEqual(audit.table.topLevelItemCount(), 0)
+        audit.header.clear_filters(emit=True)
+        self.assertEqual(audit.table.topLevelItemCount(), 2)
 
 
 class NewCaseDialogTests(QtTests):

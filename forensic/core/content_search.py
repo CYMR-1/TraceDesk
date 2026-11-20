@@ -120,7 +120,7 @@ def read_entry(tool, image, entry, needle, control, stop, limit, byte_progress):
                 for offset, before, after in matches(_StopStream(stream, stop), entry['size'], needle, control,
                                                      progress=byte_progress):
                     found.append((entry, offset, before, after))
-                    if len(found) == limit:
+                    if limit is not None and len(found) == limit:
                         return found, None
                 if stream.read(1):
                     raise OSError('输出超过目录记录长度')
@@ -336,7 +336,7 @@ def scan_entries(tool, image, entries, needle, control, progress, limit, *, work
                         key_icat_futures[key] = icat.submit(fallback, key_entry[key])
                     else:
                         merged = [hit for start in sorted(state[1]) for hit in state[1][start]]
-                        key_results[key] = (merged[:limit], None)
+                        key_results[key] = (merged if limit is None else merged[:limit], None)
                         window_done += 1
 
             # 4. 执行分片扫描（多进程并行或单进程复用 VolumeReader）。
@@ -422,7 +422,7 @@ def scan_entries(tool, image, entries, needle, control, progress, limit, *, work
             max_win_bytes = min(WIN_MAX_BYTES, max_win_bytes * 2)
 
 
-def search(case, query, encoding, control, progress, *, limit=1000, selected=None, on_hit=None):
+def search(case, query, encoding, control, progress, *, limit=None, selected=None, on_hit=None):
     needle = pattern(query, encoding)
     tool = TSK()
     image = case.image()
@@ -453,12 +453,12 @@ def search(case, query, encoding, control, progress, *, limit=1000, selected=Non
                 verification = case.source_note()
             with closing(scan_entries(tool, image, entries, needle, control, progress, limit)) as results:
                 for found, error in results:
-                    batch = found[:limit - len(hits)]
+                    batch = found if limit is None else found[:limit - len(hits)]
                     if batch:
                         hits.extend(batch)
                         if on_hit is not None:
                             on_hit(batch)
-                    if len(hits) == limit:
+                    if limit is not None and len(hits) == limit:
                         state = f'达到 {limit} 条上限，未搜索全部内容'
                         break
                     if error:

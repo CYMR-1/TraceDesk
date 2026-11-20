@@ -12,6 +12,7 @@ TITLES = {
     'FILE_BROWSE': '读取分区文件', 'PARTITIONS_SCAN': '扫描所有分区', 'FILE_FILTER': '筛选文件',
     'FILE_EXPORT': '导出文件', 'TIMELINE': '生成时间线', 'REPORT_GENERATE': '生成报告',
     'FILE_NOTE': '记录取证发现', 'FILE_COMPARE': '比对文件副本', 'FILE_HASH': '计算文件摘要',
+    'FINDINGS_EXPORT': '导出取证发现',
 }
 
 
@@ -28,17 +29,17 @@ def render(context):
 class AuditPanel(RecordsPanel):
     def __init__(self, parent):
         super().__init__(parent, ['序号', '时间（UTC+8）', '操作人员', '操作', '结果', '对象'],
-                         [68, 165, 96, 135, 100], '搜索操作、人员、对象或结果')
+                         [68, 165, 115, 148, 110], '搜索操作、人员、对象或结果',
+                         filter_columns=(2, 3, 4), sort_columns=(0, 1))
         self._chronological = []
         self._descending = True
         self._sort_column = 0
-        header = self.table.header()
-        header.setSectionsClickable(True)
-        header.setSortIndicatorShown(True)
-        header.setSortIndicator(0, Qt.SortOrder.DescendingOrder)
-        header.sectionClicked.connect(self._toggle_sort)
+        self.header.setSortIndicator(0, Qt.SortOrder.DescendingOrder)
+        self.header.sort_requested.connect(self._toggle_sort)
         for column in (0, 1):
             self.table.headerItem().setToolTip(column, '单击切换正序/倒序')
+        for column in (2, 3, 4):
+            self.table.headerItem().setToolTip(column, '单击下拉筛选')
 
     def _sorted_records(self):
         if self._sort_column == 1:
@@ -53,7 +54,7 @@ class AuditPanel(RecordsPanel):
         self._descending = not self._descending
         self._sort_column = column
         order = Qt.SortOrder.DescendingOrder if self._descending else Qt.SortOrder.AscendingOrder
-        self.table.header().setSortIndicator(column, order)
+        self.header.setSortIndicator(column, order)
         self.records = self._sorted_records()
         self._populate()
 

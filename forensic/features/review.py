@@ -1,11 +1,11 @@
 """搜索、来源登记与复核材料入口。"""
+import collections
 import queue
 from time import monotonic
 
-from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
+                               QLabel, QLineEdit, QMessageBox, QPushButton,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..core.content_search import SearchControl, pattern, search
@@ -14,90 +14,12 @@ from ..core.preview import PAGE_BYTES
 from ..core.review import build_bundle
 from ..core.tasks import TaskRunner
 from ..engines.tsk import deleted_source_note
+from ..ui.filter_header import FilterHeaderView
 from ..ui.preview import FilePreview
 from ..ui.views import ExportResultDialog
 from .api import Feature, Panel
 
-
-class CheckableHeader(QHeaderView):
-    """在首列表头绘制与浅色绿色主题一致的三态全选复选框。"""
-
-    toggled = Signal(bool)
-
-    def __init__(self, parent=None):
-        super().__init__(Qt.Orientation.Horizontal, parent)
-        self.setObjectName('recordHeader')
-        self.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.setSectionsClickable(True)
-        self.setMouseTracking(True)
-        self._check_state = Qt.CheckState.Unchecked
-        self._hovered = False
-
-    def check_state(self):
-        return self._check_state
-
-    def set_check_state(self, state):
-        if self._check_state != state:
-            self._check_state = state
-            self.viewport().update()
-
-    @staticmethod
-    def _checkbox_rect(rect):
-        size = 17
-        # QTreeView::indicator 为 15px 内容 + 1px 边框（总 17px），左起点与行复选框对齐。
-        x = rect.left() + 8
-        y = rect.top() + (rect.height() - size) // 2
-        return QRect(x, y, size, size)
-
-    def paintSection(self, painter, rect, logicalIndex):
-        super().paintSection(painter, rect, logicalIndex)
-        if logicalIndex != 0:
-            return
-        box = QRectF(self._checkbox_rect(rect)).adjusted(0.5, 0.5, -0.5, -0.5)
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        checked = self._check_state != Qt.CheckState.Unchecked
-        fill = QColor('#087f6b') if checked else QColor('#ffffff')
-        border = QColor('#087f6b') if (checked or self._hovered) else QColor('#b8c7bf')
-        painter.setPen(QPen(border, 1.0))
-        painter.setBrush(fill)
-        painter.drawRoundedRect(box, 4.0, 4.0)
-        if self._check_state == Qt.CheckState.Checked:
-            path = QPainterPath()
-            path.moveTo(box.left() + box.width() * 0.22, box.top() + box.height() * 0.52)
-            path.lineTo(box.left() + box.width() * 0.42, box.top() + box.height() * 0.72)
-            path.lineTo(box.left() + box.width() * 0.78, box.top() + box.height() * 0.30)
-            pen = QPen(QColor('#ffffff'), 1.8, Qt.PenStyle.SolidLine,
-                       Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(path)
-        elif self._check_state == Qt.CheckState.PartiallyChecked:
-            y = box.center().y()
-            pen = QPen(QColor('#ffffff'), 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen)
-            painter.drawLine(QPointF(box.left() + 3.5, y), QPointF(box.right() - 3.5, y))
-        painter.restore()
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.logicalIndexAt(event.position().toPoint()) == 0:
-            self.toggled.emit(self._check_state != Qt.CheckState.Checked)
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        hovered = self.logicalIndexAt(event.position().toPoint()) == 0
-        if hovered != self._hovered:
-            self._hovered = hovered
-            self.viewport().update()
-        super().mouseMoveEvent(event)
-
-    def leaveEvent(self, event):
-        if self._hovered:
-            self._hovered = False
-            self.viewport().update()
-        super().leaveEvent(event)
+LIVE_DRAIN_LIMIT = 500
 
 
 class ReviewPanel(QWidget):
@@ -105,6 +27,9 @@ class ReviewPanel(QWidget):
         super().__init__(parent)
         self.case = self.control = self.record = self.name = self._active = None
         self.hits = []
+        self._checked_indices = set()
+        self._excluded_indices = set()
+        self._offset_counts = collections.Counter()
         self.search_runner = TaskRunner()
         self._hit_queue = queue.Queue()
         self._progress = None
@@ -124,16 +49,13 @@ class ReviewPanel(QWidget):
         tools.addWidget(self.query, 1)
         tools.addWidget(self.encoding)
         tools.addWidget(self.scope)
-        buttons = {}
-        for key, title, callback in [('search', '搜索', self.start), ('cancel', '取消搜索', self.cancel),
-                                     ('source', '登记证据来源', self.source), ('bundle', '导出复核包', self.bundle)]:
+        self.search_button = QPushButton('搜索')
+        self.search_button.clicked.connect(self.toggle_search)
+        tools.addWidget(self.search_button)
+        for title, callback in [('登记证据来源', self.source), ('导出复核包', self.bundle)]:
             button = QPushButton(title)
             button.clicked.connect(callback)
             tools.addWidget(button)
-            buttons[key] = button
-        self.search_button = buttons['search']
-        self.cancel_button = buttons['cancel']
-        self.cancel_button.setEnabled(False)
         layout.addLayout(tools)
         self.query.returnPressed.connect(self.start)
         self.status = QLabel()
@@ -142,19 +64,28 @@ class ReviewPanel(QWidget):
 
         self.table = QTreeWidget()
         self.table.setRootIsDecorated(False)
-        self.header = CheckableHeader(self.table)
+        self.table.setUniformRowHeights(True)
+        self.header = FilterHeaderView(self.table, checkable_column=0, check_label='全选', filter_columns=(3,))
         self.table.setHeader(self.header)
         self.table.setHeaderLabels(['', '序号', '文件内字节偏移', '分区偏移', 'inode', '镜像内路径', '前文 HEX', '后文 HEX'])
         self.table.headerItem().setToolTip(0, '全选 / 取消全选')
+        self.table.headerItem().setToolTip(3, '单击下拉筛选分区偏移')
         self.header.toggled.connect(self._set_all_checked)
-        for column, width in ((0, 38), (1, 64), (5, 320)):
+        self.header.filter_changed.connect(self._apply_offset_filter)
+        for column, width in ((0, 68), (1, 64), (3, 110), (5, 320)):
             self.table.setColumnWidth(column, width)
         self.table.itemDoubleClicked.connect(self.preview)
-        self.table.itemChanged.connect(self._sync_check_state)
+        self.table.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.table, 1)
+
+        actions = QHBoxLayout()
+        self.exclude_button = QPushButton('在本次搜索中排除所选项')
+        self.exclude_button.clicked.connect(self.exclude_selected)
         self.save_button = QPushButton('将所选命中保存为取证发现')
         self.save_button.clicked.connect(self.bookmark)
-        layout.addWidget(self.save_button)
+        actions.addWidget(self.exclude_button, 1)
+        actions.addWidget(self.save_button, 2)
+        layout.addLayout(actions)
 
     @property
     def searching(self):
@@ -164,9 +95,25 @@ class ReviewPanel(QWidget):
         self._poll_timer.stop()
         self.cancel()
 
+    def _refresh_offset_options(self):
+        values = [str(offset) for offset in sorted(self._offset_counts)]
+        self.header.set_filter_options(3, values)
+
+    def _visible_counts(self):
+        offset_filter = self.header.filter_value(3)
+        if offset_filter is None:
+            return self.table.topLevelItemCount(), len(self._checked_indices)
+        visible = checked = 0
+        for row in range(self.table.topLevelItemCount()):
+            item = self.table.topLevelItem(row)
+            if not item.isHidden():
+                visible += 1
+                if item.checkState(0) == Qt.CheckState.Checked:
+                    checked += 1
+        return visible, checked
+
     def _sync_check_state(self, *_):
-        total = self.table.topLevelItemCount()
-        checked = len(self.checked_items())
+        total, checked = self._visible_counts()
         if not total or not checked:
             self.header.set_check_state(Qt.CheckState.Unchecked)
         elif checked == total:
@@ -174,6 +121,39 @@ class ReviewPanel(QWidget):
         else:
             self.header.set_check_state(Qt.CheckState.PartiallyChecked)
         self.save_button.setText(f'将勾选的 {checked} 条命中保存为取证发现' if checked else '将所选命中保存为取证发现')
+        self.exclude_button.setText(f'在本次搜索中排除勾选的 {checked} 项' if checked else '在本次搜索中排除所选项')
+
+    def _on_item_changed(self, item, column):
+        if column != 0:
+            return
+        index = item.data(0, Qt.ItemDataRole.UserRole)
+        if item.checkState(0) == Qt.CheckState.Checked:
+            self._checked_indices.add(index)
+        else:
+            self._checked_indices.discard(index)
+        self._sync_check_state()
+
+    def _apply_offset_filter(self, column, value):
+        if column != 3:
+            return
+        self.table.setUpdatesEnabled(False)
+        try:
+            for row in range(self.table.topLevelItemCount()):
+                item = self.table.topLevelItem(row)
+                item.setHidden(value is not None and item.text(3) != value)
+        finally:
+            self.table.setUpdatesEnabled(True)
+        self._sync_check_state()
+
+    def _reset_results(self):
+        self.table.clear()
+        self.hits = []
+        self._checked_indices.clear()
+        self._excluded_indices.clear()
+        self._offset_counts.clear()
+        self.header.clear_filters(emit=False)
+        self._refresh_offset_options()
+        self._sync_check_state()
 
     def set_text(self, context):
         self.context = context
@@ -181,10 +161,10 @@ class ReviewPanel(QWidget):
         if self.case is not case or not self.status.text():
             if self.case is not case:
                 self.shutdown()
-            self.table.clear()
-            self.hits = []
+                self.search_button.setText('搜索')
+                self.search_button.setEnabled(True)
+            self._reset_results()
             self.record = self.name = self._active = None
-            self._sync_check_state()
             self.status.setText('搜索当前清单中的普通文件及删除记录，不含未分配空间。双击命中定位原始字节。')
         self.case = case
 
@@ -195,6 +175,12 @@ class ReviewPanel(QWidget):
             QMessageBox.information(self, '提示', '请先加载镜像。')
             return False
         return True
+
+    def toggle_search(self):
+        if self.searching:
+            self.cancel()
+        else:
+            self.start()
 
     def start(self):
         if self.searching or not self.ready():
@@ -213,17 +199,15 @@ class ReviewPanel(QWidget):
         self.control = control
         self.record = self.name = self._progress = self._notice = None
         self._hit_queue = queue.Queue()
-        self.table.clear()
-        self.hits = []
-        self._sync_check_state()
+        self._reset_results()
         self._active = dict(
             query=query, encoding=encoding, needle=needle.hex(),
             image_sha256=case.data['evidence']['sha256'],
             verification=case.source_note() or '搜索进行中（实时命中）',
         )
-        self.search_button.setEnabled(False)
-        self.cancel_button.setEnabled(True)
-        self.status.setText('正在后台搜索 · 命中将实时显示，可直接勾选、双击预览或保存为取证发现。')
+        self.search_button.setText('取消搜索')
+        self.search_button.setEnabled(True)
+        self.status.setText('正在后台搜索 · 命中将实时显示，可直接勾选、双击预览、排除或保存为取证发现。')
 
         def on_progress(stage, done, total):
             self._progress = (stage, done, total)
@@ -233,7 +217,8 @@ class ReviewPanel(QWidget):
 
         def work():
             try:
-                return search(case, query, encoding, control, on_progress, selected=selected, on_hit=on_hit)
+                return search(case, query, encoding, control, on_progress, limit=None,
+                              selected=selected, on_hit=on_hit)
             except Exception as error:
                 return str(error)
 
@@ -243,31 +228,53 @@ class ReviewPanel(QWidget):
     def cancel(self):
         if self.control:
             self.control.cancel()
+            if self.searching:
+                self.search_button.setText('正在取消…')
+                self.search_button.setEnabled(False)
 
     def _append_hits(self, batch):
         if not batch:
             return
         base = len(self.hits)
         self.hits.extend(batch)
+        offset_filter = self.header.filter_value(3)
+        existing_rows = self.table.topLevelItemCount()
+        new_offsets = False
         items = []
-        for offset, (entry, pos, before, after) in enumerate(batch):
-            index = base + offset
-            item = QTreeWidgetItem(['', str(index + 1), str(pos), str(entry['offset']), str(entry['inode']),
+        for pos_in_batch, (entry, pos, before, after) in enumerate(batch):
+            index = base + pos_in_batch
+            if index in self._excluded_indices:
+                continue
+            offset = entry['offset']
+            if offset not in self._offset_counts:
+                new_offsets = True
+            self._offset_counts[offset] += 1
+            seq = existing_rows + len(items) + 1
+            item = QTreeWidgetItem(['', str(seq), str(pos), str(offset), str(entry['inode']),
                                     entry['path'], before, after])
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(0, Qt.CheckState.Unchecked)
             item.setData(0, Qt.ItemDataRole.UserRole, index)
-            items.append(item)
-        self.table.blockSignals(True)
-        try:
-            self.table.addTopLevelItems(items)
-        finally:
-            self.table.blockSignals(False)
+            items.append((item, str(offset)))
+        if items:
+            self.table.setUpdatesEnabled(False)
+            self.table.blockSignals(True)
+            try:
+                self.table.addTopLevelItems([item for item, _ in items])
+                if offset_filter is not None:
+                    for item, offset_text in items:
+                        if offset_text != offset_filter:
+                            item.setHidden(True)
+            finally:
+                self.table.blockSignals(False)
+                self.table.setUpdatesEnabled(True)
+        if new_offsets:
+            self._refresh_offset_options()
         self._sync_check_state()
 
-    def _drain_hits(self):
+    def _drain_hits(self, max_items=None):
         batch = []
-        while True:
+        while max_items is None or len(batch) < max_items:
             try:
                 batch.extend(self._hit_queue.get_nowait())
             except queue.Empty:
@@ -276,19 +283,22 @@ class ReviewPanel(QWidget):
             self._append_hits(batch)
 
     def _poll_search(self):
-        self._drain_hits()
+        self._drain_hits(LIVE_DRAIN_LIMIT)
         result = self.search_runner.poll()
         if result is None:
+            shown = self.table.topLevelItemCount()
+            excluded = len(self._excluded_indices)
+            hit_text = f'已命中 {shown} 条' + (f'（已排除 {excluded} 条）' if excluded else '')
             progress = self._progress
             if progress:
                 stage, done, total = progress
                 if total:
                     percent = 100 * done // total
-                    text = f'正在{stage} · {percent}%（{done:,}/{total:,}） · 已命中 {len(self.hits)} 条 · 可随时勾选、双击预览或保存为取证发现'
+                    text = f'正在{stage} · {percent}%（{done:,}/{total:,}） · {hit_text} · 可随时勾选、预览、排除或保存'
                 else:
-                    text = f'正在{stage}… · 已命中 {len(self.hits)} 条'
+                    text = f'正在{stage}… · {hit_text}'
             else:
-                text = f'正在后台搜索… · 已命中 {len(self.hits)} 条'
+                text = f'正在后台搜索… · {hit_text}'
             if self._notice and monotonic() < self._notice[0]:
                 text = self._notice[1] + '  |  ' + text
             self.status.setText(text)
@@ -300,10 +310,18 @@ class ReviewPanel(QWidget):
         else:
             self.finished(result.value)
 
+    def _format_final_status(self):
+        excluded = len(self._excluded_indices)
+        shown = self.table.topLevelItemCount()
+        excluded_note = f'（已排除 {excluded} 条，当前保留 {shown} 条）' if excluded else ''
+        return (f"{self.record['status']} · 已处理 {self.record['visited']}/{self.record['eligible']} 项 · "
+                f"命中 {len(self.hits)} 条{excluded_note} · 读取失败 {len(self.record['errors'])} 项。"
+                f"{self.record['verification']}。清单及失败明细：reports/{self.name}")
+
     def finished(self, result):
         self.control = None
+        self.search_button.setText('搜索')
         self.search_button.setEnabled(True)
-        self.cancel_button.setEnabled(False)
         if isinstance(result, str):
             self.status.setText('搜索失败：' + result)
             return
@@ -314,13 +332,10 @@ class ReviewPanel(QWidget):
             image_sha256=record['image_sha256'], verification=record['verification'],
         )
         if not final_hits and self.hits:
-            self.table.clear()
-            self.hits = []
-            self._sync_check_state()
+            self._reset_results()
         elif len(final_hits) > len(self.hits):
             self._append_hits(final_hits[len(self.hits):])
-        self.status.setText(f"{self.record['status']} · 已处理 {self.record['visited']}/{self.record['eligible']} 项 · "
-                            f"命中 {len(self.hits)} 条 · 读取失败 {len(self.record['errors'])} 项。{self.record['verification']}。清单及失败明细：reports/{self.name}")
+        self.status.setText(self._format_final_status())
         if hasattr(self.context, 'refresh'):
             self.context.refresh()
 
@@ -377,7 +392,14 @@ class ReviewPanel(QWidget):
 
     def checked_items(self):
         return [item for item in map(self.table.topLevelItem, range(self.table.topLevelItemCount()))
-                if item.checkState(0) == Qt.CheckState.Checked]
+                if not item.isHidden() and item.checkState(0) == Qt.CheckState.Checked]
+
+    def _target_items(self):
+        items = self.checked_items()
+        if items:
+            return items
+        current = self.table.currentItem()
+        return [current] if current is not None and not current.isHidden() else []
 
     def _set_all_checked(self, checked):
         count = self.table.topLevelItemCount()
@@ -385,12 +407,22 @@ class ReviewPanel(QWidget):
             self.header.set_check_state(Qt.CheckState.Unchecked)
             return
         state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self.table.setUpdatesEnabled(False)
         self.table.blockSignals(True)
         try:
             for row in range(count):
-                self.table.topLevelItem(row).setCheckState(0, state)
+                item = self.table.topLevelItem(row)
+                if item.isHidden():
+                    continue
+                item.setCheckState(0, state)
+                index = item.data(0, Qt.ItemDataRole.UserRole)
+                if checked:
+                    self._checked_indices.add(index)
+                else:
+                    self._checked_indices.discard(index)
         finally:
             self.table.blockSignals(False)
+            self.table.setUpdatesEnabled(True)
         self._sync_check_state()
 
     def toggle_all(self, column=0):
@@ -398,8 +430,41 @@ class ReviewPanel(QWidget):
             return
         self._set_all_checked(self.header.check_state() != Qt.CheckState.Checked)
 
+    def exclude_selected(self):
+        items = self._target_items()
+        if not items:
+            return
+        rows = sorted((self.table.indexOfTopLevelItem(item) for item in items), reverse=True)
+        first_row = rows[-1]
+        self.table.setUpdatesEnabled(False)
+        self.table.blockSignals(True)
+        try:
+            for row in rows:
+                removed = self.table.takeTopLevelItem(row)
+                index = removed.data(0, Qt.ItemDataRole.UserRole)
+                self._excluded_indices.add(index)
+                self._checked_indices.discard(index)
+                offset = self.hits[index][0]['offset']
+                self._offset_counts[offset] -= 1
+                if self._offset_counts[offset] <= 0:
+                    del self._offset_counts[offset]
+            for row in range(first_row, self.table.topLevelItemCount()):
+                self.table.topLevelItem(row).setText(1, str(row + 1))
+        finally:
+            self.table.blockSignals(False)
+            self.table.setUpdatesEnabled(True)
+        self._refresh_offset_options()
+        self._sync_check_state()
+        message = f'已从本次搜索中排除 {len(rows)} 项，当前保留 {self.table.topLevelItemCount()} 项。'
+        if self.searching:
+            self._notice = (monotonic() + 4.0, message)
+        elif self.record:
+            self.status.setText(self._format_final_status())
+        else:
+            self.status.setText(message)
+
     def bookmark(self):
-        items = self.checked_items() or ([self.table.currentItem()] if self.table.currentItem() else [])
+        items = self._target_items()
         meta = self.record or self._active
         if not items or not meta or not self.ready():
             return
@@ -435,7 +500,10 @@ class ReviewPanel(QWidget):
             return
         dialog = QDialog(self)
         dialog.setWindowTitle('登记证据来源')
+        dialog.setMinimumWidth(580)
         form = QFormLayout(dialog)
+        form.setContentsMargins(16, 14, 16, 14)
+        form.setSpacing(10)
         fields = {}
         for key, label in SOURCE_FIELDS.items():
             fields[key] = QLineEdit(self.case.data['evidence'].get('provenance', {}).get(key, ''))
@@ -444,6 +512,7 @@ class ReviewPanel(QWidget):
         form.addRow(buttons)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
+        dialog.resize(600, 270)
         if dialog.exec():
             values = {k: field.text() for k, field in fields.items()}
             self.context.task('登记来源', lambda: self.case.register_source(values),

@@ -17,6 +17,7 @@ from forensic.core.content_search import matches, pattern, protected_source, sea
 from forensic.core.search_worker import _non_sparse_intervals
 from forensic.core.coverage import assess, source_status
 from forensic.core.file_tools import record_note
+from forensic.core.findings import OPERATIONS, export_findings
 from forensic.core.review import build_bundle
 from forensic.engines.ewf import segments
 from forensic.paths import TEST_WORK_DIR
@@ -202,3 +203,27 @@ class ReviewTests(unittest.TestCase):
         self.assertIn('README.TXT', paths)
         self.assertIn('HARDLINK/README_DUP.TXT', paths)
         self.assertLess(paths.index('README.TXT'), paths.index('HARDLINK/README_DUP.TXT'))
+
+    def test_search_has_no_default_hit_limit_and_export_findings_batches_files(self):
+        image = self.root / 'unlimited.dd'
+        create(image)
+        case = Case.create(self.root / 'cases', '4', 'test', 'unlimited')
+        self.addCleanup(case.close)
+        case.load(image)
+        case.scan_all()
+        # 默认不设上限：搜索常见字节 '00' 应超过原 1000 条限制（或在较小镜像中完整返回所有命中且不触发上限文案）。
+        record, hits, _ = search(case, '00', 'HEX', SearchControl(), lambda *_: None)
+        self.assertNotIn('上限', record['status'])
+        self.assertEqual(record['status'], '完成')
+        self.assertGreater(len(hits), 0)
+
+        # 取证发现一键导出：导出对应镜像文件副本并生成汇总清单。
+        readme = next(e for e in case.data['inventory'] if e['path'] == 'README.TXT')
+        record_note(case, readme, '关键说明文件')
+        records = [r for r in case.check_audit() if r['action'] in OPERATIONS]
+        summary, exported_count, failed = export_findings(case, [records])
+        self.assertEqual(exported_count, 1)
+        self.assertEqual(failed, [])
+        self.assertTrue(summary.is_file())
+        self.assertIn('README.TXT', summary.read_text(encoding='utf-8'))
+        self.assertEqual(case.check_audit()[-1]['action'], 'FINDINGS_EXPORT')

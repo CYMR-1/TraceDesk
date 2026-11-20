@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QComboBox, QHBoxLayout, QPushButton, QLabel, QLine
 from ..core.formatting import display_time
 from ..core.findings import OPERATIONS
 from ..core.coverage import coverage_text, source_status, SOURCE_FIELDS
+from .filter_header import FilterHeaderView
 from .pagination import PageLabel
 
 
@@ -16,7 +17,7 @@ def page(title, subtitle, sections):
 
 
 class RecordsPanel(QWidget):
-    def __init__(self, parent, headers, widths, placeholder):
+    def __init__(self, parent, headers, widths, placeholder, *, filter_columns=(), sort_columns=()):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         self.status = QLabel()
@@ -33,8 +34,16 @@ class RecordsPanel(QWidget):
         self.table.setRootIsDecorated(False)
         self.table.setAlternatingRowColors(True)
         self.table.setUniformRowHeights(True)
+        if filter_columns or sort_columns:
+            self.header = FilterHeaderView(self.table, filter_columns=filter_columns, sort_columns=sort_columns)
+            self.table.setHeader(self.header)
+            if sort_columns:
+                self.header.setSortIndicatorShown(True)
+            self.header.filter_changed.connect(self._on_header_filter)
+        else:
+            self.header = self.table.header()
+            self.header.setObjectName('recordHeader')
         self.table.setHeaderLabels(headers)
-        self.table.header().setObjectName('recordHeader')
         self.table.setHorizontalScrollMode(QTreeWidget.ScrollMode.ScrollPerPixel)
         for i, width in enumerate(widths):
             self.table.setColumnWidth(i, width)
@@ -50,9 +59,26 @@ class RecordsPanel(QWidget):
         self.table.currentItemChanged.connect(self._detail)
         self.table.itemDoubleClicked.connect(self._open_detail)
 
+    def _on_header_filter(self, column, value):
+        self._populate()
+
+    def _refresh_filter_options(self):
+        if not isinstance(self.header, FilterHeaderView) or not self.header.filter_columns():
+            return
+        buckets = {column: set() for column in self.header.filter_columns()}
+        for record in self.records:
+            cols = self.columns(record)
+            for column, seen in buckets.items():
+                if column < len(cols) and cols[column] != '':
+                    seen.add(cols[column])
+        for column, seen in buckets.items():
+            values = sorted(seen, key=lambda v: (0, int(v)) if v.isdigit() else (1, v))
+            self.header.set_filter_options(column, values)
+
     def set_text(self, result):
         status, self.records = result
         self.status.setText(status)
+        self._refresh_filter_options()
         self._populate()
 
     def _populate(self):
@@ -73,9 +99,18 @@ class RecordsPanel(QWidget):
             self.text.setHtml(page('选择一条记录查看详情', f'当前显示 {self.table.topLevelItemCount()} 条', []))
 
     def page_records(self, query):
-        if not query:
+        filters = self.header.active_filters() if isinstance(self.header, FilterHeaderView) else {}
+        if not query and not filters:
             return self.records
-        return (record for record in self.records if query in (' '.join(self.columns(record)) + ' ' + str(record)).casefold())
+        matched = []
+        for record in self.records:
+            cols = self.columns(record)
+            if any(cols[column] != value for column, value in filters.items()):
+                continue
+            if query and query not in (' '.join(cols) + ' ' + str(record)).casefold():
+                continue
+            matched.append(record)
+        return matched
 
     def _detail(self, item, previous):
         if item is None:
@@ -94,7 +129,9 @@ class RecordsPanel(QWidget):
 
 class TimelinePanel(RecordsPanel):
     def __init__(self, parent):
-        super().__init__(parent, ['序号', '时间（UTC+8）', '事件', '状态', '分区偏移', 'inode', '镜像内路径'], [78, 175, 150, 120, 100, 100], '搜索时间、事件、路径、状态或分区')
+        super().__init__(parent, ['序号', '时间（UTC+8）', '事件', '状态', '分区偏移', 'inode', '镜像内路径'],
+                         [78, 175, 155, 125, 115, 100], '搜索时间、事件、路径、状态或分区',
+                         filter_columns=(2, 3, 4), sort_columns=(0, 1))
         self.search.textChanged.disconnect(self._populate)
         self.search.setPlaceholderText('输入时间、事件、路径、状态或分区，按回车搜索')
         self.search.returnPressed.connect(self._search)
@@ -120,13 +157,12 @@ class TimelinePanel(RecordsPanel):
         self._offset = 0
         self._descending = False
         self._sort_column = 0
-        header = self.table.header()
-        header.setSectionsClickable(True)
-        header.setSortIndicatorShown(True)
-        header.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
-        header.sectionClicked.connect(self._toggle_sort)
+        self.header.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+        self.header.sort_requested.connect(self._toggle_sort)
         for column in (0, 1):
             self.table.headerItem().setToolTip(column, '单击切换正序/倒序')
+        for column in (2, 3, 4):
+            self.table.headerItem().setToolTip(column, '单击下拉筛选')
 
     def _toggle_sort(self, column):
         if column not in (0, 1):
@@ -134,18 +170,33 @@ class TimelinePanel(RecordsPanel):
         self._descending = not self._descending
         self._sort_column = column
         order = Qt.SortOrder.DescendingOrder if self._descending else Qt.SortOrder.AscendingOrder
-        self.table.header().setSortIndicator(column, order)
+        self.header.setSortIndicator(column, order)
         self._offset = 0
         self._populate()
+
+    def _refresh_filter_options(self):
+        if hasattr(self.records, 'filter_options'):
+            events, statuses, offsets = self.records.filter_options()
+        else:
+            events = sorted({r['event'] for r in self.records})
+            statuses = sorted({r['status'] for r in self.records})
+            offsets = [str(o) for o in sorted({r['offset'] for r in self.records})]
+        self.header.set_filter_options(2, events)
+        self.header.set_filter_options(3, statuses)
+        self.header.set_filter_options(4, offsets)
+
+    def _on_header_filter(self, column, value):
+        self._search()
 
     def set_text(self, result):
         self._start = result if callable(result) else None
         self.build.setVisible(self._start is not None)
         self.search.clear()
+        self.header.clear_filters(emit=False)
         self._offset = 0
         self._descending = False
         self._sort_column = 0
-        self.table.header().setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+        self.header.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         if self._start:
             result = ('大清单 · 点击生成时间线，在后台整理事件。', [])
         hint, records, *task = result
@@ -156,17 +207,36 @@ class TimelinePanel(RecordsPanel):
         self._current_number = '—'
         super().set_text((hint, records))
 
+    @staticmethod
+    def _row_matches(row, query, filters):
+        if filters:
+            if 2 in filters and row['event'] != filters[2]:
+                return False
+            if 3 in filters and row['status'] != filters[3]:
+                return False
+            if 4 in filters and str(row['offset']) != filters[4]:
+                return False
+        if not query:
+            return True
+        return query in str(row).casefold() or query in str(row['time']).replace('T', ' ').casefold()
+
     def _search(self):
         query = self.search.text().strip().casefold()
+        filters = self.header.active_filters()
         if self._search_task:
             records = self.records
-            if query:
-                self._search_task('筛选时间线', lambda: records.matching(query), self._set_matches)
+            if query or filters:
+                if hasattr(records, 'matching'):
+                    self._search_task('筛选时间线', lambda: records.matching(query, filters), self._set_matches)
+                else:
+                    self._search_task('筛选时间线',
+                                      lambda: [i for i, r in enumerate(records) if self._row_matches(r, query, filters)],
+                                      self._set_matches)
             else:
                 self._set_matches(range(len(records)))
             return
-        self._matches = ([r for r in self.records if query in str(r).casefold() or
-                          query in str(r['time']).replace('T', ' ').casefold()] if query else self.records)
+        self._matches = ([r for r in self.records if self._row_matches(r, query, filters)]
+                         if (query or filters) else self.records)
         self._offset = 0
         self._populate()
 
@@ -219,8 +289,37 @@ class TimelinePanel(RecordsPanel):
 
 class FindingsPanel(RecordsPanel):
     def __init__(self, parent):
-        super().__init__(parent, ['镜像内路径', '状态', '分区偏移', 'inode', '记录数', '最近记录（UTC+8）'], [340, 100, 100, 100, 80], '搜索文件、笔记、摘要、人员或比对结果')
+        super().__init__(parent, ['镜像内路径', '状态', '分区偏移', 'inode', '记录数', '最近记录（UTC+8）'],
+                         [340, 115, 115, 100, 80], '搜索文件、笔记、摘要、人员或比对结果',
+                         filter_columns=(1, 2))
         self.split.setSizes([240, 430])
+        self._export_callback = None
+        controls = QHBoxLayout()
+        self.layout().removeWidget(self.status)
+        controls.addWidget(self.status, 1)
+        self.export_button = QPushButton('一键导出')
+        self.export_button.setEnabled(False)
+        self.export_button.clicked.connect(self._export_visible)
+        controls.addWidget(self.export_button)
+        self.layout().insertLayout(0, controls)
+        for column in (1, 2):
+            self.table.headerItem().setToolTip(column, '单击下拉筛选')
+
+    def set_text(self, result):
+        status, records, *extra = result
+        self._export_callback = extra[0] if extra else None
+        super().set_text((status, records))
+
+    def _populate(self):
+        super()._populate()
+        self.export_button.setEnabled(bool(self._export_callback and self.table.topLevelItemCount()))
+
+    def _export_visible(self):
+        if not self._export_callback:
+            return
+        groups = [self.table.topLevelItem(i).data(0, Qt.ItemDataRole.UserRole)
+                  for i in range(self.table.topLevelItemCount())]
+        self._export_callback(groups)
 
     def columns(self, items):
         r = items[-1]
