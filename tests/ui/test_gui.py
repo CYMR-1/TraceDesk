@@ -733,11 +733,12 @@ class NewCaseDialogTests(QtTests):
         dialog = BundleExportDialog(root, rows)
         self.addCleanup(dialog.deleteLater)
 
-        # 顶部清晰列出中文缺失清单，且默认勾选全部现存副本
+        # 顶部清晰列出中文缺失清单，且默认勾选全部现存副本；复选框列与序号列分离不省略
         self.assertIn('QuickCryptoOTFE.exe', dialog.banner_label.text())
         self.assertIn('缺失', dialog.banner_label.text())
         self.assertEqual(dialog.selected_indices(), [1, 3])
-        self.assertEqual(dialog.table.topLevelItem(1).text(1), '缺失')
+        self.assertEqual([dialog.table.topLevelItem(i).text(1) for i in range(3)], ['1', '2', '3'])
+        self.assertEqual(dialog.table.topLevelItem(1).text(2), '缺失')
         self.assertFalse(bool(dialog.table.topLevelItem(1).flags() & Qt.ItemFlag.ItemIsEnabled))
 
         # “仅看缺失项”筛选与复制缺失清单

@@ -579,10 +579,13 @@ class BundleExportDialog(QDialog):
         self.table.setRootIsDecorated(False)
         self.table.setAlternatingRowColors(True)
         self.table.setUniformRowHeights(True)
-        self.table.setHeaderLabels(['序号', '副本状态', '本地副本路径', '镜像内路径', '字节数', '导出时间（UTC+8）'])
+        self.table.setHeaderLabels(['', '序号', '副本状态', '本地副本路径', '镜像内路径', '字节数', '导出时间（UTC+8）'])
+        self.table.headerItem().setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+        self.table.headerItem().setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
         for row in self.rows:
             status_text = '正常' if row['exists'] else '缺失'
             item = QTreeWidgetItem([
+                '',
                 str(row['index']),
                 status_text,
                 row['display_path'],
@@ -592,31 +595,36 @@ class BundleExportDialog(QDialog):
             ])
             item.setData(0, Qt.ItemDataRole.UserRole, row)
             item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
-            item.setTextAlignment(4, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            item.setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
+            item.setTextAlignment(5, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             if row['exists']:
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(0, Qt.CheckState.Checked)
-                item.setForeground(1, QBrush(QColor('#086b55')))
-                item.setBackground(1, QBrush(QColor('#eaf6f0')))
+                item.setForeground(2, QBrush(QColor('#086b55')))
+                item.setBackground(2, QBrush(QColor('#eaf6f0')))
             else:
                 item.setFlags((item.flags() | Qt.ItemFlag.ItemIsUserCheckable) & ~Qt.ItemFlag.ItemIsEnabled)
                 item.setCheckState(0, Qt.CheckState.Unchecked)
-                item.setForeground(1, QBrush(QColor('#b64262')))
-                item.setBackground(1, QBrush(QColor('#fdf0f3')))
-                font = item.font(1)
+                item.setForeground(2, QBrush(QColor('#b64262')))
+                item.setBackground(2, QBrush(QColor('#fdf0f3')))
+                font = item.font(2)
                 font.setBold(True)
-                item.setFont(1, font)
-                item.setToolTip(2, row['missing_reason'])
+                item.setFont(2, font)
+                item.setToolTip(3, row['missing_reason'])
             self.table.addTopLevelItem(item)
 
         header = self.table.header()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.setColumnWidth(2, 220)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setColumnWidth(0, 38)
+        self.table.setColumnWidth(1, 56)
+        self.table.setColumnWidth(2, 76)
+        self.table.setColumnWidth(3, 210)
         self.table.itemChanged.connect(lambda *_: self._update_summary())
         layout.addWidget(self.table, 1)
 
