@@ -293,11 +293,17 @@ class TimelinePanel(RecordsPanel):
 
 class FindingsPanel(RecordsPanel):
     def __init__(self, parent):
-        super().__init__(parent, ['镜像内路径', '状态', '分区偏移', 'inode', '记录数', '最近记录（UTC+8）'],
-                         [340, 115, 115, 100, 80], '搜索文件、笔记、摘要、人员或比对结果',
-                         filter_columns=(1, 2))
+        super().__init__(parent, ['序号', '镜像内路径', '状态', '分区偏移', 'inode', '记录数', '最近记录（UTC+8）'],
+                         [68, 340, 115, 115, 100, 80], '搜索文件、笔记、摘要、人员或比对结果',
+                         filter_columns=(2, 3), sort_columns=(0, 6))
         self.split.setSizes([240, 430])
         self._export_callback = None
+        self._original = []
+        self._numbers = {}
+        self._descending = False
+        self._sort_column = 0
+        self.header.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+        self.header.sort_requested.connect(self._toggle_sort)
         controls = QHBoxLayout()
         self.layout().removeWidget(self.status)
         controls.addWidget(self.status, 1)
@@ -306,13 +312,34 @@ class FindingsPanel(RecordsPanel):
         self.export_button.clicked.connect(self._export_visible)
         controls.addWidget(self.export_button)
         self.layout().insertLayout(0, controls)
-        for column in (1, 2):
+        for column in (0, 6):
+            self.table.headerItem().setToolTip(column, '单击切换正序/倒序')
+        for column in (2, 3):
             self.table.headerItem().setToolTip(column, '单击下拉筛选')
+
+    def _sorted_records(self):
+        if self._sort_column == 6:
+            return sorted(self._original,
+                          key=lambda items: (display_time(items[-1]['timestamp']), self._numbers[id(items)]),
+                          reverse=self._descending)
+        return list(reversed(self._original)) if self._descending else list(self._original)
+
+    def _toggle_sort(self, column):
+        if column not in (0, 6):
+            return
+        self._descending = not self._descending
+        self._sort_column = column
+        order = Qt.SortOrder.DescendingOrder if self._descending else Qt.SortOrder.AscendingOrder
+        self.header.setSortIndicator(column, order)
+        self.records = self._sorted_records()
+        self._populate()
 
     def set_text(self, result):
         status, records, *extra = result
         self._export_callback = extra[0] if extra else None
-        super().set_text((status, records))
+        self._original = list(records)
+        self._numbers = {id(items): index for index, items in enumerate(self._original, 1)}
+        super().set_text((status, self._sorted_records()))
 
     def _populate(self):
         super()._populate()
@@ -328,7 +355,8 @@ class FindingsPanel(RecordsPanel):
     def columns(self, items):
         r = items[-1]
         d = r['details']
-        return [r['subject'], '已删除' if d['deleted'] else '现存', str(d['offset']), str(d['inode']), str(len(items)), display_time(r['timestamp'], compact=True)]
+        return [str(self._numbers.get(id(items), '')), r['subject'], '已删除' if d['deleted'] else '现存',
+                str(d['offset']), str(d['inode']), str(len(items)), display_time(r['timestamp'], compact=True)]
 
     def details(self, items):
         first = items[0]
