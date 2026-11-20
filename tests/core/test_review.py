@@ -236,3 +236,50 @@ class ReviewTests(unittest.TestCase):
         self.assertIn('### 1. README.TXT', report_text)
         self.assertIn('| 序号 | 时间 (UTC+8) | 来源 | 操作人员 | 操作 | 对象 | 结果 |', report_text)
         self.assertIn('导出取证发现', report_text)
+
+    def test_bundle_missing_exports_chinese_error_and_selective_export(self):
+        from forensic.core.review import inspect_bundle_exports
+        image = self.root / 'evidence' / 'selective.dd'
+        create(image)
+        case = Case.create(self.root / 'cases', 'SEL-1', '测试人员', '选择性复核包')
+        self.addCleanup(case.close)
+        case.load(image)
+        case.scan_all()
+        readme = next(e for e in case.data['inventory'] if e['path'] == 'README.TXT')
+        notes = next(e for e in case.data['inventory'] if e['path'] == 'NOTES.TXT')
+        case_txt = next(e for e in case.data['inventory'] if e['path'] == 'DOCS/CASE.TXT')
+        p1 = case.export(readme)
+        p2 = case.export(notes)
+        p3 = case.export(case_txt)
+        # 删除第 2 个导出副本以模拟本地缺失
+        p2.unlink()
+
+        rows = inspect_bundle_exports(case)
+        self.assertEqual([r['exists'] for r in rows], [True, False, True])
+
+        # 默认打包应抛出清晰的中文缺失清单
+        with self.assertRaises(FileNotFoundError) as raised:
+            build_bundle(case)
+        self.assertIn('NOTES.TXT', str(raised.exception))
+        self.assertIn('缺失', str(raised.exception))
+
+        # 自由选择仅导出第 1 个副本（跳过缺失的第 2 个以及未勾选的第 3 个），并独立核验 ZIP
+        bundle = build_bundle(case, selected_indices=[1])
+        expected_sha = bundle.with_suffix('.zip.sha256').read_text(encoding='utf-8').split()[0]
+        verify_bundle(bundle, expected_sha)
+        with ZipFile(bundle) as archive:
+            manifest = json.loads(archive.read('manifest.json'))
+            self.assertEqual([item['source'] for item in manifest['exports']], ['README.TXT'])
+            omitted = {item['export_index']: item['reason'] for item in manifest['omitted_exports']}
+            self.assertEqual(omitted, {2: '本地副本缺失', 3: '导出复核包时未勾选'})
+            self.assertIn('omitted_exports', archive.read('复核说明.txt').decode('utf-8'))
+
+        # skip_missing=True 应打包所有现存副本（#1 和 #3）
+        bundle2 = build_bundle(case, skip_missing=True)
+        expected_sha2 = bundle2.with_suffix('.zip.sha256').read_text(encoding='utf-8').split()[0]
+        verify_bundle(bundle2, expected_sha2)
+        with ZipFile(bundle2) as archive:
+            manifest2 = json.loads(archive.read('manifest.json'))
+            self.assertEqual([item['source'] for item in manifest2['exports']], ['README.TXT', 'DOCS/CASE.TXT'])
+            self.assertEqual(len(manifest2['omitted_exports']), 1)
+            self.assertEqual(manifest2['omitted_exports'][0]['reason'], '本地副本缺失')

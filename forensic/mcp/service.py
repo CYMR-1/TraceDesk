@@ -985,12 +985,18 @@ class CaseService:
         self,
         *,
         case_dir: str,
+        selected_export_indices: list[int] | None = None,
+        skip_missing_exports: bool = False,
         verify_large_image: bool = False,
         actor: str | None = None,
     ) -> dict[str, Any]:
         with self.open_case(case_dir, actor=actor) as case:
             self._ensure_large_image_session(case, verify_if_needed=verify_large_image)
-            bundle_path = build_bundle(case)
+            bundle_path = build_bundle(
+                case,
+                selected_indices=selected_export_indices,
+                skip_missing=skip_missing_exports,
+            )
             sha_file = bundle_path.with_suffix('.zip.sha256')
             latest = case.check_audit()[-1]
             return {
@@ -998,4 +1004,7 @@ class CaseService:
                 'bundle_path': str(bundle_path),
                 'sha256_file': str(sha_file),
                 'sha256': latest['details'].get('sha256', ''),
+                'included_exports': latest['details'].get('included_exports', 0),
+                'omitted_exports': latest['details'].get('omitted_exports', 0),
+                'missing_exports': latest['details'].get('missing_exports', 0),
             }

@@ -5,6 +5,8 @@ import socket
 import tempfile
 import unittest
 
+from unittest.mock import Mock, patch
+
 from PySide6.QtWidgets import QApplication
 
 from forensic.core.case import Case
@@ -50,9 +52,11 @@ class McpDialogTests(QtTests):
         http_cfg = json.loads(dialog.http_edit.toPlainText())
         self.assertEqual(http_cfg['mcpServers']['tracedesk']['url'], f'http://127.0.0.1:{port}/mcp')
 
-        # 验证复制到剪贴板
-        dialog.copy_stdio_json_btn.click()
-        self.assertEqual(QApplication.clipboard().text(), dialog.stdio_edit.toPlainText())
+        # 验证复制到剪贴板（mock 避免受系统剪贴板瞬时占用干扰）
+        fake_clipboard = Mock()
+        with patch('forensic.features.mcp.QApplication.clipboard', return_value=fake_clipboard):
+            dialog.copy_stdio_json_btn.click()
+        fake_clipboard.setText.assert_called_once_with(dialog.stdio_edit.toPlainText())
         self.assertIn('已复制', dialog.feedback_label.text())
 
         # 通过按钮启动本地 HTTP MCP 服务

@@ -4,14 +4,16 @@ import queue
 from time import monotonic
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit,
-                               QMessageBox, QPushButton, QTreeWidget, QTreeWidgetItem,
-                               QVBoxLayout, QWidget)
+from PySide6.QtGui import QBrush, QColor
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFrame, QHBoxLayout,
+                               QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..core.content_search import SearchControl, pattern, search
 from ..core.coverage import SOURCE_FIELDS, source_status
+from ..core.formatting import display_time
 from ..core.preview import PAGE_BYTES
-from ..core.review import build_bundle
+from ..core.review import build_bundle, format_missing_exports, inspect_bundle_exports
 from ..core.tasks import TaskRunner
 from ..engines.tsk import deleted_source_note
 from ..ui.dialogs import edit_evidence_source
@@ -503,6 +505,178 @@ class ReviewPanel(QWidget):
         export_bundle(self.context)
 
 
+class BundleExportDialog(QDialog):
+    """导出复核包前展示缺失副本清单并允许自由勾选要打入复核包的导出副本。"""
+
+    def __init__(self, parent, rows):
+        super().__init__(parent)
+        self.rows = list(rows)
+        self.missing_rows = [row for row in self.rows if not row['exists']]
+        self.available_rows = [row for row in self.rows if row['exists']]
+        self._only_missing = False
+        self.setWindowTitle('导出复核包 · 选择导出副本')
+        self.resize(860, 560)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        banner = QFrame()
+        banner.setObjectName('bundleExportBanner')
+        banner_layout = QVBoxLayout(banner)
+        banner_layout.setContentsMargins(12, 10, 12, 10)
+        banner_layout.setSpacing(6)
+        self.banner_label = QLabel()
+        self.banner_label.setWordWrap(True)
+        if self.missing_rows:
+            banner.setStyleSheet(
+                'QFrame#bundleExportBanner { background: #f8f4ea; border: 1px solid #eadcc0; border-radius: 6px; }'
+            )
+            self.banner_label.setStyleSheet('color: #6e5218; background: transparent;')
+            missing_preview = '\n'.join(
+                f'• #{row["index"]}  {row["display_path"]}（来源：{row["source"]}，{row["size"]:,} 字节）'
+                for row in self.missing_rows
+            )
+            self.banner_label.setText(
+                f'检测到 {len(self.missing_rows)} 条历史导出副本在本地 exports 目录中缺失'
+                '（可能已被手动清理或被安全软件隔离）。缺失项已标红且不可勾选；'
+                '您可以自由勾选现存副本继续生成复核包，未纳入项会如实记入 manifest.json 的 omitted_exports：\n'
+                + missing_preview
+            )
+        else:
+            banner.setStyleSheet(
+                'QFrame#bundleExportBanner { background: #eaf6f0; border: 1px solid #c8e6d7; border-radius: 6px; }'
+            )
+            self.banner_label.setStyleSheet('color: #086b55; background: transparent;')
+            self.banner_label.setText(
+                f'共 {len(self.available_rows)} 条历史导出副本均完整存在。默认全部勾选，您可自由取消不需要打入复核包的副本；'
+                '未勾选项将记入 manifest.json 的 omitted_exports。'
+            )
+        banner_layout.addWidget(self.banner_label)
+        layout.addWidget(banner)
+
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(8)
+        self.select_all_button = QPushButton('全选可用副本')
+        self.select_all_button.setProperty('role', 'soft')
+        self.select_all_button.clicked.connect(lambda: self._set_all_checked(True))
+        self.select_none_button = QPushButton('全不选')
+        self.select_none_button.clicked.connect(lambda: self._set_all_checked(False))
+        toolbar.addWidget(self.select_all_button)
+        toolbar.addWidget(self.select_none_button)
+
+        self.toggle_missing_button = QPushButton(f'仅看缺失项 ({len(self.missing_rows)})')
+        self.toggle_missing_button.clicked.connect(self._toggle_missing_filter)
+        self.copy_missing_button = QPushButton('复制缺失清单')
+        self.copy_missing_button.clicked.connect(self._copy_missing)
+        self.toggle_missing_button.setVisible(bool(self.missing_rows))
+        self.copy_missing_button.setVisible(bool(self.missing_rows))
+        toolbar.addWidget(self.toggle_missing_button)
+        toolbar.addWidget(self.copy_missing_button)
+        toolbar.addStretch(1)
+        layout.addLayout(toolbar)
+
+        self.table = QTreeWidget()
+        self.table.setRootIsDecorated(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setUniformRowHeights(True)
+        self.table.setHeaderLabels(['序号', '副本状态', '本地副本路径', '镜像内路径', '字节数', '导出时间（UTC+8）'])
+        for row in self.rows:
+            status_text = '正常' if row['exists'] else '缺失'
+            item = QTreeWidgetItem([
+                str(row['index']),
+                status_text,
+                row['display_path'],
+                row['source'],
+                f'{row["size"]:,}',
+                display_time(row['time'], compact=True) if row['time'] else '未记录',
+            ])
+            item.setData(0, Qt.ItemDataRole.UserRole, row)
+            item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+            item.setTextAlignment(4, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            if row['exists']:
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(0, Qt.CheckState.Checked)
+                item.setForeground(1, QBrush(QColor('#086b55')))
+                item.setBackground(1, QBrush(QColor('#eaf6f0')))
+            else:
+                item.setFlags((item.flags() | Qt.ItemFlag.ItemIsUserCheckable) & ~Qt.ItemFlag.ItemIsEnabled)
+                item.setCheckState(0, Qt.CheckState.Unchecked)
+                item.setForeground(1, QBrush(QColor('#b64262')))
+                item.setBackground(1, QBrush(QColor('#fdf0f3')))
+                font = item.font(1)
+                font.setBold(True)
+                item.setFont(1, font)
+                item.setToolTip(2, row['missing_reason'])
+            self.table.addTopLevelItem(item)
+
+        header = self.table.header()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setColumnWidth(2, 220)
+        self.table.itemChanged.connect(lambda *_: self._update_summary())
+        layout.addWidget(self.table, 1)
+
+        footer = QHBoxLayout()
+        self.summary_label = QLabel()
+        self.summary_label.setProperty('role', 'muted')
+        footer.addWidget(self.summary_label, 1)
+        cancel_btn = QPushButton('取消')
+        cancel_btn.clicked.connect(self.reject)
+        self.confirm_button = QPushButton('生成复核包')
+        self.confirm_button.setProperty('role', 'accent')
+        self.confirm_button.clicked.connect(self.accept)
+        footer.addWidget(cancel_btn)
+        footer.addWidget(self.confirm_button)
+        layout.addLayout(footer)
+        self._update_summary()
+
+    def _set_all_checked(self, checked):
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self.table.blockSignals(True)
+        try:
+            for i in range(self.table.topLevelItemCount()):
+                item = self.table.topLevelItem(i)
+                row = item.data(0, Qt.ItemDataRole.UserRole)
+                if row['exists']:
+                    item.setCheckState(0, state)
+        finally:
+            self.table.blockSignals(False)
+        self._update_summary()
+
+    def _toggle_missing_filter(self):
+        self._only_missing = not self._only_missing
+        for i in range(self.table.topLevelItemCount()):
+            item = self.table.topLevelItem(i)
+            row = item.data(0, Qt.ItemDataRole.UserRole)
+            item.setHidden(self._only_missing and row['exists'])
+        self.toggle_missing_button.setText('显示全部' if self._only_missing else f'仅看缺失项 ({len(self.missing_rows)})')
+
+    def _copy_missing(self):
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(format_missing_exports(self.missing_rows))
+        self.summary_label.setText('已复制缺失副本清单到剪贴板')
+
+    def selected_indices(self):
+        chosen = []
+        for i in range(self.table.topLevelItemCount()):
+            item = self.table.topLevelItem(i)
+            row = item.data(0, Qt.ItemDataRole.UserRole)
+            if row['exists'] and item.checkState(0) == Qt.CheckState.Checked:
+                chosen.append(row['index'])
+        return chosen
+
+    def _update_summary(self):
+        chosen = len(self.selected_indices())
+        missing = len(self.missing_rows)
+        extra = f'；另有 {missing} 条缺失副本将记入 omitted_exports' if missing else ''
+        self.summary_label.setText(f'已选 {chosen} / {len(self.available_rows)} 个可用副本{extra}')
+
+
 def export_bundle(context):
     if not context.available():
         return
@@ -510,8 +684,25 @@ def export_bundle(context):
     if not case.data['evidence']:
         QMessageBox.information(context.root, '提示', '请先加载镜像。')
         return
-    context.task('校验并生成复核包', lambda: build_bundle(case),
-                 lambda path: ExportResultDialog(context.root, path, '复核包已生成').exec())
+    try:
+        rows = inspect_bundle_exports(case)
+    except Exception as error:
+        QMessageBox.critical(context.root, '检查导出副本失败', str(error))
+        return
+    selected_indices = None
+    if rows:
+        dialog = BundleExportDialog(context.root, rows)
+        try:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            selected_indices = dialog.selected_indices()
+        finally:
+            dialog.deleteLater()
+    context.task(
+        '校验并生成复核包',
+        lambda: build_bundle(case, selected_indices=selected_indices),
+        lambda path: ExportResultDialog(context.root, path, '复核包已生成').exec(),
+    )
 
 
 FEATURE = Feature('review', requires=('evidence', 'files'), actions=(

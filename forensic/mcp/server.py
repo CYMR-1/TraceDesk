@@ -266,6 +266,17 @@ class ReportActionInput(_CaseBaseInput):
     verify_large_image: bool = Field(default=False, description='大容量镜像在生成正式报告或复核包前需要本次会话校验，设为 true 可自动复算')
 
 
+class ReviewBundleInput(ReportActionInput):
+    selected_export_indices: Optional[list[int]] = Field(
+        default=None,
+        description='可选要纳入复核包的导出记录序号列表（从 1 开始）；省略时默认纳入全部历史导出',
+    )
+    skip_missing_exports: bool = Field(
+        default=False,
+        description='本地 exports 目录中存在缺失副本时，是否自动跳过缺失项并在 manifest.json 的 omitted_exports 中标注（默认 false）',
+    )
+
+
 def _to_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
 
@@ -1017,12 +1028,14 @@ def create_server(
             openWorldHint=False,
         ),
     )
-    async def tracedesk_build_review_bundle(params: ReportActionInput) -> str:
-        """构建包含报告、导出副本、搜索记录、审计链、SHA256SUMS 与核验脚本的复核包 ZIP。"""
+    async def tracedesk_build_review_bundle(params: ReviewBundleInput) -> str:
+        """构建包含报告、导出副本、搜索记录、审计链、SHA256SUMS 与核验脚本的复核包 ZIP；支持按序号选择副本或跳过缺失项。"""
         try:
             data = await _run_sync(
                 service.build_review_bundle,
                 case_dir=params.case_dir,
+                selected_export_indices=params.selected_export_indices,
+                skip_missing_exports=params.skip_missing_exports,
                 verify_large_image=params.verify_large_image,
                 actor=params.actor,
             )

@@ -719,6 +719,46 @@ class NewCaseDialogTests(QtTests):
             dialog.create()
         self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
 
+    def test_bundle_export_dialog_shows_missing_list_and_allows_selective_choice(self):
+        from forensic.features.review import BundleExportDialog
+        root, _ = self.controller()
+        rows = [
+            dict(index=1, display_path='exports\\README.TXT', source='README.TXT', size=65,
+                 time='2026-11-21T01:00:00+08:00', exists=True, missing_reason=''),
+            dict(index=2, display_path='exports\\QuickCryptoOTFE.exe', source='Program Files (x86)/Quick Crypto/QuickCryptoOTFE.exe',
+                 size=1842584, time='2026-11-21T01:01:00+08:00', exists=False, missing_reason='本地副本缺失（exports\\QuickCryptoOTFE.exe）'),
+            dict(index=3, display_path='exports\\CASE.TXT', source='DOCS/CASE.TXT', size=38,
+                 time='2026-11-21T01:02:00+08:00', exists=True, missing_reason=''),
+        ]
+        dialog = BundleExportDialog(root, rows)
+        self.addCleanup(dialog.deleteLater)
+
+        # 顶部清晰列出中文缺失清单，且默认勾选全部现存副本
+        self.assertIn('QuickCryptoOTFE.exe', dialog.banner_label.text())
+        self.assertIn('缺失', dialog.banner_label.text())
+        self.assertEqual(dialog.selected_indices(), [1, 3])
+        self.assertEqual(dialog.table.topLevelItem(1).text(1), '缺失')
+        self.assertFalse(bool(dialog.table.topLevelItem(1).flags() & Qt.ItemFlag.ItemIsEnabled))
+
+        # “仅看缺失项”筛选与复制缺失清单
+        dialog.toggle_missing_button.click()
+        self.assertTrue(dialog.table.topLevelItem(0).isHidden())
+        self.assertFalse(dialog.table.topLevelItem(1).isHidden())
+        dialog.toggle_missing_button.click()
+        self.assertFalse(dialog.table.topLevelItem(0).isHidden())
+        fake_clipboard = Mock()
+        with patch('forensic.features.review.QApplication.clipboard', return_value=fake_clipboard):
+            dialog.copy_missing_button.click()
+        self.assertIn('QuickCryptoOTFE.exe', fake_clipboard.setText.call_args.args[0])
+
+        # 自由勾选/取消勾选副本
+        dialog.select_none_button.click()
+        self.assertEqual(dialog.selected_indices(), [])
+        dialog.table.topLevelItem(2).setCheckState(0, Qt.CheckState.Checked)
+        self.assertEqual(dialog.selected_indices(), [3])
+        dialog.select_all_button.click()
+        self.assertEqual(dialog.selected_indices(), [1, 3])
+
 
 if __name__ == '__main__':
     unittest.main()
