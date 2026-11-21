@@ -829,6 +829,20 @@ dependencies = [
 [[package]]
 name = "tracedesk-cli"
 version = "0.1.0"
+dependencies = [
+ "adler2",
+ "flate2",
+ "memchr",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tracedesk-core",
+ "tracedesk-engines",
+ "zip",
+]
 
 [[package]]
 name = "tracedesk-core"
