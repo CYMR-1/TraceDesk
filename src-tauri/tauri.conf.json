@@ -5,7 +5,7 @@
   "identifier": "com.tracedesk.forensic",
   "build": {
     "frontendDist": "../frontend/dist",
-    "devUrl": "http://localhost:5173"
+    "devUrl": "http://localhost:1420"
   },
   "app": {
     "withGlobalTauri": true,

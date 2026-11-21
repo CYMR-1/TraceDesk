@@ -13,6 +13,8 @@ fn main() {
             );
         }
     }
+    println!("cargo:rerun-if-changed=../frontend/dist");
+    println!("cargo:rerun-if-changed=../frontend/dist/index.html");
     tauri_build::build();
 
     // On Windows, `tauri_build::build()` links `resource.lib` (containing the Common Controls v6

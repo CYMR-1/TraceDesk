@@ -17,7 +17,7 @@
 | `demo.dd` 端到端闭环总耗时（含真实 TSK） | 1,535.75 ms | **727.74 ms** | **2.11×** |
 | 纯 Rust EWF1 多段并行校验 / SIMD 搜索吞吐 | — | **501.69 MiB/s** / **14.44 GiB/s** | 原生并发 |
 
-三大 Release 原生二进制体积紧凑：`tracedesk-desktop.exe` **17.93 MiB**、`tracedesk-mcp.exe` **5.45 MiB**、`tracedesk-cli.exe` **4.43 MiB**。
+三大 Release 原生二进制体积紧凑：`tracedesk-desktop.exe` **19.38 MiB**（已内嵌 `frontend/dist` 生产资源）、`tracedesk-mcp.exe` **5.45 MiB**、`tracedesk-cli.exe` **4.43 MiB**。
 
 ## 目录导航
 
@@ -54,8 +54,8 @@
 ### 2. 一键启动桌面工作台
 
 双击根目录 **启动取证工作台.bat**：
-- 若 `target\release\tracedesk-desktop.exe` 已存在，直接毫秒级拉起原生桌面工作台；
-- 若尚未编译，自动检查 `frontend\dist`（缺失时执行 `npm.cmd ci` 与 `npm.cmd run build`），随后执行 `cargo build --release -p tracedesk-desktop` 并启动桌面端。
+- 若 `target\release\tracedesk-desktop.exe` 已存在，直接拉起原生桌面工作台并在确认窗口创建后自动关闭启动终端；若启动异常或秒退，会保留终端显示错误并输出 `logs\startup.log`（桌面端同时弹窗提示）；
+- 若尚未编译，自动检查 `frontend\dist`（缺失时执行 `npm.cmd ci` 与 `npm.cmd run build`），随后执行 `cargo build --release -p tracedesk-desktop`（默认启用 `custom-protocol` 内嵌前端资源）并启动桌面端。
 
 ### 3. 手动编译、运行与测试
 
