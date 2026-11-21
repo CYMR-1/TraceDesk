@@ -1,0 +1,203 @@
+/**
+ * 模块 2：镜像与文件系统信息页 (evidence)
+ * - 顶栏：镜像摘要与证据来源 + 登记证据来源按钮
+ * - 上半：DossierView（证据固定、EWF 分段镜像、覆盖范围与来源 5 字段、分区概览）
+ * - 下半：分区布局与文件系统 · 原始解析结果（分区下拉 + 导出完整 fsstat + 等宽只读 mmls/fsstat 视图）
+ */
+import React, { useEffect, useMemo, useState } from 'react';
+import { DossierView, type DossierSection } from '../components/DossierView';
+import { UiIcon } from '../components/Icons';
+import { SplitPane } from '../components/SplitPane';
+import { SOURCE_FIELD_LABELS } from '../features/registry';
+import type { CaseSnapshot, EvidenceInfo } from '../types/ipc';
+import { formatBytes } from '../utils/assets';
+
+interface EvidenceInfoModuleProps {
+  snapshot: CaseSnapshot | null;
+  busy: boolean;
+  onRegisterSource: () => void;
+  onExportFsstat: (offset: number) => void;
+}
+
+function buildCoverageSummary(evidence: EvidenceInfo): string {
+  if (evidence.coverageText) return evidence.coverageText;
+  if (evidence.coverage?.text) return evidence.coverage.text;
+  if (!evidence.coverage?.volumes?.length) {
+    return '尚未评估；请运行完整性校验';
+  }
+  return (
+    evidence.coverage.volumes
+      .map((v) => {
+        const endPos = Math.max(v.volumeEnd ?? 0, v.partitionEnd ?? 0) || '未知';
+        return `偏移 ${v.offset} 扇区：${v.status}（${v.filesystem}，声明结束字节位置 ${endPos}，镜像 ${evidence.coverage?.bytes ?? evidence.size} 字节）`;
+      })
+      .join('；') + '。仅判断可识别的声明范围，不能证明原盘无坏扇区或已完整采集。'
+  );
+}
+
+function buildSourceStatus(evidence: EvidenceInfo): string {
+  if (evidence.sourceStatus) return evidence.sourceStatus;
+  const expected = evidence.provenance?.expectedSha256 ?? evidence.provenance?.expected_sha256 ?? '';
+  if (!evidence.sha256) return '本机整镜像 SHA-256 待固定';
+  if (!expected) return '未提供交付方摘要，仅有本机固定值';
+  return expected.toLowerCase() === evidence.sha256.toLowerCase()
+    ? '交付方摘要与本机固定值一致'
+    : '警告：交付方摘要与本机固定值不一致';
+}
+
+export const EvidenceInfoModule: React.FC<EvidenceInfoModuleProps> = ({
+  snapshot,
+  busy,
+  onRegisterSource,
+  onExportFsstat,
+}) => {
+  const evidence = snapshot?.evidence ?? null;
+  const partitions = evidence?.partitions ?? [];
+  const [selectedOffset, setSelectedOffset] = useState<number>(partitions[0]?.offset ?? 0);
+
+  useEffect(() => {
+    if (partitions.length > 0 && !partitions.some((p) => p.offset === selectedOffset)) {
+      setSelectedOffset(partitions[0].offset);
+    }
+  }, [partitions, selectedOffset]);
+
+  const sections = useMemo<DossierSection[]>(() => {
+    if (!evidence || !snapshot) return [];
+
+    const scanMap = new Map(snapshot.partitionScans.map((s) => [s.offset, s]));
+    const fixedAt = evidence.fixedAt ?? evidence.fixed_at;
+
+    const list: DossierSection[] = [
+      {
+        title: '证据固定',
+        rows: [
+          ['镜像路径', evidence.path],
+          ['大小', `${formatBytes(evidence.size)} 字节`],
+          ['固定时间（UTC+8）', fixedAt || '待固定'],
+          ['SHA-256', evidence.sha256 || '待固定'],
+        ],
+      },
+    ];
+
+    if (evidence.format === 'EWF' && evidence.segments) {
+      const totalSegSize = evidence.segments.reduce((acc, s) => acc + s.size, 0);
+      list.push({
+        title: 'EWF 分段镜像',
+        rows: [
+          ['分段数', String(evidence.segments.length)],
+          ['封装总大小（字节）', formatBytes(totalSegSize)],
+          ['逻辑介质大小（字节）', formatBytes(evidence.size)],
+          ['校验方式', '首次解码整个逻辑磁盘，后续逐段复算封装摘要'],
+        ],
+      });
+    }
+
+    const prov = evidence.provenance;
+    const provRows: [string, string][] = SOURCE_FIELD_LABELS.map((f) => {
+      let val = '';
+      if (f.key === 'evidenceId') val = prov?.evidenceId ?? prov?.evidence_id ?? '';
+      else if (f.key === 'expectedSha256') val = prov?.expectedSha256 ?? prov?.expected_sha256 ?? '';
+      else val = prov?.[f.key] ?? '';
+      return [f.label, val || '未登记'];
+    });
+
+    list.push({
+      title: '覆盖范围与证据来源',
+      rows: [
+        ['范围判断', buildCoverageSummary(evidence)],
+        ['交付方摘要比对', buildSourceStatus(evidence)],
+        ...provRows,
+      ],
+    });
+
+    const partRows: [string, string][] = partitions.map((p) => {
+      const scan = scanMap.get(p.offset);
+      const state =
+        scan?.status === 'ready'
+          ? `已读取 ${scan.count ?? 0} 项`
+          : scan?.error || '待读取';
+      return [`偏移 ${p.offset} 扇区`, `${p.description} · ${state}`];
+    });
+
+    list.push({
+      title: '分区概览',
+      rows: partRows.length > 0 ? partRows : [['分区', '未识别到有效分区']],
+    });
+
+    return list;
+  }, [evidence, snapshot, partitions]);
+
+  const rawText = useMemo(() => {
+    if (!evidence) return '';
+    return [evidence.layout || '', snapshot?.fsstat || ''].filter(Boolean).join('\n\n');
+  }, [evidence, snapshot?.fsstat]);
+
+  const subtitle = evidence
+    ? `${partitions.length} 个分区 · ${snapshot?.inventoryCount ?? 0} 个条目 · 应用层只读`
+    : '加载 RAW 镜像或 E01 首段后查看摘要与覆盖范围。';
+
+  return (
+    <div className="td-panel">
+      <div className="td-panel-top-bar">
+        <span className="td-section-title" style={{ flex: 1 }}>
+          镜像摘要与证据来源
+        </span>
+        <button
+          type="button"
+          className="td-btn td-btn--soft"
+          disabled={busy || !evidence}
+          onClick={onRegisterSource}
+        >
+          登记证据来源
+        </button>
+      </div>
+
+      <SplitPane
+        direction="vertical"
+        initialSize={0.56}
+        minFirst={160}
+        minSecond={140}
+        first={<DossierView title="镜像与文件系统" subtitle={subtitle} sections={sections} />}
+        second={
+          <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+            <div className="td-panel-section-bar">
+              <span className="td-section-title" style={{ flex: 1 }}>
+                分区布局与文件系统 · 原始解析结果
+              </span>
+              {evidence && partitions.length > 0 && (
+                <>
+                  <select
+                    className="td-select td-mono"
+                    style={{ fontSize: 12 }}
+                    aria-label="选择导出 fsstat 的分区"
+                    value={selectedOffset}
+                    disabled={busy}
+                    onChange={(e) => setSelectedOffset(Number(e.target.value))}
+                  >
+                    {partitions.map((p) => (
+                      <option key={p.offset} value={p.offset}>
+                        偏移 {p.offset} 扇区
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="td-btn"
+                    disabled={busy}
+                    onClick={() => onExportFsstat(selectedOffset)}
+                  >
+                    <UiIcon name="export" size={14} color="var(--text-secondary)" />
+                    导出完整 fsstat
+                  </button>
+                </>
+              )}
+            </div>
+            <pre className="td-raw-viewer">
+              {rawText || '尚未加载镜像或无原始分区表与文件系统输出。'}
+            </pre>
+          </div>
+        }
+      />
+    </div>
+  );
+};

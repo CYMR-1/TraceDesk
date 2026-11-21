@@ -1,0 +1,1252 @@
+/**
+ * 非 Tauri 浏览器独立预览模式的只读演示降级引擎。
+ * 在真实 Tauri 2 桌面端运行时（window.__TAURI_INTERNALS__ 存在）不会被调用。
+ */
+
+import type {
+  AppPaths,
+  AuditRecordDto,
+  BuildTimelineResponse,
+  BundleMaterialsResponse,
+  CaseSnapshot,
+  EntryView,
+  ExamineFileResponse,
+  ExportFileResponse,
+  ExportFindingsResponse,
+  FindingGroupDto,
+  HashFinishedEvent,
+  HashProgressEvent,
+  HexRowDto,
+  ListAuditLogResponse,
+  ListFindingsResponse,
+  LocateFileResponse,
+  McpStatus,
+  PreviewEncoding,
+  PreviewImageResponse,
+  PreviewPageResponse,
+  QueryFilesPageResponse,
+  QueryTimelinePageResponse,
+  SearchEncoding,
+  SearchFinishedEvent,
+  SearchHitDto,
+  SearchHitsEvent,
+  SearchProgressEvent,
+  StartContentSearchResponse,
+  SuggestCaseDirResponse,
+  TaskProgressEvent,
+  TimelineRowDto,
+  ToolCatalogItem,
+  TreeChildrenResponse,
+  TreeNodeDto,
+} from '../types/ipc';
+
+type EventName =
+  | 'task:progress'
+  | 'hash:progress'
+  | 'hash:finished'
+  | 'search:hits'
+  | 'search:progress'
+  | 'search:finished';
+
+type EventPayloadMap = {
+  'task:progress': TaskProgressEvent;
+  'hash:progress': HashProgressEvent;
+  'hash:finished': HashFinishedEvent;
+  'search:hits': SearchHitsEvent;
+  'search:progress': SearchProgressEvent;
+  'search:finished': SearchFinishedEvent;
+};
+
+type Listener<K extends EventName> = (payload: EventPayloadMap[K]) => void;
+
+const listeners: { [K in EventName]: Set<Listener<K>> } = {
+  'task:progress': new Set(),
+  'hash:progress': new Set(),
+  'hash:finished': new Set(),
+  'search:hits': new Set(),
+  'search:progress': new Set(),
+  'search:finished': new Set(),
+};
+
+export function demoListen<K extends EventName>(event: K, handler: Listener<K>): () => void {
+  listeners[event].add(handler);
+  return () => {
+    listeners[event].delete(handler);
+  };
+}
+
+function emit<K extends EventName>(event: K, payload: EventPayloadMap[K]): void {
+  for (const handler of listeners[event]) {
+    handler(payload);
+  }
+}
+
+const DEMO_SHA256 = '6a8f2c904e5d1b7c3f8a02e941d6c53b7f48e2910a3b5c7d9e1f2a3b4c5d6e7f';
+const DEMO_CASE_TXT_CONTENT = 'Case note inside a nested directory.\nTraceDesk FAT16 演示取证材料（浏览器演示预览模式）。\n';
+const DEMO_DELETED_CONTENT = 'Deleted evidence draft: transfer_id=TD-2026-0091; note=confidential review record.\n';
+const DEMO_PNG_DATA_URL =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="420" height="240" viewBox="0 0 420 240">' +
+      '<rect width="420" height="240" fill="#ECF5FF"/>' +
+      '<rect x="16" y="16" width="388" height="208" rx="8" fill="#FFFFFF" stroke="#BDD9F7" stroke-width="2"/>' +
+      '<text x="210" y="106" text-anchor="middle" font-family="Segoe UI, Microsoft YaHei UI, sans-serif" font-size="18" font-weight="700" fill="#1B5A9D">TraceDesk 演示证据图片预览</text>' +
+      '<text x="210" y="138" text-anchor="middle" font-family="Consolas, monospace" font-size="13" fill="#45586E">EVIDENCE/SAMPLE.PNG · 420 × 240</text>' +
+    '</svg>'
+  );
+
+const DEMO_TOOLS: ToolCatalogItem[] = [
+  { name: 'tracedesk_list_cases', title: '列出案件', category: '案件管理', readOnly: true, summary: '列出案件库目录中的已有取证案件及其摘要状态' },
+  { name: 'tracedesk_create_case', title: '新建案件', category: '案件管理', readOnly: false, summary: '创建隔离的取证案件目录、元数据与审计链起点' },
+  { name: 'tracedesk_get_case_summary', title: '案件总览', category: '案件管理', readOnly: true, summary: '查看案件元数据、镜像哈希、覆盖范围、分区扫描与审计链状态' },
+  { name: 'tracedesk_load_image', title: '加载镜像', category: '证据镜像', readOnly: false, summary: '以只读方式加载 RAW 或 .E01 首段镜像，固定 SHA-256 并识别分区' },
+  { name: 'tracedesk_verify_integrity', title: '校验完整性', category: '证据镜像', readOnly: false, summary: '复算镜像 SHA-256 并与初始固定基线比对，更新校验记录' },
+  { name: 'tracedesk_register_source', title: '登记证据来源', category: '证据镜像', readOnly: false, summary: '登记证据编号、交付方、采集时间/工具和交付方 SHA-256' },
+  { name: 'tracedesk_scan_partitions', title: '扫描分区清单', category: '证据镜像', readOnly: false, summary: '扫描全部分区或指定偏移分区，建立/刷新完整文件清单' },
+  { name: 'tracedesk_list_files', title: '浏览与筛选文件', category: '文件分析', readOnly: true, summary: '按分区、路径前缀、后缀、关键词和状态分页查询镜像内文件' },
+  { name: 'tracedesk_preview_file', title: '预览文件内容', category: '文件分析', readOnly: true, summary: '按页读取文件或系统区域的文本（多编码）与十六进制转储' },
+  { name: 'tracedesk_search_content', title: '搜索文件内容', category: '文件分析', readOnly: false, summary: '按 UTF-8 / UTF-16LE / GBK / HEX 精确搜索全案或单文件字节' },
+  { name: 'tracedesk_examine_file', title: '计算文件哈希/比对', category: '文件分析', readOnly: false, summary: '直接从只读镜像计算文件 SHA-256，或与本地副本核验一致性' },
+  { name: 'tracedesk_record_finding', title: '记录取证发现', category: '取证发现', readOnly: false, summary: '绑定镜像摘要、分区偏移、路径与 inode 写入结构化取证笔记' },
+  { name: 'tracedesk_list_findings', title: '查询取证发现', category: '取证发现', readOnly: true, summary: '按文件归组查看取证笔记、哈希计算与副本比对记录' },
+  { name: 'tracedesk_query_timeline', title: '查询 MACB 时间线', category: '时间线与审计', readOnly: true, summary: '按事件类型、状态、分区偏移与关键词分页查询 MACB 时间线' },
+  { name: 'tracedesk_query_audit_log', title: '核验并查询审计日志', category: '时间线与审计', readOnly: true, summary: '核验审计哈希链完整性，并按操作/人员/结果分页检索日志' },
+  { name: 'tracedesk_export_file', title: '导出单个文件', category: '导出与报告', readOnly: false, summary: '导出镜像中现存或已删除文件到案件 exports 目录并记录副本哈希' },
+  { name: 'tracedesk_export_findings', title: '一键导出取证发现', category: '导出与报告', readOnly: false, summary: '批量导出取证发现涉及的文件副本及 Markdown 汇总清单' },
+  { name: 'tracedesk_generate_report', title: '生成 Markdown 报告', category: '导出与报告', readOnly: false, summary: '执行完整性校验并生成分节 Markdown 取证报告' },
+  { name: 'tracedesk_build_review_bundle', title: '构建复核包 ZIP', category: '导出与报告', readOnly: false, summary: '生成含报告、副本、搜索记录、审计链与 SHA256SUMS 的复核包' },
+];
+
+const DEMO_ENTRIES: EntryView[] = [
+  {
+    entryId: '2048:3:0',
+    name: 'DOCS',
+    path: 'DOCS',
+    status: '现存',
+    size: 2048,
+    inode: '3',
+    mtime: '2026-03-10 09:15:00',
+    atime: '2026-03-10 09:15:00',
+    ctime: '不支持（FAT16）',
+    crtime: '2026-03-10 09:12:00',
+    offset: 2048,
+    directory: true,
+    deleted: false,
+    mode: 'd/drwxrwxrwx',
+    filesystem: 'FAT16',
+    canExport: false,
+    iconKind: 'folder',
+  },
+  {
+    entryId: '2048:5:0',
+    name: 'CASE.TXT',
+    path: 'DOCS/CASE.TXT',
+    status: '现存',
+    size: new TextEncoder().encode(DEMO_CASE_TXT_CONTENT).length,
+    inode: '5',
+    mtime: '2026-03-10 09:16:22',
+    atime: '2026-03-10 10:00:00',
+    ctime: '不支持（FAT16）',
+    crtime: '2026-03-10 09:15:10',
+    offset: 2048,
+    directory: false,
+    deleted: false,
+    mode: 'r/rrwxrwxrwx',
+    filesystem: 'FAT16',
+    canExport: true,
+    iconKind: 'file',
+  },
+  {
+    entryId: '2048:7:1',
+    name: 'DRAFT_DEL.TXT',
+    path: 'DOCS/DRAFT_DEL.TXT',
+    status: '已删除',
+    size: new TextEncoder().encode(DEMO_DELETED_CONTENT).length,
+    inode: '7',
+    mtime: '2026-03-10 09:20:04',
+    atime: '2026-03-10 09:22:00',
+    ctime: '不支持（FAT16）',
+    crtime: '2026-03-10 09:18:30',
+    offset: 2048,
+    directory: false,
+    deleted: true,
+    mode: 'r/rrwxrwxrwx',
+    filesystem: 'FAT16',
+    canExport: true,
+    iconKind: 'file',
+  },
+  {
+    entryId: '2048:9:0',
+    name: 'SAMPLE.PNG',
+    path: 'EVIDENCE/SAMPLE.PNG',
+    status: '现存',
+    size: 468,
+    inode: '9',
+    mtime: '2026-03-10 09:25:14',
+    atime: '2026-03-10 09:25:14',
+    ctime: '不支持（FAT16）',
+    crtime: '2026-03-10 09:25:12',
+    offset: 2048,
+    directory: false,
+    deleted: false,
+    mode: 'r/rrwxrwxrwx',
+    filesystem: 'FAT16',
+    canExport: true,
+    iconKind: 'image',
+  },
+  {
+    entryId: '2048:8:0',
+    name: 'EVIDENCE',
+    path: 'EVIDENCE',
+    status: '现存',
+    size: 2048,
+    inode: '8',
+    mtime: '2026-03-10 09:25:00',
+    atime: '2026-03-10 09:25:00',
+    ctime: '不支持（FAT16）',
+    crtime: '2026-03-10 09:25:00',
+    offset: 2048,
+    directory: true,
+    deleted: false,
+    mode: 'd/drwxrwxrwx',
+    filesystem: 'FAT16',
+    canExport: false,
+    iconKind: 'folder',
+  },
+  {
+    entryId: '2048:11:0',
+    name: 'LEDGER.CSV',
+    path: 'LEDGER.CSV',
+    status: '现存',
+    size: 164,
+    inode: '11',
+    mtime: '2026-03-10 09:30:40',
+    atime: '2026-03-10 09:30:40',
+    ctime: '不支持（FAT16）',
+    crtime: '2026-03-10 09:30:02',
+    offset: 2048,
+    directory: false,
+    deleted: false,
+    mode: 'r/rrwxrwxrwx',
+    filesystem: 'FAT16',
+    canExport: true,
+    iconKind: 'table',
+  },
+  {
+    entryId: '2048:0:0',
+    name: '$MBR',
+    path: '$MBR',
+    status: '系统区域',
+    size: 512,
+    inode: '0',
+    mtime: '—',
+    atime: '—',
+    ctime: '—',
+    crtime: '—',
+    offset: 2048,
+    directory: false,
+    deleted: false,
+    mode: 'v/vrwxrwxrwx',
+    filesystem: 'FAT16',
+    canExport: false,
+    iconKind: 'system',
+  },
+];
+
+const DEMO_FILE_TEXTS: Record<string, string> = {
+  '2048:5:0': DEMO_CASE_TXT_CONTENT,
+  '2048:7:1': DEMO_DELETED_CONTENT,
+  '2048:11:0': 'seq,time_utc8,account,amount,remark\n1,2026-03-10 09:12:00,ACC-001,12800.00,demo transfer\n2,2026-03-10 09:28:15,ACC-002,4560.50,review note\n',
+  '2048:9:0': '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x01\xa4\x00\x00\x00\xf0\x08\x06\x00\x00\x00',
+};
+
+function buildInitialCase(): CaseSnapshot {
+  return {
+    caseDir: 'C:\\TraceDesk\\cases\\DEMO-01-演示人员-FAT16演示镜像',
+    id: 'demo-case-001',
+    number: 'DEMO-01',
+    examiner: '演示人员',
+    target: 'FAT16 演示镜像',
+    created: '2026-03-10 09:00:00',
+    custodyState: 'verified',
+    summaryLine1: '案件 DEMO-01  ·  取证人员：演示人员  ·  对象：FAT16 演示镜像  ·  只读演示预览模式',
+    summaryLine2: `镜像：evidence/demo.dd（33,554,432 字节） · SHA-256：${DEMO_SHA256.slice(0, 16)}… · 校验通过 · 1 个分区 · 7 项`,
+    sourceNote: '本机整镜像 SHA-256 已固定且校验通过',
+    browsingDirectories: false,
+    needsPartitionScan: false,
+    inventoryCount: DEMO_ENTRIES.length,
+    exportsCount: 2,
+    evidence: {
+      path: 'C:\\TraceDesk\\evidence\\demo.dd',
+      size: 33554432,
+      sha256: DEMO_SHA256,
+      fixedAt: '2026-03-10 09:05:12',
+      format: 'RAW',
+      largeImage: false,
+      layout: [
+        'DOS Partition Table',
+        'Offset Sector: 0',
+        'Units are in 512-byte sectors',
+        '',
+        '      Slot      Start        End          Length       Description',
+        '000:  Meta      0000000000   0000000000   0000000001   Primary Table (#0)',
+        '001:  -------   0000000001   0000002047   0000002047   Unallocated',
+        '002:  000:000   0000002048   0000065535   0000063488   DOS FAT16 (0x06)',
+      ].join('\n'),
+      partitions: [{ offset: 2048, length: 63488, description: 'DOS FAT16 (0x06)', slot: '000:000' }],
+      coverage: {
+        bytes: 33554432,
+        volumes: [
+          {
+            offset: 2048,
+            filesystem: 'FAT',
+            partitionEnd: 33554432,
+            volumeEnd: 33554432,
+            missingBytes: 0,
+            status: '声明范围已覆盖',
+          },
+        ],
+      },
+      coverageText:
+        '偏移 2048 扇区：声明范围已覆盖（FAT，声明结束字节位置 33554432，镜像 33554432 字节）。仅判断可识别的声明范围，不能证明原盘无坏扇区或已完整采集。',
+      provenance: {
+        evidenceId: 'EVID-DEMO-01',
+        source: 'TraceDesk 内置演示检材库',
+        acquired: '2026-03-10 08:50 UTC+8',
+        tool: 'TraceDesk Demo Builder',
+        expectedSha256: DEMO_SHA256,
+      },
+      sourceStatus: '交付方摘要与本机固定值一致',
+    },
+    partitionScans: [{ offset: 2048, status: 'ready', count: DEMO_ENTRIES.length }],
+    verification: { ok: true, checkedAt: '2026-03-10 09:05:14', method: 'SHA-256' },
+    fsstat: [
+      '=== 分区偏移 2048 扇区 ===',
+      'FILE SYSTEM INFORMATION',
+      '--------------------------------------------',
+      'File System Type: FAT16',
+      'OEM Name: MKFS.FAT',
+      'Volume ID: 0x20260310',
+      'Volume Label (Boot Sector): TRACEDESK',
+      'Sector Size: 512',
+      'Cluster Size: 2048',
+      'Total Cluster Range: 2 - 15855',
+    ].join('\n'),
+    quickLocation: null,
+  };
+}
+
+let currentCase: CaseSnapshot | null = buildInitialCase();
+let mcpRunning = false;
+let mcpPort = 8765;
+let searchCounter = 0;
+const activeSearchTimers = new Map<string, number>();
+const searchHitsStore = new Map<string, SearchHitDto[]>();
+
+const demoFindings: FindingGroupDto[] = [
+  {
+    groupKey: 'DOCS/CASE.TXT|2048|5|false',
+    seq: 1,
+    subject: 'DOCS/CASE.TXT',
+    status: '现存',
+    deleted: false,
+    offset: 2048,
+    inode: '5',
+    imageSha256: DEMO_SHA256,
+    count: 2,
+    latestTime: '2026-03-10 09:42:18',
+    records: [
+      {
+        seq: 6,
+        timestamp: '2026-03-10 09:38:05',
+        action: 'FILE_NOTE',
+        actionTitle: '取证笔记',
+        origin: 'manual',
+        originLabel: '人工',
+        actor: '演示人员',
+        result: '成功',
+        details: {
+          offset: 2048,
+          inode: '5',
+          deleted: false,
+          image_sha256: DEMO_SHA256,
+          note: '关键演示文档：包含 nested directory 备注内容，已核对十六进制首行 43 61 73 65。',
+          source_verification: '通过（与初始固定值一致）',
+        },
+      },
+      {
+        seq: 7,
+        timestamp: '2026-03-10 09:42:18',
+        action: 'FILE_HASH',
+        actionTitle: '计算摘要',
+        origin: 'mcp',
+        originLabel: 'MCP',
+        actor: 'tracedesk_mcp (MCP)',
+        result: '成功',
+        details: {
+          offset: 2048,
+          inode: '5',
+          deleted: false,
+          image_sha256: DEMO_SHA256,
+          size: 112,
+          recorded_size: 112,
+          sha256: '4d91a3f28b0c7e65d1a9f4c2e38b7a605d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a',
+          source_verification: '通过（与初始固定值一致）',
+        },
+      },
+    ],
+  },
+];
+
+const demoAuditRecords: AuditRecordDto[] = [
+  {
+    seq: 1,
+    timestamp: '2026-03-10 09:00:00',
+    origin: 'manual',
+    originLabel: '人工',
+    actor: '演示人员',
+    action: 'CASE_CREATE',
+    actionTitle: '新建案件',
+    result: '成功',
+    subject: 'DEMO-01',
+    details: { target: 'FAT16 演示镜像' },
+    previous: '0'.repeat(64),
+    hash: '11a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f80',
+  },
+  {
+    seq: 2,
+    timestamp: '2026-03-10 09:05:12',
+    origin: 'manual',
+    originLabel: '人工',
+    actor: '演示人员',
+    action: 'IMAGE_LOAD',
+    actionTitle: '载入镜像',
+    result: '成功',
+    subject: 'evidence/demo.dd',
+    details: { size: 33554432, sha256: DEMO_SHA256 },
+    previous: '11a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f80',
+    hash: '22b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091',
+  },
+  {
+    seq: 3,
+    timestamp: '2026-03-10 09:05:14',
+    origin: 'manual',
+    originLabel: '人工',
+    actor: '演示人员',
+    action: 'HASH_VERIFY',
+    actionTitle: '校验镜像完整性',
+    result: '通过',
+    subject: 'evidence/demo.dd',
+    details: { actual: DEMO_SHA256 },
+    previous: '22b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091',
+    hash: '33c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2',
+  },
+  {
+    seq: 4,
+    timestamp: '2026-03-10 09:05:16',
+    origin: 'manual',
+    originLabel: '人工',
+    actor: '演示人员',
+    action: 'PARTITIONS_SCAN',
+    actionTitle: '扫描所有分区',
+    result: '成功',
+    subject: 'evidence/demo.dd',
+    details: { count: 7 },
+    previous: '33c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2',
+    hash: '44d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3',
+  },
+  {
+    seq: 5,
+    timestamp: '2026-03-10 09:10:00',
+    origin: 'manual',
+    originLabel: '人工',
+    actor: '演示人员',
+    action: 'SOURCE_REGISTER',
+    actionTitle: '登记证据来源',
+    result: '成功',
+    subject: 'EVID-DEMO-01',
+    details: { source: 'TraceDesk 内置演示检材库' },
+    previous: '44d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3',
+    hash: '55e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4',
+  },
+  {
+    seq: 6,
+    timestamp: '2026-03-10 09:38:05',
+    origin: 'manual',
+    originLabel: '人工',
+    actor: '演示人员',
+    action: 'FILE_NOTE',
+    actionTitle: '记录取证发现',
+    result: '成功',
+    subject: 'DOCS/CASE.TXT',
+    details: { offset: 2048, inode: '5', note: '关键演示文档' },
+    previous: '55e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4',
+    hash: '66f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5',
+  },
+  {
+    seq: 7,
+    timestamp: '2026-03-10 09:42:18',
+    origin: 'mcp',
+    originLabel: 'MCP',
+    actor: 'tracedesk_mcp (MCP)',
+    action: 'FILE_HASH',
+    actionTitle: '计算文件摘要',
+    result: '成功',
+    subject: 'DOCS/CASE.TXT',
+    details: { offset: 2048, inode: '5', sha256: '4d91a3f28b0c7e65d1a9f4c2e38b7a605d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a' },
+    previous: '66f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5',
+    hash: '7708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6',
+  },
+];
+
+const demoTimelineRows: TimelineRowDto[] = [
+  { number: 1, time: '2026-03-10 09:12:00', event: 'B 创建', status: '现存', offset: 2048, inode: '3', path: 'DOCS' },
+  { number: 2, time: '2026-03-10 09:15:10', event: 'B 创建', status: '现存', offset: 2048, inode: '5', path: 'DOCS/CASE.TXT' },
+  { number: 3, time: '2026-03-10 09:16:22', event: 'M 内容修改', status: '现存', offset: 2048, inode: '5', path: 'DOCS/CASE.TXT' },
+  { number: 4, time: '2026-03-10 09:18:30', event: 'B 创建', status: '已删除', offset: 2048, inode: '7', path: 'DOCS/DRAFT_DEL.TXT' },
+  { number: 5, time: '2026-03-10 09:20:04', event: 'M 内容修改', status: '已删除', offset: 2048, inode: '7', path: 'DOCS/DRAFT_DEL.TXT' },
+  { number: 6, time: '2026-03-10 09:25:14', event: 'M 内容修改', status: '现存', offset: 2048, inode: '9', path: 'EVIDENCE/SAMPLE.PNG' },
+  { number: 7, time: '2026-03-10 09:30:40', event: 'M 内容修改', status: '现存', offset: 2048, inode: '11', path: 'LEDGER.CSV' },
+  { number: 8, time: '2026-03-10 10:00:00', event: 'A 访问', status: '现存', offset: 2048, inode: '5', path: 'DOCS/CASE.TXT' },
+];
+
+function bytesToHexRows(bytes: Uint8Array, pageOffset: number): HexRowDto[] {
+  const rows: HexRowDto[] = [];
+  for (let i = 0; i < bytes.length; i += 16) {
+    const slice = bytes.slice(i, i + 16);
+    const offsetHex = (pageOffset + i).toString(16).toUpperCase().padStart(8, '0');
+    const hexParts: string[] = [];
+    let chars = '';
+    for (let j = 0; j < slice.length; j += 1) {
+      const b = slice[j];
+      hexParts.push(b.toString(16).toUpperCase().padStart(2, '0'));
+      chars += b >= 0x20 && b <= 0x7e ? String.fromCharCode(b) : '·';
+    }
+    rows.push({
+      offsetHex,
+      bytesHex: hexParts.join(' '),
+      chars,
+    });
+  }
+  return rows;
+}
+
+export const demoBackend = {
+  async get_app_paths(): Promise<AppPaths> {
+    return {
+      rootDir: 'C:\\TraceDesk',
+      casesDir: 'C:\\TraceDesk\\cases',
+      evidenceDir: 'C:\\TraceDesk\\evidence',
+    };
+  },
+
+  async suggest_case_dir(args: { number: string; examiner: string; target: string; parentDir?: string }): Promise<SuggestCaseDirResponse> {
+    const parent = args.parentDir || 'C:\\TraceDesk\\cases';
+    const safe = `${args.number}-${args.examiner}-${args.target}`.replace(/[<>:"/\\|?*]+/g, '_');
+    return {
+      folderName: safe,
+      suggestedPath: `${parent.replace(/[\\/]+$/, '')}\\${safe}`,
+    };
+  },
+
+  async create_case(args: { parentDir: string; number: string; examiner: string; target: string; folderName?: string }): Promise<CaseSnapshot> {
+    const folder = args.folderName || `${args.number}-${args.examiner}-${args.target}`;
+    const snap: CaseSnapshot = {
+      caseDir: `${args.parentDir.replace(/[\\/]+$/, '')}\\${folder}`,
+      id: `demo-${Date.now()}`,
+      number: args.number,
+      examiner: args.examiner,
+      target: args.target,
+      created: '2026-03-10 10:15:00',
+      custodyState: 'active',
+      summaryLine1: `案件 ${args.number}  ·  取证人员：${args.examiner}  ·  对象：${args.target}`,
+      summaryLine2: '尚未加载镜像（浏览器只读演示模式）。请点击右侧「加载镜像」载入演示镜像。',
+      sourceNote: '尚未加载镜像',
+      browsingDirectories: false,
+      needsPartitionScan: false,
+      inventoryCount: 0,
+      exportsCount: 0,
+      evidence: null,
+      partitionScans: [],
+      verification: null,
+      fsstat: '',
+      quickLocation: null,
+    };
+    currentCase = snap;
+    return snap;
+  },
+
+  async open_case(): Promise<CaseSnapshot> {
+    currentCase = buildInitialCase();
+    return currentCase;
+  },
+
+  async close_case(): Promise<{ closed: boolean }> {
+    currentCase = null;
+    return { closed: true };
+  },
+
+  async get_case_snapshot(): Promise<CaseSnapshot | null> {
+    return currentCase;
+  },
+
+  async load_image(): Promise<CaseSnapshot> {
+    emit('task:progress', { stage: '固定镜像 SHA-256', done: 100, total: 100 });
+    const base = buildInitialCase();
+    if (currentCase) {
+      base.number = currentCase.number;
+      base.examiner = currentCase.examiner;
+      base.target = currentCase.target;
+      base.caseDir = currentCase.caseDir;
+      base.summaryLine1 = `案件 ${base.number}  ·  取证人员：${base.examiner}  ·  对象：${base.target}  ·  只读演示预览模式`;
+    }
+    currentCase = base;
+    return currentCase;
+  },
+
+  async verify_integrity(): Promise<{ ok: boolean; initialFixed: boolean; snapshot: CaseSnapshot }> {
+    if (!currentCase) throw new Error('尚未打开案件');
+    emit('task:progress', { stage: '校验 SHA-256', done: 100, total: 100 });
+    currentCase = { ...currentCase, custodyState: 'verified' };
+    return { ok: true, initialFixed: false, snapshot: currentCase };
+  },
+
+  async cancel_verify_integrity(): Promise<{ cancelled: boolean }> {
+    return { cancelled: true };
+  },
+
+  async register_source(args: {
+    evidenceId: string;
+    source: string;
+    acquired: string;
+    tool: string;
+    expectedSha256: string;
+  }): Promise<CaseSnapshot> {
+    if (!currentCase || !currentCase.evidence) throw new Error('请先加载镜像');
+    const exp = args.expectedSha256.trim();
+    const mismatch = exp.length > 0 && exp.toLowerCase() !== currentCase.evidence.sha256.toLowerCase();
+    currentCase = {
+      ...currentCase,
+      custodyState: mismatch ? 'error' : 'verified',
+      evidence: {
+        ...currentCase.evidence,
+        provenance: {
+          evidenceId: args.evidenceId,
+          source: args.source,
+          acquired: args.acquired,
+          tool: args.tool,
+          expectedSha256: exp,
+        },
+        sourceStatus: !exp
+          ? '未提供交付方摘要，仅有本机固定值'
+          : mismatch
+            ? '警告：交付方摘要与本机固定值不一致'
+            : '交付方摘要与本机固定值一致',
+      },
+    };
+    return currentCase;
+  },
+
+  async export_fsstat(): Promise<{ path: string }> {
+    return { path: 'C:\\TraceDesk\\cases\\DEMO-01\\reports\\fsstat_2048.txt' };
+  },
+
+  async scan_all_partitions(): Promise<{ completed: boolean; snapshot: CaseSnapshot }> {
+    if (!currentCase) throw new Error('尚未打开案件');
+    emit('task:progress', { stage: '扫描所有分区', done: 100, total: 100 });
+    return { completed: true, snapshot: currentCase };
+  },
+
+  async cancel_scan_partitions(): Promise<{ cancelled: boolean }> {
+    return { cancelled: true };
+  },
+
+  async browse_directory(): Promise<{ snapshot: CaseSnapshot; entries: EntryView[] }> {
+    if (!currentCase) throw new Error('尚未打开案件');
+    return { snapshot: currentCase, entries: DEMO_ENTRIES };
+  },
+
+  async get_tree_children(args: { offset: number; scopePath: string; groupIndex?: number }): Promise<TreeChildrenResponse> {
+    if (!currentCase?.evidence) return { nodes: [], grouped: false, groupCount: 0 };
+    const parent = args.scopePath.replace(/^\/+|\/+$/g, '');
+    const nodes: TreeNodeDto[] = DEMO_ENTRIES.filter((entry) => {
+      if (entry.offset !== args.offset) return false;
+      const p = entry.path.replace(/^\/+|\/+$/g, '');
+      const idx = p.lastIndexOf('/');
+      const dir = idx >= 0 ? p.slice(0, idx) : '';
+      return dir === parent;
+    }).map((entry) => ({
+      id: `${entry.offset}:${entry.path}:${entry.inode}:${entry.deleted ? '1' : '0'}`,
+      label: entry.deleted ? `${entry.name}  [已删除 · ${entry.inode}]` : entry.name,
+      tooltip: `${entry.path}\n${entry.status} · inode ${entry.inode}`,
+      kind: entry.directory ? 'directory' : 'file',
+      iconKind: entry.iconKind || (entry.directory ? 'folder' : 'file'),
+      offset: entry.offset,
+      scopePath: entry.directory ? entry.path : undefined,
+      inode: entry.inode,
+      entryId: entry.entryId,
+      deleted: entry.deleted,
+      hasChildren: entry.directory,
+    }));
+    return { nodes, grouped: false, groupCount: 0 };
+  },
+
+  async query_files_page(args: {
+    scopeOffset?: number | null;
+    scopePath?: string | null;
+    suffix: string;
+    keyword: string;
+    status: 'all' | 'active' | 'deleted';
+    page: number;
+    pageSize: number;
+  }): Promise<QueryFilesPageResponse> {
+    if (!currentCase?.evidence) {
+      return { total: 0, page: 0, totalPages: 1, items: [] };
+    }
+    const suffix = args.suffix.trim().toLowerCase();
+    const keyword = args.keyword.trim().toLowerCase();
+    const filtered = DEMO_ENTRIES.filter((entry) => {
+      if (args.scopeOffset != null && entry.offset !== args.scopeOffset) return false;
+      if (args.scopePath != null) {
+        const cleanScope = args.scopePath.replace(/^\/+|\/+$/g, '');
+        const cleanPath = entry.path.replace(/^\/+|\/+$/g, '');
+        const lastSlash = cleanPath.lastIndexOf('/');
+        const parent = lastSlash >= 0 ? cleanPath.slice(0, lastSlash) : '';
+        if (parent !== cleanScope) return false;
+      }
+      if (suffix && !entry.name.toLowerCase().endsWith(suffix)) return false;
+      if (keyword && !entry.path.toLowerCase().includes(keyword)) return false;
+      if (args.status === 'active' && (entry.deleted || entry.directory || entry.mode.toLowerCase().startsWith('v/'))) {
+        return false;
+      }
+      if (args.status === 'deleted' && !entry.deleted) return false;
+      return true;
+    });
+    const totalPages = Math.max(1, Math.ceil(filtered.length / args.pageSize));
+    const page = Math.max(0, Math.min(args.page, totalPages - 1));
+    const start = page * args.pageSize;
+    return {
+      total: filtered.length,
+      page,
+      totalPages,
+      items: filtered.slice(start, start + args.pageSize),
+    };
+  },
+
+  async locate_file_in_scope(args: { entryId: string }): Promise<LocateFileResponse> {
+    const entry = DEMO_ENTRIES.find((e) => e.entryId === args.entryId) || DEMO_ENTRIES[0];
+    const cleanPath = entry.path.replace(/^\/+|\/+$/g, '');
+    const lastSlash = cleanPath.lastIndexOf('/');
+    const scopePath = lastSlash >= 0 ? cleanPath.slice(0, lastSlash) : '';
+    return {
+      scopeOffset: entry.offset,
+      scopePath,
+      page: 0,
+      indexInPage: 0,
+    };
+  },
+
+  async preview_file_page(args: {
+    entryId: string;
+    page: number;
+    pageBytes?: number;
+    encoding: PreviewEncoding;
+  }): Promise<PreviewPageResponse> {
+    const entry = DEMO_ENTRIES.find((e) => e.entryId === args.entryId);
+    const rawText = DEMO_FILE_TEXTS[args.entryId] ?? `演示只读预览 · ${entry?.path ?? args.entryId}\n`;
+    const bytes = new TextEncoder().encode(rawText);
+    const isImg = entry?.iconKind === 'image';
+    return {
+      page: args.page,
+      totalPages: 1,
+      size: bytes.length,
+      recordedSize: entry?.size ?? bytes.length,
+      readNote: `演示解码 (${args.encoding})`,
+      sourceNote: entry?.deleted ? '已删除记录（可读字节恢复预览）' : '',
+      text: rawText,
+      hexRows: bytesToHexRows(bytes, args.page * (args.pageBytes ?? 4096)),
+      isImageCandidate: isImg,
+    };
+  },
+
+  async preview_file_image(args: { entryId: string }): Promise<PreviewImageResponse> {
+    if (args.entryId === '2048:9:0') {
+      return {
+        ok: true,
+        dataUrl: DEMO_PNG_DATA_URL,
+        width: 420,
+        height: 240,
+        animated: false,
+        sourceNote: '只读演示图片',
+      };
+    }
+    return {
+      ok: false,
+      error: '图片损坏或格式不受支持',
+      sourceNote: '',
+    };
+  },
+
+  async export_file(args: { entryId: string }): Promise<ExportFileResponse> {
+    if (!currentCase) throw new Error('尚未打开案件');
+    const entry = DEMO_ENTRIES.find((e) => e.entryId === args.entryId);
+    return {
+      path: `${currentCase.caseDir}\\exports\\${entry?.name ?? 'exported.bin'}`,
+      title: '导出成功',
+      note: '浏览器演示模式模拟导出结果（真实桌面端将在校验镜像后写入案件 exports 目录）。',
+      snapshot: currentCase,
+    };
+  },
+
+  async record_finding_note(args: { entryId: string; note: string }): Promise<{ snapshot: CaseSnapshot }> {
+    if (!currentCase) throw new Error('尚未打开案件');
+    const entry = DEMO_ENTRIES.find((e) => e.entryId === args.entryId);
+    if (entry) {
+      const nextSeq = demoAuditRecords.length + 1;
+      const nowStr = '2026-03-10 10:20:00';
+      const rec = {
+        seq: nextSeq,
+        timestamp: nowStr,
+        action: 'FILE_NOTE',
+        actionTitle: '取证笔记',
+        origin: 'manual',
+        originLabel: '人工',
+        actor: currentCase.examiner,
+        result: '成功',
+        details: {
+          offset: entry.offset,
+          inode: entry.inode,
+          deleted: entry.deleted,
+          image_sha256: currentCase.evidence?.sha256 || '',
+          note: args.note,
+          source_verification: '通过（与初始固定值一致）',
+        },
+      };
+      const existing = demoFindings.find((g) => g.subject === entry.path && g.inode === entry.inode);
+      if (existing) {
+        existing.records.push(rec);
+        existing.count = existing.records.length;
+        existing.latestTime = nowStr;
+      } else {
+        demoFindings.push({
+          groupKey: `${entry.path}|${entry.offset}|${entry.inode}|${entry.deleted}`,
+          seq: demoFindings.length + 1,
+          subject: entry.path,
+          status: entry.deleted ? '已删除' : '现存',
+          deleted: entry.deleted,
+          offset: entry.offset,
+          inode: entry.inode,
+          imageSha256: currentCase.evidence?.sha256 || '',
+          count: 1,
+          latestTime: nowStr,
+          records: [rec],
+        });
+      }
+      demoAuditRecords.push({
+        seq: nextSeq,
+        timestamp: nowStr,
+        origin: 'manual',
+        originLabel: '人工',
+        actor: currentCase.examiner,
+        action: 'FILE_NOTE',
+        actionTitle: '记录取证发现',
+        result: '成功',
+        subject: entry.path,
+        details: { offset: entry.offset, inode: entry.inode, note: args.note },
+        previous: demoAuditRecords[demoAuditRecords.length - 1]?.hash || '0'.repeat(64),
+        hash: `${nextSeq.toString(16).padStart(2, '0')}a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcde`,
+      });
+    }
+    return { snapshot: currentCase };
+  },
+
+  async examine_file(args: { entryId: string; comparisonPath?: string }): Promise<ExamineFileResponse> {
+    if (!currentCase) throw new Error('尚未打开案件');
+    const entry = DEMO_ENTRIES.find((e) => e.entryId === args.entryId) || DEMO_ENTRIES[1];
+    const hash = '4d91a3f28b0c7e65d1a9f4c2e38b7a605d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a';
+    return {
+      title: args.comparisonPath ? '校验文件一致性' : '计算文件 SHA-256',
+      path: entry.path,
+      result: args.comparisonPath ? '一致' : '成功',
+      size: entry.size,
+      recordedSize: entry.size,
+      sha256: hash,
+      comparisonPath: args.comparisonPath,
+      comparisonSha256: args.comparisonPath ? hash : undefined,
+      sourceNote: entry.deleted ? '已删除记录' : '',
+      sourceVerification: '通过（与初始固定值一致）',
+      snapshot: currentCase,
+    };
+  },
+
+  async list_findings(args: {
+    status?: string | null;
+    offset?: string | null;
+    keyword?: string;
+    sortColumn: 'seq' | 'latest';
+    descending: boolean;
+  }): Promise<ListFindingsResponse> {
+    if (!currentCase) {
+      return { statusText: '尚未打开案件', filterOptions: { statuses: [], offsets: [] }, groups: [] };
+    }
+    const kw = (args.keyword || '').trim().toLowerCase();
+    let groups = demoFindings.filter((g) => {
+      if (args.status && g.status !== args.status) return false;
+      if (args.offset && String(g.offset) !== args.offset) return false;
+      if (kw && !`${g.subject} ${JSON.stringify(g.records)}`.toLowerCase().includes(kw)) return false;
+      return true;
+    });
+    groups = [...groups].sort((a, b) => {
+      const cmp =
+        args.sortColumn === 'seq'
+          ? a.seq - b.seq
+          : a.latestTime.localeCompare(b.latestTime) || a.seq - b.seq;
+      return args.descending ? -cmp : cmp;
+    });
+    return {
+      statusText: demoFindings.length
+        ? `取证发现 · ${demoFindings.length} 个文件 · 日志链校验通过`
+        : '尚无取证发现 · 右键文件可记录笔记、计算摘要或比对副本',
+      filterOptions: {
+        statuses: Array.from(new Set(demoFindings.map((g) => g.status))),
+        offsets: Array.from(new Set(demoFindings.map((g) => String(g.offset)))),
+      },
+      groups,
+    };
+  },
+
+  async export_findings(): Promise<ExportFindingsResponse> {
+    if (!currentCase) throw new Error('尚未打开案件');
+    return {
+      summaryPath: `${currentCase.caseDir}\\exports\\取证发现汇总_demo0001.md`,
+      exportedCount: demoFindings.length,
+      failedCount: 0,
+      note: `已导出 ${demoFindings.length} 个证据文件至 exports 目录，并生成汇总清单。`,
+      snapshot: currentCase,
+    };
+  },
+
+  async build_timeline(): Promise<BuildTimelineResponse> {
+    return {
+      total: demoTimelineRows.length,
+      hint: `MACB 时间线 · ${demoTimelineRows.length} 条事件 · UTC+8 · C 为元数据变更，B 为创建；FAT 不保存 C 时间`,
+      filterOptions: {
+        events: ['B 创建', 'M 内容修改', 'A 访问'],
+        statuses: ['现存', '已删除'],
+        offsets: ['2048'],
+      },
+    };
+  },
+
+  async query_timeline_page(args: {
+    query: string;
+    event?: string | null;
+    status?: string | null;
+    offset?: string | null;
+    sortColumn: 'seq' | 'time';
+    descending: boolean;
+    page: number;
+    pageSize: number;
+  }): Promise<QueryTimelinePageResponse> {
+    if (!currentCase) {
+      return { total: 0, totalEvents: 0, page: 0, totalPages: 1, items: [] };
+    }
+    const q = args.query.trim().toLowerCase();
+    let rows = demoTimelineRows.filter((r) => {
+      if (args.event && r.event !== args.event) return false;
+      if (args.status && r.status !== args.status) return false;
+      if (args.offset && String(r.offset) !== args.offset) return false;
+      if (q && !`${r.time} ${r.event} ${r.status} ${r.offset} ${r.path}`.toLowerCase().includes(q)) return false;
+      return true;
+    });
+    rows = [...rows].sort((a, b) => {
+      const cmp = args.sortColumn === 'seq' ? a.number - b.number : a.time.localeCompare(b.time) || a.number - b.number;
+      return args.descending ? -cmp : cmp;
+    });
+    const totalPages = Math.max(1, Math.ceil(rows.length / args.pageSize));
+    const page = Math.max(0, Math.min(args.page, totalPages - 1));
+    const start = page * args.pageSize;
+    return {
+      total: rows.length,
+      totalEvents: demoTimelineRows.length,
+      page,
+      totalPages,
+      items: rows.slice(start, start + args.pageSize),
+    };
+  },
+
+  async list_audit_log(args: {
+    query: string;
+    origin?: string | null;
+    actor?: string | null;
+    action?: string | null;
+    result?: string | null;
+    sortColumn: 'seq' | 'time';
+    descending: boolean;
+  }): Promise<ListAuditLogResponse> {
+    if (!currentCase) {
+      return {
+        valid: true,
+        statusText: '尚未打开案件',
+        filterOptions: { origins: [], actors: [], actions: [], results: [] },
+        records: [],
+      };
+    }
+    const q = args.query.trim().toLowerCase();
+    let records = demoAuditRecords.filter((r) => {
+      if (args.origin && r.originLabel !== args.origin) return false;
+      if (args.actor && r.actor !== args.actor) return false;
+      if (args.action && r.actionTitle !== args.action) return false;
+      if (args.result && r.result !== args.result) return false;
+      if (q && !`${r.originLabel} ${r.actor} ${r.actionTitle} ${r.result} ${r.subject} ${JSON.stringify(r.details)}`.toLowerCase().includes(q)) {
+        return false;
+      }
+      return true;
+    });
+    records = [...records].sort((a, b) => {
+      const cmp = args.sortColumn === 'seq' ? a.seq - b.seq : a.timestamp.localeCompare(b.timestamp) || a.seq - b.seq;
+      return args.descending ? -cmp : cmp;
+    });
+    const mcpCount = demoAuditRecords.filter((r) => r.origin === 'mcp').length;
+    const manualCount = demoAuditRecords.length - mcpCount;
+    return {
+      valid: true,
+      statusText: `日志链校验通过 · 共 ${demoAuditRecords.length} 条操作（人工 ${manualCount} · MCP ${mcpCount}）`,
+      filterOptions: {
+        origins: Array.from(new Set(demoAuditRecords.map((r) => r.originLabel))),
+        actors: Array.from(new Set(demoAuditRecords.map((r) => r.actor))),
+        actions: Array.from(new Set(demoAuditRecords.map((r) => r.actionTitle))),
+        results: Array.from(new Set(demoAuditRecords.map((r) => r.result))),
+      },
+      records,
+    };
+  },
+
+  async start_content_search(args: {
+    query: string;
+    encoding: SearchEncoding;
+    selectedEntryId?: string | null;
+  }): Promise<StartContentSearchResponse> {
+    const query = args.query.trim();
+    if (!query) throw new Error('请输入搜索内容');
+    searchCounter += 1;
+    const searchId = `demo-search-${searchCounter}`;
+    let needleHex = '';
+    if (args.encoding === 'HEX') {
+      const clean = query.replace(/\s+/g, '');
+      if (clean.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(clean)) {
+        throw new Error('HEX 搜索条件必须为偶数位十六进制字节');
+      }
+      needleHex = clean.toUpperCase();
+    } else {
+      needleHex = Array.from(new TextEncoder().encode(query))
+        .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
+        .join('');
+    }
+
+    const targets = args.selectedEntryId
+      ? DEMO_ENTRIES.filter((e) => e.entryId === args.selectedEntryId)
+      : DEMO_ENTRIES.filter((e) => !e.directory && !e.mode.toLowerCase().startsWith('v/'));
+
+    const matched: SearchHitDto[] = [];
+    const lowerQuery = args.encoding === 'HEX'
+      ? new TextDecoder().decode(new Uint8Array((needleHex.match(/.{2}/g) || []).map((h) => parseInt(h, 16)))).toLowerCase()
+      : query.toLowerCase();
+
+    for (const entry of targets) {
+      const content = DEMO_FILE_TEXTS[entry.entryId] || '';
+      const lower = content.toLowerCase();
+      let idx = lower.indexOf(lowerQuery);
+      while (idx !== -1 && lowerQuery.length > 0) {
+        const bytes = new TextEncoder().encode(content);
+        const beforeSlice = bytes.slice(Math.max(0, idx - 8), idx);
+        const afterSlice = bytes.slice(idx + lowerQuery.length, idx + lowerQuery.length + 12);
+        const toHex = (arr: Uint8Array) =>
+          Array.from(arr)
+            .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
+            .join(' ');
+        matched.push({
+          hitIndex: matched.length,
+          entryId: entry.entryId,
+          pos: idx,
+          offset: entry.offset,
+          inode: entry.inode,
+          path: entry.path,
+          deleted: entry.deleted,
+          beforeHex: toHex(beforeSlice) || '—',
+          afterHex: toHex(afterSlice) || '—',
+        });
+        idx = lower.indexOf(lowerQuery, idx + Math.max(1, lowerQuery.length));
+      }
+    }
+
+    searchHitsStore.set(searchId, matched);
+
+    const timer = window.setTimeout(() => {
+      activeSearchTimers.delete(searchId);
+      emit('search:progress', { searchId, stage: '检索文件内容', done: targets.length, total: targets.length });
+      if (matched.length > 0) {
+        emit('search:hits', { searchId, hits: matched });
+      }
+      emit('search:finished', {
+        searchId,
+        status: '已完成',
+        visited: targets.length,
+        eligible: targets.length,
+        totalHits: matched.length,
+        errorsCount: 0,
+        verification: '通过（与初始固定值一致）',
+        reportName: `search_demo_${searchCounter}.json`,
+        snapshot: currentCase || undefined,
+      });
+    }, 180);
+    activeSearchTimers.set(searchId, timer);
+
+    return { searchId, needleHex };
+  },
+
+  async cancel_content_search(args: { searchId: string }): Promise<{ cancelled: boolean }> {
+    const timer = activeSearchTimers.get(args.searchId);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      activeSearchTimers.delete(args.searchId);
+      emit('search:finished', {
+        searchId: args.searchId,
+        status: '已取消',
+        visited: 0,
+        eligible: 0,
+        totalHits: 0,
+        errorsCount: 0,
+        verification: '已取消',
+      });
+    }
+    return { cancelled: true };
+  },
+
+  async bookmark_search_hits(args: { searchId: string; hitIndices: number[] }): Promise<{ savedCount: number; snapshot: CaseSnapshot }> {
+    if (!currentCase) throw new Error('尚未打开案件');
+    const hits = searchHitsStore.get(args.searchId) || [];
+    let savedCount = 0;
+    for (const idx of args.hitIndices) {
+      const hit = hits.find((h) => h.hitIndex === idx);
+      if (hit) {
+        await this.record_finding_note({
+          entryId: hit.entryId,
+          note: `内容命中：文件内字节偏移 ${hit.pos}`,
+        });
+        savedCount += 1;
+      }
+    }
+    return { savedCount, snapshot: currentCase };
+  },
+
+  async generate_report(): Promise<{ path: string; snapshot: CaseSnapshot }> {
+    if (!currentCase) throw new Error('尚未打开案件');
+    return {
+      path: `${currentCase.caseDir}\\reports\\report_${currentCase.number}.md`,
+      snapshot: currentCase,
+    };
+  },
+
+  async inspect_bundle_materials(): Promise<BundleMaterialsResponse> {
+    return {
+      exports: [
+        {
+          index: 1,
+          exists: true,
+          displayPath: 'exports/CASE.TXT',
+          source: 'DOCS/CASE.TXT',
+          size: 112,
+          time: '2026-03-10 09:35:00',
+        },
+        {
+          index: 2,
+          exists: false,
+          displayPath: 'exports/DRAFT_DEL.TXT',
+          source: 'DOCS/DRAFT_DEL.TXT',
+          size: 81,
+          time: '2026-03-10 09:36:12',
+          missingReason: '本地文件不存在（可能已被清理或隔离）',
+        },
+      ],
+      searches: [
+        {
+          index: 1,
+          exists: true,
+          displayPath: 'reports/search_demo_1.json',
+          query: '6E 6F 74 65',
+          encoding: 'HEX',
+          hits: 1,
+          time: '2026-03-10 09:40:00',
+        },
+      ],
+      missingText: '【缺失导出副本】\n#2  exports/DRAFT_DEL.TXT  (来源：DOCS/DRAFT_DEL.TXT) — 本地文件不存在',
+    };
+  },
+
+  async build_review_bundle(): Promise<{ path: string; snapshot: CaseSnapshot }> {
+    if (!currentCase) throw new Error('尚未打开案件');
+    return {
+      path: `${currentCase.caseDir}\\reports\\review_bundle_${currentCase.number}.zip`,
+      snapshot: currentCase,
+    };
+  },
+
+  async get_mcp_status(args?: { port?: number }): Promise<McpStatus> {
+    const port = mcpRunning ? mcpPort : args?.port ?? mcpPort;
+    const url = `http://127.0.0.1:${port}/mcp`;
+    return {
+      running: mcpRunning,
+      host: '127.0.0.1',
+      port,
+      path: '/mcp',
+      url,
+      stdioConfigJson: JSON.stringify(
+        {
+          mcpServers: {
+            tracedesk: {
+              command: 'tracedesk-mcp',
+              args: ['--transport', 'stdio', '--cases-root', 'C:\\TraceDesk\\cases'],
+            },
+          },
+        },
+        null,
+        2
+      ),
+      stdioCli: 'tracedesk-mcp --transport stdio --cases-root "C:\\TraceDesk\\cases"',
+      httpConfigJson: JSON.stringify(
+        {
+          mcpServers: {
+            tracedesk: {
+              url,
+            },
+          },
+        },
+        null,
+        2
+      ),
+      httpCli: `tracedesk-mcp --transport streamable-http --host 127.0.0.1 --port ${port} --path /mcp`,
+      tools: DEMO_TOOLS,
+      activeCaseNumber: currentCase?.number ?? null,
+    };
+  },
+
+  async start_mcp_http(args: { port: number }): Promise<McpStatus> {
+    mcpRunning = true;
+    mcpPort = args.port;
+    return this.get_mcp_status({ port: mcpPort });
+  },
+
+  async stop_mcp_http(): Promise<McpStatus> {
+    mcpRunning = false;
+    return this.get_mcp_status({ port: mcpPort });
+  },
+
+  async open_in_os(): Promise<{ ok: boolean }> {
+    return { ok: true };
+  },
+
+  async check_busy_before_close(): Promise<{ busy: boolean; reason?: string }> {
+    return { busy: false };
+  },
+};
