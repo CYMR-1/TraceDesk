@@ -330,3 +330,41 @@ fn test_deleted_fat_entries_and_idle_clusters() {
     assert_eq!(free_extents.len(), 2);
     assert_eq!(free.size, free_extents.iter().map(|(_, l)| *l).sum::<u64>());
 }
+
+#[test]
+fn test_tsk_bin_dir_normalization_and_no_stray_dest_on_missing_tool() {
+    // Discovered bin_dir must always be absolute without Windows `\\?\` verbatim prefix.
+    let discovered = TskCli::discover(None).expect("discover TSK");
+    assert!(discovered.bin_dir().is_absolute());
+    assert!(
+        !discovered
+            .bin_dir()
+            .to_string_lossy()
+            .starts_with(r"\\?\")
+    );
+
+    // Missing tool in `fsstat_to_file` / `export_file` must fail before creating `dest`.
+    let tmp = tempfile::tempdir().unwrap();
+    let empty_bin = tmp.path().join("empty_bin");
+    fs::create_dir(&empty_bin).unwrap();
+    let broken_tsk = TskCli::from_bin_dir(empty_bin);
+    let demo = repo_root().join("evidence").join("demo.dd");
+
+    let fsstat_dest = tmp.path().join("should_not_exist_fsstat.txt");
+    assert!(broken_tsk.fsstat_to_file(&demo, 2048, &fsstat_dest).is_err());
+    assert!(
+        !fsstat_dest.exists(),
+        "fsstat_to_file must not leave a 0-byte dest file when executable is missing"
+    );
+
+    let export_dest = tmp.path().join("should_not_exist_export.bin");
+    assert!(
+        broken_tsk
+            .export_file(&demo, 2048, "3", 65, &export_dest)
+            .is_err()
+    );
+    assert!(
+        !export_dest.exists(),
+        "export_file must not leave a 0-byte dest file when executable is missing"
+    );
+}

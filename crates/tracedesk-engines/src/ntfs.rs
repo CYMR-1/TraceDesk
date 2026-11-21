@@ -151,6 +151,7 @@ enum ParsedAttrBody {
     Resident(Vec<u8>),
     NonResident {
         lowest_vcn: u64,
+        highest_vcn: u64,
         data_size: u64,
         initialized_size: u64,
         compression_unit: u16,
@@ -411,10 +412,10 @@ impl NtfsVolume {
         let attrs = parse_record_attributes(&record)?;
 
         let data = if attrs.iter().any(|a| a.attr_type == ATTR_TYPE_ATTRIBUTE_LIST) {
-            match self.resolve_via_attribute_list(mft_num, &attrs, attr_type, attr_id) {
-                Ok(d) => d,
-                Err(_) => self.resolve_direct_attributes(&attrs, attr_type, attr_id)?,
-            }
+            // Never silently fall back to `resolve_direct_attributes`: a multi-extent file whose
+            // `$ATTRIBUTE_LIST` or extension record is corrupt/compressed would otherwise expose
+            // only the base VCN-0 runs while still matching full `data_size`, risking missed hits.
+            self.resolve_via_attribute_list(mft_num, &attrs, attr_type, attr_id)?
         } else {
             self.resolve_direct_attributes(&attrs, attr_type, attr_id)?
         };
@@ -461,17 +462,19 @@ impl NtfsVolume {
             }),
             ParsedAttrBody::NonResident {
                 lowest_vcn,
+                highest_vcn,
                 data_size,
                 initialized_size,
                 compression_unit,
                 runs,
             } => {
-                if *lowest_vcn != 0 || (*compression_unit != 0 && (attr.attr_flags & ATTR_FLAG_COMPRESSED) != 0) {
+                if *lowest_vcn != 0
+                    || (*compression_unit != 0 && (attr.attr_flags & ATTR_FLAG_COMPRESSED) != 0)
+                {
                     return Err(EngineError::Ntfs("非首段或压缩属性需回退 icat".to_string()));
                 }
-                if runs.is_empty() {
-                    return Err(EngineError::Ntfs("非常驻属性无数据区间，回退 icat".to_string()));
-                }
+                validate_extent_vcn_bounds(*lowest_vcn, *highest_vcn, runs)?;
+                validate_non_resident_runs(runs, self.cluster_size, *data_size, *initialized_size)?;
                 Ok(NtfsEntryData::NonResident {
                     data_size: *data_size,
                     initialized_size: *initialized_size,
@@ -497,14 +500,18 @@ impl NtfsVolume {
         let list_bytes = match &list_attr.body {
             ParsedAttrBody::Resident(b) => b.clone(),
             ParsedAttrBody::NonResident {
+                lowest_vcn,
+                highest_vcn,
                 data_size,
                 initialized_size,
                 runs,
                 ..
             } => {
-                if *data_size > 16 * 1024 * 1024 {
-                    return Err(EngineError::Ntfs("$ATTRIBUTE_LIST 异常过大".to_string()));
+                if *lowest_vcn != 0 || *data_size > 16 * 1024 * 1024 {
+                    return Err(EngineError::Ntfs("$ATTRIBUTE_LIST 异常或过大".to_string()));
                 }
+                validate_extent_vcn_bounds(*lowest_vcn, *highest_vcn, runs)?;
+                validate_non_resident_runs(runs, self.cluster_size, *data_size, *initialized_size)?;
                 let mut buf = vec![0u8; *data_size as usize];
                 self.read_from_runs(runs, *initialized_size, 0, &mut buf, false)?;
                 buf
@@ -558,6 +565,7 @@ impl NtfsVolume {
             }
         }
 
+        let extent_count = extents.len();
         for ext in extents {
             let (_, rec_attrs) = loaded_records
                 .iter()
@@ -580,17 +588,27 @@ impl NtfsVolume {
             }
             match &attr.body {
                 ParsedAttrBody::Resident(bytes) => {
+                    if extent_count != 1 {
+                        return Err(EngineError::Ntfs("常驻属性不应包含多个扩展段".to_string()));
+                    }
                     return Ok(NtfsEntryData::Resident {
                         bytes: bytes.clone(),
                     });
                 }
                 ParsedAttrBody::NonResident {
                     lowest_vcn,
+                    highest_vcn,
                     data_size: ds,
                     initialized_size: is,
                     runs,
                     ..
                 } => {
+                    if *lowest_vcn != ext.starting_vcn {
+                        return Err(EngineError::Ntfs(
+                            "扩展属性段 lowest_vcn 与 $ATTRIBUTE_LIST 不一致".to_string(),
+                        ));
+                    }
+                    validate_extent_vcn_bounds(*lowest_vcn, *highest_vcn, runs)?;
                     if *lowest_vcn == 0 {
                         data_size = Some(*ds);
                         initialized_size = Some(*is);
@@ -603,9 +621,7 @@ impl NtfsVolume {
         merged_runs.sort_by_key(|r| r.vcn);
         let ds = data_size.ok_or_else(|| EngineError::Ntfs("缺少起始 VCN 0 属性段".to_string()))?;
         let is = initialized_size.unwrap_or(ds);
-        if merged_runs.is_empty() {
-            return Err(EngineError::Ntfs("非常驻属性无数据区间，回退 icat".to_string()));
-        }
+        validate_non_resident_runs(&merged_runs, self.cluster_size, ds, is)?;
 
         Ok(NtfsEntryData::NonResident {
             data_size: ds,
@@ -645,6 +661,72 @@ impl NtfsVolume {
             } => self.read_from_runs(runs, *initialized_size, file_offset, buf, false),
         }
     }
+}
+
+/// Verify a single non-resident extent's runs cover `[lowest_vcn, highest_vcn]` contiguously.
+fn validate_extent_vcn_bounds(
+    lowest_vcn: u64,
+    highest_vcn: u64,
+    runs: &[NtfsDataRun],
+) -> EngineResult<()> {
+    if runs.is_empty() {
+        return Err(EngineError::Ntfs("非常驻属性无数据区间，回退 icat".to_string()));
+    }
+    let expected_end = highest_vcn
+        .checked_add(1)
+        .ok_or_else(|| EngineError::Ntfs("NTFS highest_vcn 溢出".to_string()))?;
+    if lowest_vcn >= expected_end {
+        return Err(EngineError::Ntfs("NTFS 属性段 VCN 范围无效".to_string()));
+    }
+    let mut cur = lowest_vcn;
+    for run in runs {
+        if run.len_clusters == 0 || run.vcn != cur {
+            return Err(EngineError::Ntfs("NTFS 属性段数据区间不连续或重叠".to_string()));
+        }
+        cur = cur
+            .checked_add(run.len_clusters)
+            .ok_or_else(|| EngineError::Ntfs("NTFS 属性段 VCN 累加溢出".to_string()))?;
+    }
+    if cur != expected_end {
+        return Err(EngineError::Ntfs(format!(
+            "NTFS 属性段数据区间结束 VCN ({cur}) 与 highest_vcn+1 ({expected_end}) 不一致"
+        )));
+    }
+    Ok(())
+}
+
+/// Verify merged non-resident runs start at VCN 0 with no gaps or overlaps and cover
+/// at least `min(initialized_size, data_size)` bytes.
+fn validate_non_resident_runs(
+    runs: &[NtfsDataRun],
+    cluster_size: u64,
+    data_size: u64,
+    initialized_size: u64,
+) -> EngineResult<()> {
+    if runs.is_empty() {
+        return Err(EngineError::Ntfs("非常驻属性无数据区间，回退 icat".to_string()));
+    }
+    let mut expected_vcn: u64 = 0;
+    for run in runs {
+        if run.len_clusters == 0 || run.vcn != expected_vcn {
+            return Err(EngineError::Ntfs(
+                "非常驻属性数据区间存在 VCN 空洞、重叠或未从 0 开始，回退 icat".to_string(),
+            ));
+        }
+        expected_vcn = expected_vcn
+            .checked_add(run.len_clusters)
+            .ok_or_else(|| EngineError::Ntfs("非常驻属性 VCN 总长度溢出".to_string()))?;
+    }
+    let covered_bytes = expected_vcn
+        .checked_mul(cluster_size)
+        .ok_or_else(|| EngineError::Ntfs("非常驻属性覆盖字节数溢出".to_string()))?;
+    let required_bytes = initialized_size.min(data_size);
+    if covered_bytes < required_bytes {
+        return Err(EngineError::Ntfs(format!(
+            "非常驻属性数据区间覆盖不足（覆盖 {covered_bytes} < 需覆盖 {required_bytes}），回退 icat"
+        )));
+    }
+    Ok(())
 }
 
 /// Apply NTFS Update Sequence Array (USA) fixups to a raw MFT record buffer.
@@ -726,6 +808,7 @@ fn parse_record_attributes(record: &[u8]) -> EngineResult<Vec<ParsedAttribute>> 
                 return Err(EngineError::Ntfs("非常驻属性头过短".to_string()));
             }
             let lowest_vcn = read_u64_le(record, pos + 16);
+            let highest_vcn = read_u64_le(record, pos + 24);
             let runlist_offset = read_u16_le(record, pos + 32) as usize;
             let compression_unit = read_u16_le(record, pos + 34);
             let data_size = read_u64_le(record, pos + 48);
@@ -736,6 +819,7 @@ fn parse_record_attributes(record: &[u8]) -> EngineResult<Vec<ParsedAttribute>> 
             let runs = parse_data_runs(&record[pos + runlist_offset..pos + attr_len], lowest_vcn)?;
             ParsedAttrBody::NonResident {
                 lowest_vcn,
+                highest_vcn,
                 data_size,
                 initialized_size,
                 compression_unit,
