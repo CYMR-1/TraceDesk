@@ -66,6 +66,18 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
 
   const queryInputRef = useRef<HTMLInputElement>(null);
   const activeSearchIdRef = useRef<string | null>(null);
+  /** 防止 Rust 极速扫描在 startContentSearch invoke 返回前就发出 hits/progress/finished 事件造成丢失 */
+  const startingSearchRef = useRef(false);
+  const earlyBufferRef = useRef<
+    Map<
+      string,
+      {
+        hits: SearchHitDto[];
+        progress: SearchProgressEvent | null;
+        finished: SearchFinishedEvent | null;
+      }
+    >
+  >(new Map());
   const pendingHitsRef = useRef<SearchHitDto[]>([]);
   const rafRef = useRef<number | null>(null);
   const prevCaseIdRef = useRef<string>('');
@@ -87,6 +99,8 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
         void tauriApi.cancelContentSearch({ searchId: activeSearchIdRef.current }).catch(() => {});
       }
       activeSearchIdRef.current = null;
+      startingSearchRef.current = false;
+      earlyBufferRef.current.clear();
       pendingHitsRef.current = [];
       setSearching(false);
       setCancelling(false);
@@ -111,36 +125,64 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
     setHits((prev) => (prev.length === 0 ? chunk : prev.concat(chunk)));
   }, []);
 
-  // 订阅 Rust 流式推送事件
+  const applyFinishedEvent = useCallback(
+    (ev: SearchFinishedEvent) => {
+      if (rafRef.current !== null) {
+        window.cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      flushPendingHits();
+      setSearching(false);
+      setCancelling(false);
+      onSearchingChange(false);
+      setFinishedInfo(ev);
+      if (ev.snapshot) {
+        onSnapshotUpdated(ev.snapshot);
+      }
+    },
+    [flushPendingHits, onSearchingChange, onSnapshotUpdated]
+  );
+
+  // 订阅 Rust 流式推送事件（支持早到事件缓冲回放，杜绝小镜像 invoke/emit 竞态）
   useEffect(() => {
     let mounted = true;
     const unlisteners: (() => void)[] = [];
 
+    const ensureEarlyBucket = (id: string) => {
+      let bucket = earlyBufferRef.current.get(id);
+      if (!bucket) {
+        bucket = { hits: [], progress: null, finished: null };
+        earlyBufferRef.current.set(id, bucket);
+      }
+      return bucket;
+    };
+
     const setup = async () => {
       const u1 = await tauriEvents.onSearchHits((ev) => {
-        if (!mounted || ev.searchId !== activeSearchIdRef.current || ev.hits.length === 0) return;
-        pendingHitsRef.current.push(...ev.hits);
-        if (rafRef.current === null) {
-          rafRef.current = window.requestAnimationFrame(flushPendingHits);
+        if (!mounted || ev.hits.length === 0) return;
+        if (ev.searchId === activeSearchIdRef.current) {
+          pendingHitsRef.current.push(...ev.hits);
+          if (rafRef.current === null) {
+            rafRef.current = window.requestAnimationFrame(flushPendingHits);
+          }
+        } else if (startingSearchRef.current) {
+          ensureEarlyBucket(ev.searchId).hits.push(...ev.hits);
         }
       });
       const u2 = await tauriEvents.onSearchProgress((ev) => {
-        if (!mounted || ev.searchId !== activeSearchIdRef.current) return;
-        setProgress(ev);
+        if (!mounted) return;
+        if (ev.searchId === activeSearchIdRef.current) {
+          setProgress(ev);
+        } else if (startingSearchRef.current) {
+          ensureEarlyBucket(ev.searchId).progress = ev;
+        }
       });
       const u3 = await tauriEvents.onSearchFinished((ev) => {
-        if (!mounted || ev.searchId !== activeSearchIdRef.current) return;
-        if (rafRef.current !== null) {
-          window.cancelAnimationFrame(rafRef.current);
-          rafRef.current = null;
-        }
-        flushPendingHits();
-        setSearching(false);
-        setCancelling(false);
-        onSearchingChange(false);
-        setFinishedInfo(ev);
-        if (ev.snapshot) {
-          onSnapshotUpdated(ev.snapshot);
+        if (!mounted) return;
+        if (ev.searchId === activeSearchIdRef.current) {
+          applyFinishedEvent(ev);
+        } else if (startingSearchRef.current) {
+          ensureEarlyBucket(ev.searchId).finished = ev;
         }
       });
       unlisteners.push(u1, u2, u3);
@@ -155,7 +197,7 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
       }
       for (const u of unlisteners) u();
     };
-  }, [flushPendingHits, onSearchingChange, onSnapshotUpdated]);
+  }, [flushPendingHits, applyFinishedEvent]);
 
   // 未排除的命中
   const retainedHits = useMemo(() => {
@@ -241,6 +283,9 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
       return;
     }
 
+    activeSearchIdRef.current = null;
+    earlyBufferRef.current.clear();
+    startingSearchRef.current = true;
     pendingHitsRef.current = [];
     setHits([]);
     setExcludedSet(new Set());
@@ -258,13 +303,31 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
         selectedEntryId: scope === 'selected' ? selectedBrowserEntry?.entryId ?? null : null,
       });
       activeSearchIdRef.current = res.searchId;
+      startingSearchRef.current = false;
       setSearchId(res.searchId);
       setNeedleHex(res.needleHex);
       setActiveEncoding(encoding);
-      setSearching(true);
-      setCancelling(false);
-      onSearchingChange(true);
+
+      const early = earlyBufferRef.current.get(res.searchId);
+      earlyBufferRef.current.clear();
+
+      if (early?.hits.length) {
+        pendingHitsRef.current.push(...early.hits);
+        flushPendingHits();
+      }
+      if (early?.progress) {
+        setProgress(early.progress);
+      }
+      if (early?.finished) {
+        applyFinishedEvent(early.finished);
+      } else {
+        setSearching(true);
+        setCancelling(false);
+        onSearchingChange(true);
+      }
     } catch (err) {
+      startingSearchRef.current = false;
+      earlyBufferRef.current.clear();
       onAlert('搜索条件无效', formatError(err), 'warning');
     }
   };

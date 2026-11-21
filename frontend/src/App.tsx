@@ -810,7 +810,6 @@ export const App: React.FC = () => {
             onHashEntry={(entry) => void handleHashEntry(entry)}
             onCompareEntry={(entry) => void handleCompareEntry(entry)}
             onSearchInFile={handleSearchInFile}
-            refreshToken={refreshToken}
           />
         </div>
 
@@ -832,8 +831,17 @@ export const App: React.FC = () => {
           />
         )}
 
-        {activeTab === 'timeview' && (
-          <TimelineModule snapshot={snapshot} busy={busy} refreshToken={refreshToken} />
+        {registry.hasFeature('timeline') && (
+          <div
+            style={{
+              display: activeTab === 'timeview' ? 'flex' : 'none',
+              flex: 1,
+              minHeight: 0,
+              flexDirection: 'column',
+            }}
+          >
+            <TimelineModule snapshot={snapshot} busy={busy} />
+          </div>
         )}
 
         {activeTab === 'audit' && <AuditLogModule snapshot={snapshot} refreshToken={refreshToken} />}

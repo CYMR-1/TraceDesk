@@ -624,10 +624,11 @@ export const demoBackend = {
   }): Promise<CaseSnapshot> {
     if (!currentCase || !currentCase.evidence) throw new Error('请先加载镜像');
     const exp = args.expectedSha256.trim();
-    const mismatch = exp.length > 0 && exp.toLowerCase() !== currentCase.evidence.sha256.toLowerCase();
+    const fixedHash = currentCase.evidence.sha256;
+    const mismatch = Boolean(fixedHash && exp.length > 0 && exp.toLowerCase() !== fixedHash.toLowerCase());
     currentCase = {
       ...currentCase,
-      custodyState: mismatch ? 'error' : 'verified',
+      custodyState: !fixedHash ? 'warning' : mismatch ? 'error' : 'verified',
       evidence: {
         ...currentCase.evidence,
         provenance: {
@@ -637,11 +638,13 @@ export const demoBackend = {
           tool: args.tool,
           expectedSha256: exp,
         },
-        sourceStatus: !exp
-          ? '未提供交付方摘要，仅有本机固定值'
-          : mismatch
-            ? '警告：交付方摘要与本机固定值不一致'
-            : '交付方摘要与本机固定值一致',
+        sourceStatus: !fixedHash
+          ? '本机整镜像 SHA-256 待固定'
+          : !exp
+            ? '未提供交付方摘要，仅有本机固定值'
+            : mismatch
+              ? '警告：交付方摘要与本机固定值不一致'
+              : '交付方摘要与本机固定值一致',
       },
     };
     return currentCase;

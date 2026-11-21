@@ -59,11 +59,9 @@ export const FindingsModule: React.FC<FindingsModuleProps> = ({
       return;
     }
     try {
-      const statusSel = activeFilters.status ?? [];
-      const offsetSel = activeFilters.offset ?? [];
       const res = await tauriApi.listFindings({
-        status: statusSel.length === 1 ? statusSel[0] : null,
-        offset: offsetSel.length === 1 ? offsetSel[0] : null,
+        status: activeFilters.status?.[0] ?? null,
+        offset: activeFilters.offset?.[0] ?? null,
         keyword: keyword.trim(),
         sortColumn,
         descending: sortDescending,
@@ -73,13 +71,7 @@ export const FindingsModule: React.FC<FindingsModuleProps> = ({
         status: res.filterOptions.statuses,
         offset: res.filterOptions.offsets,
       });
-      // 前端补全多选过滤（当勾选多个值时）
-      const filtered = res.groups.filter((g) => {
-        if (statusSel.length > 1 && !statusSel.includes(g.status)) return false;
-        if (offsetSel.length > 1 && !offsetSel.includes(String(g.offset))) return false;
-        return true;
-      });
-      setGroups(filtered);
+      setGroups(res.groups);
     } catch (err) {
       setStatusText(`读取取证发现失败：${formatError(err)}`);
       setGroups([]);
@@ -105,6 +97,7 @@ export const FindingsModule: React.FC<FindingsModuleProps> = ({
         width: 118,
         pill: true,
         filterable: true,
+        filterMode: 'single',
         getText: (g) => g.status,
       },
       {
@@ -113,6 +106,7 @@ export const FindingsModule: React.FC<FindingsModuleProps> = ({
         width: 115,
         mono: true,
         filterable: true,
+        filterMode: 'single',
         getText: (g) => String(g.offset),
       },
       { key: 'inode', label: 'inode', width: 100, mono: true, getText: (g) => g.inode || '—' },

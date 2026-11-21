@@ -67,7 +67,7 @@ export function canExportEntry(entry: EntryView): boolean {
   if (entry.canExport !== undefined) {
     return entry.canExport;
   }
-  return !entry.directory && !entry.mode.toLowerCase().startsWith('v/');
+  return !entry.directory && (entry.mode.startsWith('r/') || (entry.deleted && entry.mode.startsWith('-/r')));
 }
 
 /** 旧版操作中文名映射 (对齐 forensic/core/findings.py) */

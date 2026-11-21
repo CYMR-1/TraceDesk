@@ -20,10 +20,9 @@ const LARGE_INVENTORY_THRESHOLD = 1000;
 interface TimelineModuleProps {
   snapshot: CaseSnapshot | null;
   busy: boolean;
-  refreshToken: number;
 }
 
-export const TimelineModule: React.FC<TimelineModuleProps> = ({ snapshot, busy, refreshToken }) => {
+export const TimelineModule: React.FC<TimelineModuleProps> = ({ snapshot, busy }) => {
   const [built, setBuilt] = useState(false);
   const [building, setBuilding] = useState(false);
   const [hint, setHint] = useState('尚未打开案件');
@@ -46,7 +45,7 @@ export const TimelineModule: React.FC<TimelineModuleProps> = ({ snapshot, busy, 
   const [detailOpen, setDetailOpen] = useState(false);
 
   const lastCaseKeyRef = useRef('');
-  const caseKey = `${snapshot?.id ?? ''}|${snapshot?.inventoryCount ?? 0}|${snapshot?.browsingDirectories ? 'q' : 'f'}|${refreshToken}`;
+  const caseKey = `${snapshot?.id ?? ''}|${snapshot?.evidence?.path ?? ''}|${snapshot?.inventoryCount ?? 0}|${snapshot?.browsingDirectories ? 'q' : 'f'}`;
 
   const needsManualBuild = Boolean(
     snapshot &&
@@ -113,30 +112,21 @@ export const TimelineModule: React.FC<TimelineModuleProps> = ({ snapshot, busy, 
     void handleBuildTimeline();
   }, [caseKey, snapshot, handleBuildTimeline]);
 
-  // 查询时间线分页
+  // 查询时间线分页（单值筛选与后端分页总数 100% 一致）
   const fetchPage = useCallback(async () => {
     if (!snapshot || !built) return;
     try {
-      const eventSel = activeFilters.event ?? [];
-      const statusSel = activeFilters.status ?? [];
-      const offsetSel = activeFilters.offset ?? [];
       const res = await tauriApi.queryTimelinePage({
         query: appliedQuery,
-        event: eventSel.length === 1 ? eventSel[0] : null,
-        status: statusSel.length === 1 ? statusSel[0] : null,
-        offset: offsetSel.length === 1 ? offsetSel[0] : null,
+        event: activeFilters.event?.[0] ?? null,
+        status: activeFilters.status?.[0] ?? null,
+        offset: activeFilters.offset?.[0] ?? null,
         sortColumn,
         descending: sortDescending,
         page,
         pageSize: PAGE_SIZE,
       });
-      const multiFiltered = res.items.filter((row) => {
-        if (eventSel.length > 1 && !eventSel.includes(row.event)) return false;
-        if (statusSel.length > 1 && !statusSel.includes(row.status)) return false;
-        if (offsetSel.length > 1 && !offsetSel.includes(String(row.offset))) return false;
-        return true;
-      });
-      setRows(multiFiltered);
+      setRows(res.items);
       setTotalEvents(res.totalEvents);
       setTotalPages(Math.max(1, res.totalPages));
     } catch (err) {
@@ -157,9 +147,9 @@ export const TimelineModule: React.FC<TimelineModuleProps> = ({ snapshot, busy, 
     () => [
       { key: 'seq', label: '序号', width: 78, mono: true, sortable: true, getText: (r) => String(r.number) },
       { key: 'time', label: '时间（UTC+8）', width: 178, mono: true, sortable: true, getText: (r) => r.time },
-      { key: 'event', label: '事件', width: 148, pill: true, filterable: true, getText: (r) => r.event },
-      { key: 'status', label: '状态', width: 128, pill: true, filterable: true, getText: (r) => r.status },
-      { key: 'offset', label: '分区偏移', width: 115, mono: true, filterable: true, getText: (r) => String(r.offset) },
+      { key: 'event', label: '事件', width: 148, pill: true, filterable: true, filterMode: 'single', getText: (r) => r.event },
+      { key: 'status', label: '状态', width: 128, pill: true, filterable: true, filterMode: 'single', getText: (r) => r.status },
+      { key: 'offset', label: '分区偏移', width: 115, mono: true, filterable: true, filterMode: 'single', getText: (r) => String(r.offset) },
       { key: 'inode', label: 'inode', width: 100, mono: true, getText: (r) => r.inode || '—' },
       { key: 'path', label: '镜像内路径', width: 320, getText: (r) => r.path },
     ],

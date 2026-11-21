@@ -57,16 +57,12 @@ export const AuditLogModule: React.FC<AuditLogModuleProps> = ({ snapshot, refres
       return;
     }
     try {
-      const originSel = activeFilters.origin ?? [];
-      const actorSel = activeFilters.actor ?? [];
-      const actionSel = activeFilters.action ?? [];
-      const resultSel = activeFilters.result ?? [];
       const res = await tauriApi.listAuditLog({
         query: query.trim(),
-        origin: originSel.length === 1 ? originSel[0] : null,
-        actor: actorSel.length === 1 ? actorSel[0] : null,
-        action: actionSel.length === 1 ? actionSel[0] : null,
-        result: resultSel.length === 1 ? resultSel[0] : null,
+        origin: activeFilters.origin?.[0] ?? null,
+        actor: activeFilters.actor?.[0] ?? null,
+        action: activeFilters.action?.[0] ?? null,
+        result: activeFilters.result?.[0] ?? null,
         sortColumn,
         descending: sortDescending,
       });
@@ -78,16 +74,7 @@ export const AuditLogModule: React.FC<AuditLogModuleProps> = ({ snapshot, refres
         action: res.filterOptions.actions,
         result: res.filterOptions.results,
       });
-      const multiFiltered = res.records.filter((r) => {
-        const originText = r.originLabel || (r.origin === 'mcp' ? 'MCP' : '人工');
-        const actionText = r.actionTitle || AUDIT_ACTION_TITLES[r.action] || r.action;
-        if (originSel.length > 1 && !originSel.includes(originText)) return false;
-        if (actorSel.length > 1 && !actorSel.includes(r.actor)) return false;
-        if (actionSel.length > 1 && !actionSel.includes(actionText)) return false;
-        if (resultSel.length > 1 && !resultSel.includes(r.result)) return false;
-        return true;
-      });
-      setRecords(multiFiltered);
+      setRecords(res.records);
     } catch (err) {
       setValid(false);
       setStatusText(`日志校验失败：${formatError(err)}`);
@@ -114,17 +101,19 @@ export const AuditLogModule: React.FC<AuditLogModuleProps> = ({ snapshot, refres
         width: 96,
         pill: true,
         filterable: true,
+        filterMode: 'single',
         getText: (r) => r.originLabel || (r.origin === 'mcp' ? 'MCP' : '人工'),
       },
-      { key: 'actor', label: '操作人员', width: 132, filterable: true, getText: (r) => r.actor },
+      { key: 'actor', label: '操作人员', width: 132, filterable: true, filterMode: 'single', getText: (r) => r.actor },
       {
         key: 'action',
         label: '操作',
         width: 150,
         filterable: true,
+        filterMode: 'single',
         getText: (r) => r.actionTitle || AUDIT_ACTION_TITLES[r.action] || r.action,
       },
-      { key: 'result', label: '结果', width: 112, pill: true, filterable: true, getText: (r) => r.result },
+      { key: 'result', label: '结果', width: 112, pill: true, filterable: true, filterMode: 'single', getText: (r) => r.result },
       { key: 'subject', label: '对象', width: 320, getText: (r) => r.subject },
     ],
     []

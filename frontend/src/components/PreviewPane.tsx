@@ -110,7 +110,7 @@ export const PreviewPane: React.FC<PreviewPaneProps> = ({
   const hexRowRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
   const canPreview = Boolean(
-    entry && !entry.directory && !entry.mode.toLowerCase().startsWith('v/')
+    entry && !entry.directory && !entry.mode.startsWith('V/')
   );
 
   const loadPage = useCallback(
@@ -216,7 +216,7 @@ export const PreviewPane: React.FC<PreviewPaneProps> = ({
       <div className="td-preview-empty">
         <UiIcon name="document_preview" size={32} color="var(--text-disabled)" />
         <div className="td-preview-empty-title">
-          {entry && (entry.directory || entry.mode.toLowerCase().startsWith('v/'))
+          {entry && (entry.directory || entry.mode.startsWith('V/'))
             ? '请选择目录中的文件'
             : emptyMessage}
         </div>

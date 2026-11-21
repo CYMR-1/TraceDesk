@@ -42,7 +42,6 @@ interface FileBrowserModuleProps {
   onHashEntry: (entry: EntryView) => void;
   onCompareEntry: (entry: EntryView) => void;
   onSearchInFile: (entry: EntryView) => void;
-  refreshToken: number;
 }
 
 export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
@@ -61,7 +60,6 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
   onHashEntry,
   onCompareEntry,
   onSearchInFile,
-  refreshToken,
 }) => {
   const [scopeOffset, setScopeOffset] = useState<number | null>(null);
   const [scopePath, setScopePath] = useState<string | null>(null);
@@ -70,7 +68,8 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'deleted'>('all');
   const [appliedSuffix, setAppliedSuffix] = useState('');
   const [appliedKeyword, setAppliedKeyword] = useState('');
-  const [filterTrigger, setFilterTrigger] = useState({ seq: 0, logFilter: false });
+  const [filterSeq, setFilterSeq] = useState(0);
+  const pendingLogFilterRef = useRef(false);
 
   const [page, setPage] = useState(0);
   const [total, setTotal] = useState(0);
@@ -105,8 +104,15 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
     return parts[parts.length - 1] || evidence.path;
   }, [evidence?.path]);
 
-  // 案件或镜像重置时初始化目录树与范围
-  const caseIdentity = `${snapshot?.id ?? ''}|${evidence?.path ?? ''}|${snapshot?.inventoryCount ?? 0}|${snapshot?.browsingDirectories ? 'q' : 'f'}|${refreshToken}`;
+  // 案件或镜像结构变更时才重置目录树与范围（切换标签或记笔记/导出不清空展开状态与筛选）
+  const partitionScansSummary = useMemo(
+    () =>
+      (snapshot?.partitionScans ?? [])
+        .map((s) => `${s.offset}:${s.status}:${s.count ?? ''}`)
+        .join(','),
+    [snapshot?.partitionScans]
+  );
+  const caseIdentity = `${snapshot?.id ?? ''}|${evidence?.path ?? ''}|${snapshot?.inventoryCount ?? 0}|${snapshot?.browsingDirectories ? 'q' : 'f'}|${partitionScansSummary}`;
   const prevIdentityRef = useRef('');
 
   const loadTreeBranch = useCallback(
@@ -176,9 +182,11 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
     }
   }, [snapshot?.quickLocation]);
 
-  // 查询当前分页文件列表
+  // 查询当前分页文件列表（一次性消费 pendingLogFilterRef，避免翻页/切目录重复写 FILE_FILTER 审计记录）
   const fetchFilesPage = useCallback(
-    async (targetPage: number, logFilter = false) => {
+    async (targetPage: number) => {
+      const shouldLogFilter = pendingLogFilterRef.current;
+      pendingLogFilterRef.current = false;
       if (!snapshot || !evidence) {
         setItems([]);
         setTotal(0);
@@ -195,7 +203,7 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
           status: statusFilter,
           page: targetPage,
           pageSize: PAGE_SIZE,
-          logFilter,
+          logFilter: shouldLogFilter,
         });
         setItems(res.items);
         setTotal(res.total);
@@ -229,38 +237,40 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
   );
 
   useEffect(() => {
-    void fetchFilesPage(page, filterTrigger.logFilter);
+    void fetchFilesPage(page);
   }, [
     snapshot?.id,
     snapshot?.inventoryCount,
     snapshot?.quickLocation?.offset,
     snapshot?.quickLocation?.path,
     evidence?.path,
+    partitionScansSummary,
     scopeOffset,
     scopePath,
     appliedSuffix,
     appliedKeyword,
     statusFilter,
     page,
-    filterTrigger.seq,
-    refreshToken,
+    filterSeq,
   ]);
 
   const handleApplyFilter = () => {
+    pendingLogFilterRef.current = true;
     setAppliedSuffix(suffix);
     setAppliedKeyword(keyword);
     setPage(0);
-    setFilterTrigger((prev) => ({ seq: prev.seq + 1, logFilter: true }));
+    setFilterSeq((n) => n + 1);
   };
 
   const handleResetFilter = () => {
+    pendingLogFilterRef.current = false;
     setSuffix('');
     setKeyword('');
     setAppliedSuffix('');
     setAppliedKeyword('');
     setStatusFilter('all');
     setPage(0);
-    setFilterTrigger((prev) => ({ seq: prev.seq + 1, logFilter: false }));
+    setFilterSeq((n) => n + 1);
   };
 
   const toggleTreeExpand = (nodeId: string, offset?: number, path?: string, groupIndex?: number) => {

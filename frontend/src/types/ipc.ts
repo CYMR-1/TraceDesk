@@ -55,7 +55,8 @@ export interface PartitionInfo {
 }
 
 export interface EwfSegmentInfo {
-  path: string;
+  name?: string;
+  path?: string;
   size: number;
   sha256?: string;
 }
@@ -89,7 +90,7 @@ export interface ProvenanceInfo {
 export interface EvidenceInfo {
   path: string;
   size: number;
-  sha256: string;
+  sha256: string | null;
   fixedAt?: string | null;
   fixed_at?: string | null;
   format?: string;
@@ -113,7 +114,9 @@ export interface PartitionScan {
 
 export interface VerificationInfo {
   ok: boolean;
+  time?: string;
   checkedAt?: string;
+  actual?: string | null;
   method?: string;
   note?: string;
 }
