@@ -482,9 +482,23 @@ fn scan_via_icat(
     if cancel.load(Ordering::Relaxed) {
         return Err(CoreError::Cancelled("已取消内容搜索".to_string()));
     }
+    if !hit_limit {
+        let _ = matcher.push_chunk(&[], Some(cancel))?;
+    }
 
     match stream_res {
-        Ok(_) => Ok((matcher.into_hits(), None)),
+        Ok((written, note)) => {
+            let err_msg = if hit_limit {
+                None
+            } else if !note.is_empty() {
+                Some(note)
+            } else if written < entry.size {
+                Some(format!("仅读到 {written}/{} 字节", entry.size))
+            } else {
+                None
+            };
+            Ok((matcher.into_hits(), err_msg))
+        }
         Err(err) if hit_limit && err.is_cancelled() => Ok((matcher.into_hits(), None)),
         Err(err) if err.is_cancelled() => Err(CoreError::Cancelled("已取消内容搜索".to_string())),
         Err(err) => Ok((matcher.into_hits(), Some(err.to_string()))),
