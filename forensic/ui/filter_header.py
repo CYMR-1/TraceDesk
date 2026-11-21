@@ -1,7 +1,9 @@
 """支持表头下拉筛选、全选复选框与指定列排序的表头组件。"""
-from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QHeaderView, QMenu
+
+from . import theme
 
 
 class FilterHeaderView(QHeaderView):
@@ -10,6 +12,8 @@ class FilterHeaderView(QHeaderView):
     toggled = Signal(bool)
     filter_changed = Signal(int, object)
     sort_requested = Signal(int)
+
+    SECTION_HEIGHT = 32
 
     def __init__(self, parent=None, *, checkable_column=None, check_label='全选',
                  filter_columns=(), sort_columns=()):
@@ -29,6 +33,10 @@ class FilterHeaderView(QHeaderView):
         self._hovered_column = -1
         if sort_columns:
             self.setSortIndicatorShown(True)
+
+    def sizeHint(self):
+        size = super().sizeHint()
+        return QSize(size.width(), max(self.SECTION_HEIGHT, size.height()))
 
     def check_state(self):
         return self._check_state
@@ -81,8 +89,8 @@ class FilterHeaderView(QHeaderView):
 
     @staticmethod
     def _checkbox_rect(rect):
+        # QTreeView::indicator 为 15px 内容 + 1px 边框（总 17px），左起点与行复选框像素对齐。
         size = 17
-        # QTreeView::indicator 为 15px 内容 + 1px 边框（总 17px），左起点与行复选框对齐。
         x = rect.left() + 8
         y = rect.top() + (rect.height() - size) // 2
         return QRect(x, y, size, size)
@@ -94,40 +102,66 @@ class FilterHeaderView(QHeaderView):
         value = model.headerData(logicalIndex, self.orientation(), Qt.ItemDataRole.DisplayRole)
         return '' if value is None else str(value)
 
+    def _header_alignment(self, logicalIndex):
+        model = self.model()
+        if model is not None:
+            value = model.headerData(logicalIndex, self.orientation(), Qt.ItemDataRole.TextAlignmentRole)
+            if value is not None:
+                return Qt.AlignmentFlag(value)
+        return self.defaultAlignment()
+
+    def _header_font(self, painter, *, bold=False):
+        font = QFont(painter.font())
+        font.setPointSizeF(8.5)
+        font.setWeight(QFont.Weight.Bold if bold else QFont.Weight.DemiBold)
+        return font
+
+    def _paint_chrome(self, painter, rect, logicalIndex, *, bg, active=False):
+        painter.fillRect(rect, QColor(bg))
+        painter.fillRect(QRect(rect.left(), rect.bottom(), rect.width(), 1), QColor(theme.HEADER_CELL_BORDER))
+        if logicalIndex < self.count() - 1:
+            painter.fillRect(QRect(rect.right(), rect.top(), 1, max(0, rect.height() - 1)),
+                             QColor(theme.HEADER_CELL_DIVIDER))
+        if active:
+            painter.fillRect(QRect(rect.left(), rect.bottom() - 1, rect.width(), 2), QColor(theme.ACCENT))
+
     def paintSection(self, painter, rect, logicalIndex):
+        if not rect.isValid():
+            return
+
         if logicalIndex == self._checkable_column:
-            super().paintSection(painter, rect, logicalIndex)
-            box = QRectF(self._checkbox_rect(rect)).adjusted(0.5, 0.5, -0.5, -0.5)
             hovered = self._hovered_column == logicalIndex
             painter.save()
+            bg = theme.HEADER_CELL_HOVER_BG if hovered else theme.HEADER_CELL_BG
+            self._paint_chrome(painter, rect, logicalIndex, bg=bg)
+            box = QRectF(self._checkbox_rect(rect)).adjusted(0.5, 0.5, -0.5, -0.5)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             checked = self._check_state != Qt.CheckState.Unchecked
-            fill = QColor('#087f6b') if checked else QColor('#ffffff')
-            border = QColor('#087f6b') if (checked or hovered) else QColor('#b8c7bf')
+            fill = QColor(theme.ACCENT) if checked else QColor(theme.SURFACE_BG)
+            border = QColor(theme.ACCENT) if (checked or hovered) else QColor(theme.BORDER_STRONG)
             painter.setPen(QPen(border, 1.0))
             painter.setBrush(fill)
-            painter.drawRoundedRect(box, 4.0, 4.0)
+            painter.drawRoundedRect(box, 3.0, 3.0)
             if self._check_state == Qt.CheckState.Checked:
                 path = QPainterPath()
                 path.moveTo(box.left() + box.width() * 0.22, box.top() + box.height() * 0.52)
                 path.lineTo(box.left() + box.width() * 0.42, box.top() + box.height() * 0.72)
-                path.lineTo(box.left() + box.width() * 0.78, box.top() + box.height() * 0.30)
-                pen = QPen(QColor('#ffffff'), 1.8, Qt.PenStyle.SolidLine,
+                path.lineTo(box.left() + box.width() * 0.78, box.top() + box.height() * 0.29)
+                pen = QPen(QColor(theme.SURFACE_BG), 1.7, Qt.PenStyle.SolidLine,
                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
                 painter.setPen(pen)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawPath(path)
             elif self._check_state == Qt.CheckState.PartiallyChecked:
                 y = box.center().y()
-                pen = QPen(QColor('#ffffff'), 2.0, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+                pen = QPen(QColor(theme.SURFACE_BG), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
                 painter.setPen(pen)
-                painter.drawLine(QPointF(box.left() + 3.5, y), QPointF(box.right() - 3.5, y))
+                painter.drawLine(QPointF(box.left() + 3.2, y), QPointF(box.right() - 3.2, y))
             if self._check_label:
-                font = QFont(painter.font())
-                font.setWeight(QFont.Weight.DemiBold)
-                painter.setFont(font)
-                painter.setPen(QColor('#087f6b') if hovered else QColor('#5b6d64'))
-                text_rect = QRect(int(box.right()) + 6, rect.top(), max(0, rect.right() - int(box.right()) - 8), rect.height())
+                painter.setFont(self._header_font(painter))
+                painter.setPen(QColor(theme.ACCENT) if hovered else QColor(theme.TEXT_SECONDARY))
+                text_left = int(box.right()) + 6
+                text_rect = QRect(text_left, rect.top(), max(0, rect.right() - text_left - 6), rect.height())
                 painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._check_label)
             painter.restore()
             return
@@ -137,38 +171,105 @@ class FilterHeaderView(QHeaderView):
             hovered = self._hovered_column == logicalIndex
             active = selected is not None
             painter.save()
-            bg = QColor('#e5f4ed') if active else (QColor('#ebf2ee') if hovered else QColor('#f3f6f5'))
-            painter.fillRect(rect, bg)
-            painter.setPen(QPen(QColor('#dfe7e2'), 1.0))
-            painter.drawLine(rect.bottomLeft(), rect.bottomRight())
-            if logicalIndex < self.count() - 1:
-                painter.setPen(QPen(QColor('#ffffff'), 2.0))
-                painter.drawLine(rect.right(), rect.top(), rect.right(), rect.bottom())
+            bg = theme.HEADER_CELL_ACTIVE_BG if active else (
+                theme.HEADER_CELL_HOVER_BG if hovered else theme.HEADER_CELL_BG
+            )
+            self._paint_chrome(painter, rect, logicalIndex, bg=bg, active=active)
             base = self._base_label(logicalIndex)
             label = f'{base}：{selected}' if active else base
-            font = QFont(painter.font())
-            font.setWeight(QFont.Weight.DemiBold)
-            painter.setFont(font)
-            text_color = QColor('#087f6b') if (active or hovered) else QColor('#5b6d64')
+            painter.setFont(self._header_font(painter, bold=active))
+            text_color = QColor(theme.ACCENT_SOFT_TEXT) if active else (
+                QColor(theme.ACCENT) if hovered else QColor(theme.HEADER_CELL_FG)
+            )
             painter.setPen(text_color)
-            text_rect = QRect(rect.left() + 7, rect.top(), max(0, rect.width() - 25), rect.height())
+            text_rect = QRect(rect.left() + 8, rect.top(), max(0, rect.width() - 26), rect.height())
             elided = painter.fontMetrics().elidedText(label, Qt.TextElideMode.ElideRight, text_rect.width())
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elided)
-            # 右侧绘制下拉箭头，提示该列可点击下拉筛选。
+            # 右侧绘制下拉筛选指示图标（激活时实心普鲁士蓝，悬停时普鲁士蓝，默认静默灰蓝）。
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            cx = rect.right() - 11
-            cy = rect.center().y()
-            chevron = QPainterPath()
-            chevron.moveTo(cx - 3.5, cy - 1.5)
-            chevron.lineTo(cx, cy + 2.2)
-            chevron.lineTo(cx + 3.5, cy - 1.5)
-            painter.setPen(QPen(text_color, 1.5, Qt.PenStyle.SolidLine,
-                                Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-            painter.drawPath(chevron)
+            cx = float(rect.right() - 11)
+            cy = float(rect.center().y()) + 0.5
+            if active:
+                triangle = QPolygonF([
+                    QPointF(cx - 3.6, cy - 1.8),
+                    QPointF(cx + 3.6, cy - 1.8),
+                    QPointF(cx, cy + 2.4),
+                ])
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(theme.ACCENT))
+                painter.drawPolygon(triangle)
+            else:
+                chevron = QPainterPath()
+                chevron.moveTo(cx - 3.4, cy - 1.5)
+                chevron.lineTo(cx, cy + 2.0)
+                chevron.lineTo(cx + 3.4, cy - 1.5)
+                chevron_color = QColor(theme.ACCENT) if hovered else QColor(theme.TEXT_MUTED)
+                painter.setPen(QPen(chevron_color, 1.5, Qt.PenStyle.SolidLine,
+                                    Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPath(chevron)
             painter.restore()
             return
 
-        super().paintSection(painter, rect, logicalIndex)
+        if logicalIndex in self._sort_columns:
+            hovered = self._hovered_column == logicalIndex
+            is_sorted = self.isSortIndicatorShown() and self.sortIndicatorSection() == logicalIndex
+            painter.save()
+            bg = theme.HEADER_CELL_HOVER_BG if hovered else theme.HEADER_CELL_BG
+            self._paint_chrome(painter, rect, logicalIndex, bg=bg)
+            painter.setFont(self._header_font(painter))
+            text_color = QColor(theme.ACCENT) if (is_sorted or hovered) else QColor(theme.HEADER_CELL_FG)
+            painter.setPen(text_color)
+            text_rect = QRect(rect.left() + 8, rect.top(), max(0, rect.width() - 26), rect.height())
+            elided = painter.fontMetrics().elidedText(
+                self._base_label(logicalIndex), Qt.TextElideMode.ElideRight, text_rect.width()
+            )
+            painter.drawText(text_rect, self._header_alignment(logicalIndex), elided)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            cx = float(rect.right() - 11)
+            cy = float(rect.center().y()) + 0.5
+            if is_sorted:
+                ascending = self.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
+                arrow = QPainterPath()
+                if ascending:
+                    arrow.moveTo(cx - 3.4, cy + 1.6)
+                    arrow.lineTo(cx, cy - 2.0)
+                    arrow.lineTo(cx + 3.4, cy + 1.6)
+                else:
+                    arrow.moveTo(cx - 3.4, cy - 1.6)
+                    arrow.lineTo(cx, cy + 2.0)
+                    arrow.lineTo(cx + 3.4, cy - 1.6)
+                painter.setPen(QPen(QColor(theme.ACCENT), 1.6, Qt.PenStyle.SolidLine,
+                                    Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPath(arrow)
+            elif hovered:
+                up = QPainterPath()
+                up.moveTo(cx - 2.6, cy - 1.2)
+                up.lineTo(cx, cy - 3.6)
+                up.lineTo(cx + 2.6, cy - 1.2)
+                down = QPainterPath()
+                down.moveTo(cx - 2.6, cy + 1.2)
+                down.lineTo(cx, cy + 3.6)
+                down.lineTo(cx + 2.6, cy + 1.2)
+                painter.setPen(QPen(QColor(theme.TEXT_MUTED), 1.3, Qt.PenStyle.SolidLine,
+                                    Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPath(up)
+                painter.drawPath(down)
+            painter.restore()
+            return
+
+        painter.save()
+        self._paint_chrome(painter, rect, logicalIndex, bg=theme.HEADER_CELL_BG)
+        painter.setFont(self._header_font(painter))
+        painter.setPen(QColor(theme.HEADER_CELL_FG))
+        text_rect = QRect(rect.left() + 8, rect.top(), max(0, rect.width() - 16), rect.height())
+        elided = painter.fontMetrics().elidedText(
+            self._base_label(logicalIndex), Qt.TextElideMode.ElideRight, text_rect.width()
+        )
+        painter.drawText(text_rect, self._header_alignment(logicalIndex), elided)
+        painter.restore()
 
     def _near_edge(self, pos_x, column):
         left = self.sectionViewportPosition(column)

@@ -6,16 +6,19 @@ from pathlib import Path
 from PySide6.QtCore import QBuffer, QIODevice, QPoint, QSize, Qt
 from PySide6.QtGui import QFont, QFontDatabase, QFontMetrics, QImageReader, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
+    QAbstractItemView, QApplication, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QListView, QPlainTextEdit, QPushButton, QSizePolicy, QStackedWidget, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 
 from ..engines.tsk import deleted_source_note
 from ..core.preview import LEGACY_MULTIBYTE, PAGE_BYTES, PREVIEW_ENCODINGS, PreviewReader, preview_rows, preview_text
-from .tabs import TabbedView
+from . import theme
+from .delegates import HexItemDelegate
+from .icons import ui_icon
+from .metrics import CONTROL_GAP, ROW_HEIGHT_HEX
 from .pagination import PageLabel
-from .metrics import CONTROL_GAP, SECTION_GAP
+from .tabs import TabbedView
 
 
 MAX_IMAGE_BYTES = 32 * 1024 * 1024
@@ -70,10 +73,14 @@ class EncodingChoice(QComboBox):
         view = self.view()
         view.ensurePolished()
         height = view.sizeHintForRow(0) * self.count() + 2 * view.frameWidth()
-        screen = self.screen().availableGeometry()
+        screen_obj = self.screen() or QApplication.primaryScreen()
+        screen = screen_obj.availableGeometry()
         top = self.mapToGlobal(QPoint(0, 0)).y()
         room = max(top - screen.top(), screen.bottom() - top - self.height())
         view.setMinimumHeight(min(height, max(0, room - 16)))
+        fm = view.fontMetrics()
+        widest = max((fm.horizontalAdvance(self.itemText(i)) for i in range(self.count())), default=0)
+        view.setMinimumWidth(max(self.width(), widest + 28))
         super().showPopup()
 
 
@@ -88,17 +95,46 @@ class FilePreview(QWidget):
         self.size = self.page = 0
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
-        self._layout.setSpacing(SECTION_GAP)
+        self._layout.setSpacing(0)
+        self._build_empty_state()
         self._build_rows()
         self._build_controls()
         self.formats.currentChanged.connect(self._update_controls)
         self.clear()
 
+    def _build_empty_state(self):
+        self._empty_state = QFrame(self)
+        self._empty_state.setObjectName('previewEmptyState')
+        empty_layout = QVBoxLayout(self._empty_state)
+        empty_layout.setContentsMargins(24, 24, 24, 24)
+        empty_layout.setSpacing(6)
+        empty_layout.addStretch(1)
+        icon_label = QLabel(self._empty_state)
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_label.setPixmap(ui_icon('document_preview', color=theme.TEXT_DISABLED, size=32).pixmap(QSize(32, 32)))
+        empty_layout.addWidget(icon_label)
+        empty_layout.addSpacing(4)
+        self._empty_label = QLabel('请选择文件', self._empty_state)
+        self._empty_label.setObjectName('previewEmptyTitle')
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._empty_label.setWordWrap(True)
+        empty_layout.addWidget(self._empty_label)
+        self._empty_hint = QLabel('单击文件即可只读预览文本、图片或原始十六进制字节', self._empty_state)
+        self._empty_hint.setObjectName('previewEmptyHint')
+        self._empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_hint.setTextFormat(Qt.TextFormat.PlainText)
+        self._empty_hint.setWordWrap(True)
+        empty_layout.addWidget(self._empty_hint)
+        empty_layout.addStretch(1)
+        self._layout.addWidget(self._empty_state, 1)
+
     def _build_controls(self):
         self.encoding_controls = QWidget(self.formats)
         self.encoding_controls.setObjectName('previewEncoding')
         encoding_layout = QHBoxLayout(self.encoding_controls)
-        encoding_layout.setContentsMargins(CONTROL_GAP, 0, 0, 0)
+        encoding_layout.setContentsMargins(CONTROL_GAP, 0, 8, 0)
+        encoding_layout.setSpacing(6)
         encoding_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         encoding_layout.addWidget(QLabel('编码'))
         self.encoding = EncodingChoice()
@@ -106,15 +142,20 @@ class FilePreview(QWidget):
         encoding_layout.addWidget(self.encoding)
         self.formats.set_actions(self.encoding_controls, (self.encoding,))
 
-        bar = QHBoxLayout()
-        bar.setContentsMargins(0, 0, 0, 0)
+        self.footer = QFrame(self)
+        self.footer.setObjectName('previewFooter')
+        bar = QHBoxLayout(self.footer)
+        bar.setContentsMargins(12, 5, 12, 5)
         bar.setSpacing(CONTROL_GAP)
         self.status = PageLabel(lambda index: self.turn(index - self.page))
-        self.status.setProperty('role', 'muted')
-        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.status.setProperty('role', 'pageBadge')
+        self.status.setFont(theme.mono_font(8.5, cjk_fallback=True))
+        self.status.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.status.setMinimumWidth(40)
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        bar.addWidget(self.status, 1)
+        bar.addWidget(self.status)
+        bar.addStretch(1)
         self.previous = QPushButton('上一页')
         self.previous.clicked.connect(lambda: self.turn(-1))
         self.next = QPushButton('下一页')
@@ -123,17 +164,14 @@ class FilePreview(QWidget):
             button.setProperty('role', 'pager')
         bar.addWidget(self.previous)
         bar.addWidget(self.next)
-        self._layout.addLayout(bar)
+        self._layout.addWidget(self.footer)
 
     def _set_status(self, message):
         self.status.setText(message)
         self.status.setToolTip(message + (' · 双击页码跳转' if self.status.total > 1 else ''))
 
     def _build_rows(self):
-        fixed = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-        if 'Consolas' in QFontDatabase.families():
-            fixed.setFamily('Consolas')
-        fixed.setPointSizeF(10.5)
+        fixed = theme.mono_font(10.0, cjk_fallback=False)
         self._fixed_font = fixed
         systems = QFontDatabase.WritingSystem
         supported = set(QFontDatabase.families(systems.Gurmukhi)).intersection(
@@ -146,9 +184,11 @@ class FilePreview(QWidget):
         metrics = QFontMetrics(fixed)
         self.rows = QTreeWidget()
         self.rows.setObjectName('hexPreview')
+        self.rows.setProperty('flush', True)
         self.rows.setColumnCount(3)
         self.rows.setHeaderLabels(('文件偏移 (HEX)', '十六进制', '字符'))
         self.rows.setFont(fixed)
+        self.rows.setItemDelegate(HexItemDelegate(self.rows, row_height=ROW_HEIGHT_HEX))
         self.rows.setRootIsDecorated(False)
         self.rows.setUniformRowHeights(True)
         self.rows.setAlternatingRowColors(True)
@@ -157,11 +197,12 @@ class FilePreview(QWidget):
         self.rows.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.rows.header().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.rows.header().setStretchLastSection(True)
-        for column, characters in enumerate((16, 48, 20)):
+        for column, characters in enumerate((16, 50, 20)):
             self.rows.setColumnWidth(column, metrics.horizontalAdvance('0') * characters + 20)
         self.vertical = self.rows.verticalScrollBar()
         self.horizontal = self.rows.horizontalScrollBar()
         self.text = QPlainTextEdit()
+        self.text.setProperty('flush', True)
         self.text.setReadOnly(True)
         self.text.setFont(fixed)
         self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
@@ -171,7 +212,11 @@ class FilePreview(QWidget):
         self.content.addWidget(self.image)
         self.formats = TabbedView()
         self.formats.tabBar().setObjectName('previewTabs')
-        self.formats.layout().setSpacing(SECTION_GAP)
+        self.formats.layout().setSpacing(0)
+        strip = self.formats.tabBar().parentWidget()
+        if isinstance(strip, QFrame) and strip is not self.formats:
+            strip.setObjectName('previewModeBar')
+            theme.repolish(strip)
         self.formats.addTab(self.content, '文本')
         self.formats.addTab(self.rows, '十六进制')
         self._layout.addWidget(self.formats, 1)
@@ -207,9 +252,11 @@ class FilePreview(QWidget):
     def clear(self, message='请选择文件'):
         self._has_file = False
         self.formats.hide()
+        self.footer.hide()
         self._reset_data()
         self._set_image_mode(False)
         self._page_status = message
+        self._empty_label.setText(message)
         self._update_controls()
 
     def open_file(self, image, entry, validate=None):
@@ -270,7 +317,9 @@ class FilePreview(QWidget):
 
     def _update_controls(self, event=None):
         showing_image = self._image_mode and self.formats.currentIndex() == 0
+        self._empty_state.setVisible(not self._has_file)
         self.formats.setVisible(self._has_file)
+        self.footer.setVisible(self._has_file)
         self.status.setVisible(self._has_file)
         self.encoding_controls.setVisible(not showing_image)
         self.previous.setVisible(self._has_file and not showing_image)
@@ -278,6 +327,8 @@ class FilePreview(QWidget):
         count = (self.size + PAGE_BYTES - 1) // PAGE_BYTES
         self.status.set_pages(self.page + 1, count if not showing_image and self._page_status.startswith('第 ') else 1, show_text=False)
         self._set_status(self._image_status if showing_image else self._page_status)
+        if not self._has_file:
+            self._empty_label.setText(self._page_status or '请选择文件')
 
     @staticmethod
     def _decoder(data):

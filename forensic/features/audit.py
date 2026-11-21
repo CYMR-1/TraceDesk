@@ -1,10 +1,13 @@
 """按操作显示已验证的审计链；清晰区分人工与 MCP 来源，原始记录可逐条查看。"""
 import json
+
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QBrush, QColor
+
 from ..core.findings import ACTION_TITLES as TITLES, audit_origin, audit_origin_label
 from ..core.formatting import display_time
 from ..ui.analysis_panels import RecordsPanel, page
+from ..ui.delegates import ForensicItemDelegate
+from ..ui.metrics import ROW_HEIGHT_TABLE
 from .api import Feature, Panel
 
 
@@ -23,8 +26,15 @@ def render(context):
 class AuditPanel(RecordsPanel):
     def __init__(self, parent):
         super().__init__(parent, ['序号', '时间（UTC+8）', '来源', '操作人员', '操作', '结果', '对象'],
-                         [68, 165, 76, 115, 148, 110], '搜索来源（人工/MCP）、操作、人员、对象或结果',
+                         [68, 168, 96, 115, 148, 112], '搜索来源（人工/MCP）、操作、人员、对象或结果',
                          filter_columns=(2, 3, 4, 5), sort_columns=(0, 1))
+        self.table.setItemDelegate(ForensicItemDelegate(
+            self.table,
+            pill_columns={2, 5},
+            mono_columns={0, 1},
+            accent_column=0,
+            row_height=ROW_HEIGHT_TABLE,
+        ))
         self._chronological = []
         self._descending = True
         self._sort_column = 0
@@ -62,19 +72,6 @@ class AuditPanel(RecordsPanel):
                 audit_origin_label(record), record['actor'],
                 TITLES.get(record['action'], record['action']),
                 record['result'], record['subject']]
-
-    def style_item(self, item, record):
-        is_mcp = audit_origin(record) == 'mcp'
-        item.setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
-        if is_mcp:
-            item.setForeground(2, QBrush(QColor('#6947a6')))
-            item.setBackground(2, QBrush(QColor('#f0eafa')))
-            font = item.font(2)
-            font.setBold(True)
-            item.setFont(2, font)
-        else:
-            item.setForeground(2, QBrush(QColor('#086b55')))
-            item.setBackground(2, QBrush(QColor('#eaf6f0')))
 
     def details(self, record):
         seq, _, origin_label, actor, action, result, subject = self.columns(record)

@@ -1,36 +1,140 @@
 """可搜索分析列表与分层证据详情。"""
 from html import escape
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFontDatabase
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QPushButton, QLabel, QLineEdit, QPlainTextEdit, QSplitter, QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget
-from ..core.formatting import display_time
+import re
+
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtWidgets import (
+    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
+    QSplitter, QTextBrowser, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+)
+
+from ..core.coverage import SOURCE_FIELDS, coverage_text, source_status
 from ..core.findings import OPERATIONS, audit_origin_label
-from ..core.coverage import coverage_text, source_status, SOURCE_FIELDS
+from ..core.formatting import display_time
+from . import theme
+from .delegates import ForensicItemDelegate
 from .filter_header import FilterHeaderView
+from .icons import ui_icon
+from .metrics import CONTROL_GAP, PANEL_GAP, ROW_HEIGHT_TABLE
 from .pagination import PageLabel
+
+_HEX_DIGEST_RE = re.compile(r'^[0-9a-fA-F]{32,128}$')
+_WINDOWS_PATH_RE = re.compile(r'^[A-Za-z]:[\\/]')
+_MUTED_VALUES = frozenset({'—', '未登记', '未记录'})
+_PILL_KEYS = frozenset({'结果', '状态', '操作来源', '交付方摘要比对', '事件', '操作时的完整性状态'})
+_MONO_KEY_TOKENS = (
+    'SHA-256', '哈希', '路径', '偏移', 'inode', '代码', '字节', '大小',
+    '时间', '对照文件', '实测摘要', '分段数',
+)
+
+
+def _format_dossier_value(key, value):
+    raw = '' if value is None else str(value)
+    stripped = raw.strip()
+    escaped = escape(raw).replace('\n', '<br>')
+    if not stripped:
+        return '<span class="muted">—</span>'
+    if stripped in _MUTED_VALUES:
+        return f'<span class="muted">{escaped}</span>'
+
+    key_str = str(key)
+    if key_str == '交付方摘要比对':
+        if '不一致' in stripped:
+            return f'<span class="pill-danger">{escaped}</span>'
+        if '一致' in stripped:
+            return f'<span class="pill-ok">{escaped}</span>'
+        if '待固定' in stripped:
+            return f'<span class="pill-warn">{escaped}</span>'
+        return f'<span class="muted">{escaped}</span>'
+
+    if key_str in _PILL_KEYS or stripped in (
+        '成功', '失败', '已取消', '部分导出', '现存', '已删除', '已删除·重分配',
+        'MCP', '人工', '一致', '不一致', '通过', '校验通过', '校验失败',
+        '待固定', '记录时待固定',
+    ):
+        pill = theme.semantic_pill(stripped)
+        if pill is not None:
+            cls = {
+                theme.PILL_OK: 'pill-ok',
+                theme.PILL_DANGER: 'pill-danger',
+                theme.PILL_WARN: 'pill-warn',
+                theme.PILL_SYSTEM: 'pill-system',
+            }.get(pill)
+            if cls:
+                return f'<span class="{cls}">{escaped}</span>'
+
+    is_mono = (
+        bool(_HEX_DIGEST_RE.match(stripped))
+        or stripped.startswith('/')
+        or bool(_WINDOWS_PATH_RE.match(stripped))
+        or ('\\' in stripped and ' ' not in stripped)
+        or (any(token in key_str for token in _MONO_KEY_TOKENS) and '\n' not in stripped)
+    )
+    if is_mono:
+        return f'<span class="mono">{escaped}</span>'
+    return escaped
 
 
 def page(title, subtitle, sections):
-    body = ''.join('<h3>' + escape(name) + '</h3><table width="100%" cellspacing="0" cellpadding="9">' + ''.join(
-        '<tr><td width="150" bgcolor="#edf4f1"><b>' + escape(str(k)) + '</b></td><td bgcolor="#f8faf9">' + escape(str(v)).replace('\n', '<br>') + '</td></tr>' for k, v in rows) + '</table>' for name, rows in sections)
-    return '<html><head><style>body{color:#24332f;}h2{color:#087f6b;}h3{color:#48635a;}</style></head><body><h2>' + escape(title) + '</h2><p>' + escape(subtitle) + '</p>' + body + '</body></html>'
+    parts = [
+        f'<html><head><style>{theme.DOSSIER_CSS}</style></head><body>',
+        f'<h2>{escape(str(title))}</h2>',
+        f'<p class="subtitle">{escape(str(subtitle))}</p>',
+    ]
+    if sections:
+        parts.append('<hr>')
+    for name, rows in sections:
+        parts.append(f'<h3>{escape(str(name))}</h3>')
+        parts.append('<table width="100%" cellspacing="0" cellpadding="0">')
+        for k, v in rows:
+            parts.append(
+                f'<tr><td class="key">{escape(str(k))}</td>'
+                f'<td class="val">{_format_dossier_value(k, v)}</td></tr>'
+            )
+        parts.append('</table>')
+    parts.append('</body></html>')
+    return ''.join(parts)
 
 
 class RecordsPanel(QWidget):
     def __init__(self, parent, headers, widths, placeholder, *, filter_columns=(), sort_columns=()):
         super().__init__(parent)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.top_bar = QFrame(self)
+        self.top_bar.setObjectName('panelTopBar')
+        self.top_layout = QHBoxLayout(self.top_bar)
+        self.top_layout.setContentsMargins(14, 8, 14, 8)
+        self.top_layout.setSpacing(CONTROL_GAP)
         self.status = QLabel()
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setWordWrap(True)
         self.status.setProperty('role', 'section')
-        layout.addWidget(self.status)
+        self.top_layout.addWidget(self.status, 1)
+        layout.addWidget(self.top_bar)
+
+        self.search_bar = QFrame(self)
+        self.search_bar.setObjectName('panelSubBar')
+        search_layout = QHBoxLayout(self.search_bar)
+        search_layout.setContentsMargins(14, 7, 14, 7)
+        search_layout.setSpacing(CONTROL_GAP)
         self.search = QLineEdit()
         self.search.setPlaceholderText(placeholder)
-        layout.addWidget(self.search)
+        self.search.setClearButtonEnabled(True)
+        self.search.addAction(
+            ui_icon('search', color=theme.TEXT_MUTED, size=14),
+            QLineEdit.ActionPosition.LeadingPosition,
+        )
+        search_layout.addWidget(self.search, 1)
+        layout.addWidget(self.search_bar)
+
         split = QSplitter(Qt.Orientation.Vertical)
+        split.setHandleWidth(PANEL_GAP)
         self.split = split
         self.table = QTreeWidget()
+        self.table.setProperty('flush', True)
         self.table.setRootIsDecorated(False)
         self.table.setAlternatingRowColors(True)
         self.table.setUniformRowHeights(True)
@@ -48,7 +152,9 @@ class RecordsPanel(QWidget):
         for i, width in enumerate(widths):
             self.table.setColumnWidth(i, width)
         self.text = QTextBrowser()
+        self.text.setProperty('flush', True)
         self.text.setOpenExternalLinks(False)
+        self.text.document().setDocumentMargin(14)
         split.addWidget(self.table)
         split.addWidget(self.text)
         split.setSizes([430, 240])
@@ -134,26 +240,30 @@ class RecordsPanel(QWidget):
 class TimelinePanel(RecordsPanel):
     def __init__(self, parent):
         super().__init__(parent, ['序号', '时间（UTC+8）', '事件', '状态', '分区偏移', 'inode', '镜像内路径'],
-                         [78, 175, 155, 125, 115, 100], '搜索时间、事件、路径、状态或分区',
+                         [78, 178, 148, 128, 115, 100], '搜索时间、事件、路径、状态或分区',
                          filter_columns=(2, 3, 4), sort_columns=(0, 1))
+        self.table.setItemDelegate(ForensicItemDelegate(
+            self.table,
+            pill_columns={2, 3},
+            mono_columns={0, 1, 4, 5},
+            accent_column=0,
+            row_height=ROW_HEIGHT_TABLE,
+        ))
         self.search.textChanged.disconnect(self._populate)
         self.search.setPlaceholderText('输入时间、事件、路径、状态或分区，按回车搜索')
         self.search.returnPressed.connect(self._search)
-        controls = QHBoxLayout()
-        self.layout().removeWidget(self.status)
         self.status.setObjectName('timelineStatus')
         self.status.setWordWrap(False)
-        controls.addWidget(self.status)
-        controls.addStretch(1)
         self.build = QPushButton('生成时间线')
+        self.build.setProperty('role', 'soft')
         self.back = QPushButton('上一页')
         self.forward = QPushButton('下一页')
         for button in (self.back, self.forward):
             button.setProperty('role', 'pager')
         self.page_label = PageLabel(self._jump)
-        for button in (self.build, self.back, self.page_label, self.forward):
-            controls.addWidget(button)
-        self.layout().insertLayout(0, controls)
+        self.page_label.setProperty('role', 'pageBadge')
+        for widget in (self.build, self.back, self.page_label, self.forward):
+            self.top_layout.addWidget(widget)
         self.build.clicked.connect(lambda: self._start(self.set_text))
         self.back.clicked.connect(lambda: self._move(-1))
         self.forward.clicked.connect(lambda: self._move(1))
@@ -294,8 +404,15 @@ class TimelinePanel(RecordsPanel):
 class FindingsPanel(RecordsPanel):
     def __init__(self, parent):
         super().__init__(parent, ['序号', '镜像内路径', '状态', '分区偏移', 'inode', '记录数', '最近记录（UTC+8）'],
-                         [68, 340, 115, 115, 100, 80], '搜索文件、笔记、摘要、人员或比对结果',
+                         [68, 340, 118, 115, 100, 82], '搜索文件、笔记、摘要、人员或比对结果',
                          filter_columns=(2, 3), sort_columns=(0, 6))
+        self.table.setItemDelegate(ForensicItemDelegate(
+            self.table,
+            pill_columns={2},
+            mono_columns={0, 3, 4, 5, 6},
+            accent_column=0,
+            row_height=ROW_HEIGHT_TABLE,
+        ))
         self.split.setSizes([240, 430])
         self._export_callback = None
         self._original = []
@@ -304,14 +421,13 @@ class FindingsPanel(RecordsPanel):
         self._sort_column = 6
         self.header.setSortIndicator(6, Qt.SortOrder.AscendingOrder)
         self.header.sort_requested.connect(self._toggle_sort)
-        controls = QHBoxLayout()
-        self.layout().removeWidget(self.status)
-        controls.addWidget(self.status, 1)
         self.export_button = QPushButton('一键导出')
+        self.export_button.setProperty('role', 'soft')
+        self.export_button.setIcon(ui_icon('export', color=theme.ACCENT_SOFT_TEXT, size=14))
+        self.export_button.setIconSize(QSize(14, 14))
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self._export_visible)
-        controls.addWidget(self.export_button)
-        self.layout().insertLayout(0, controls)
+        self.top_layout.addWidget(self.export_button)
         for column in (0, 6):
             self.table.headerItem().setToolTip(column, '单击切换正序/倒序')
         for column in (2, 3):
@@ -381,37 +497,61 @@ class EvidencePanel(QWidget):
         super().__init__(parent)
         self._register_source = None
         layout = QVBoxLayout(self)
-        top = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        top_bar = QFrame(self)
+        top_bar.setObjectName('panelTopBar')
+        top = QHBoxLayout(top_bar)
+        top.setContentsMargins(14, 8, 14, 8)
+        top.setSpacing(CONTROL_GAP)
         header_label = QLabel('镜像摘要与证据来源')
         header_label.setProperty('role', 'section')
         top.addWidget(header_label)
         top.addStretch(1)
         self.source_button = QPushButton('登记证据来源')
+        self.source_button.setProperty('role', 'soft')
         self.source_button.setEnabled(False)
         self.source_button.clicked.connect(lambda: self._register_source() if self._register_source else None)
         top.addWidget(self.source_button)
-        layout.addLayout(top)
+        layout.addWidget(top_bar)
+
         split = QSplitter(Qt.Orientation.Vertical)
+        split.setHandleWidth(PANEL_GAP)
         self.summary = QTextBrowser()
+        self.summary.setProperty('flush', True)
         self.summary.setOpenExternalLinks(False)
+        self.summary.document().setDocumentMargin(14)
         split.addWidget(self.summary)
+
         raw = QWidget()
         raw_layout = QVBoxLayout(raw)
-        raw_layout.setContentsMargins(0, 6, 0, 0)
-        controls = QHBoxLayout()
-        controls.addWidget(QLabel('分区布局与文件系统 · 原始解析结果'))
-        controls.addStretch()
+        raw_layout.setContentsMargins(0, 0, 0, 0)
+        raw_layout.setSpacing(0)
+        section_bar = QFrame(raw)
+        section_bar.setObjectName('panelSectionBar')
+        controls = QHBoxLayout(section_bar)
+        controls.setContentsMargins(14, 6, 14, 6)
+        controls.setSpacing(CONTROL_GAP)
+        section_label = QLabel('分区布局与文件系统 · 原始解析结果')
+        section_label.setProperty('role', 'section')
+        controls.addWidget(section_label)
+        controls.addStretch(1)
         self.partition = QComboBox()
         self.details = QPushButton('导出完整 fsstat')
+        self.details.setIcon(ui_icon('export', color=theme.TEXT_SECONDARY, size=14))
+        self.details.setIconSize(QSize(14, 14))
         self.details.clicked.connect(lambda: self._export(self.partition.currentData()))
         controls.addWidget(self.partition)
         controls.addWidget(self.details)
-        raw_layout.addLayout(controls)
+        raw_layout.addWidget(section_bar)
+
         self.text = QPlainTextEdit()
+        self.text.setProperty('surface', 'raw')
         self.text.setReadOnly(True)
-        self.text.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        self.text.setFont(theme.mono_font(9.5, cjk_fallback=True))
         self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        raw_layout.addWidget(self.text)
+        raw_layout.addWidget(self.text, 1)
         split.addWidget(raw)
         split.setSizes([400, 300])
         layout.addWidget(split, 1)
