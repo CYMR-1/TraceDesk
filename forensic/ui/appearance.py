@@ -229,6 +229,62 @@ def build_stylesheet() -> str:
             border: none;
             border-top: 1px solid {t.BORDER_SUBTLE};
         }}
+        QFrame#guideNavPanel {{
+            background: {t.CHROME_BG};
+            border: none;
+            border-right: 1px solid {t.BORDER_PANE};
+        }}
+        QListWidget#guideTopicList {{
+            background: {t.CHROME_BG};
+            border: none;
+            outline: none;
+            padding: 6px 0;
+        }}
+        QListWidget#guideTopicList::item {{
+            padding: 7px 14px;
+            color: {t.TEXT_SECONDARY};
+            border: none;
+        }}
+        QListWidget#guideTopicList::item:hover {{
+            background: {t.SURFACE_HOVER};
+            color: {t.TEXT_PRIMARY};
+        }}
+        QListWidget#guideTopicList::item:selected {{
+            background: {t.SURFACE_SELECTED};
+            color: {t.SURFACE_SELECTED_TEXT};
+            font-weight: 600;
+        }}
+        QScrollArea#guideScrollArea, QWidget#guideArticle {{
+            background: {t.SURFACE_BG};
+            border: none;
+        }}
+        QFrame#guideFigureCard {{
+            background: {t.SURFACE_BG};
+            border: 1px solid {t.BORDER_DEFAULT};
+            border-radius: 8px;
+        }}
+        QFrame#guideFigureFooter {{
+            background: {t.CHROME_BG};
+            border: none;
+            border-top: 1px solid {t.BORDER_SUBTLE};
+            border-bottom-left-radius: 7px;
+            border-bottom-right-radius: 7px;
+        }}
+        QLabel#guideImageCanvas {{
+            background: {t.SURFACE_TINT};
+            border: none;
+            border-top-left-radius: 7px;
+            border-top-right-radius: 7px;
+        }}
+        QLabel#guidePageTitle {{
+            color: {t.TEXT_PRIMARY};
+            font-size: 18px;
+            font-weight: 700;
+        }}
+        QLabel#guidePageSummary {{
+            color: {t.TEXT_MUTED};
+            font-size: 12.5px;
+        }}
         QLabel#imagePreview {{
             background: {t.IMAGE_BACKDROP};
             border: 1px solid {t.BORDER_PANE};

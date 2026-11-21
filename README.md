@@ -12,7 +12,7 @@
 | `forensic/features/` | 启用清单、11 个可装配功能模块、按钮和页面 |
 | `forensic/engines/` | TSK 只读适配、分段 EWF、`pytsk3`/`pyewf` 随机读取与 FAT 空间分析 |
 | `forensic/ui/` | PySide6 控制器、明净瓷白与晴空蓝浅色主题、委托、窗口、文件树与预览 |
-| `forensic/paths.py`、`forensic/assets/` | 统一资源定位、应用徽标与控件矢量图标 |
+| `forensic/paths.py`、`forensic/assets/` | 统一资源定位、应用徽标、控件矢量图标与操作说明引导图 |
 | `scripts/`、`tests/` | 开发辅助命令与对应职责的回归测试 |
 | `docs/` | 维护指南、设计与验收说明和验证记录 |
 | `evidence/`、`cases/`、`tools/` | 源证据输入、案件输出、官方第三方工具 |
@@ -73,11 +73,11 @@ python -m venv .venv
 
 - 七项基本功能均实现；自动化测试真实调用 TSK，不用模拟解析器替代。
 - 扩展：审计哈希链及尾部锚点（区分人工/MCP 来源）、MACB 时间线、分段 EWF 与大容量镜像按需浏览、路径关键词与表头下拉筛选、多进程内容搜索与流式复核、导出副本 SHA-256、导出前后原镜像校验、可独立核验复核包与标准 MCP 服务端。
-- `.\.venv\Scripts\python.exe -m unittest discover -s tests -v` 运行回归测试（共 15 个测试模块、119 个测试用例）；历史记录见 [test-results.txt](docs/validation/test-results.txt)，大容量与 EWF 实测见 [1TiB 镜像性能实测](docs/validation/1TiB镜像性能实测.md) 和 [EWF 加载与复核实测](docs/validation/EWF加载与复核实测.md)。
+- `.\.venv\Scripts\python.exe -m unittest discover -s tests -v` 运行回归测试（共 16 个测试模块、122 个测试用例）；历史记录见 [test-results.txt](docs/validation/test-results.txt)，大容量与 EWF 实测见 [1TiB 镜像性能实测](docs/validation/1TiB镜像性能实测.md) 和 [EWF 加载与复核实测](docs/validation/EWF加载与复核实测.md)。
 - 架构、界面规范、评分对应、限制与 AI 参与说明见 [设计与验收说明.md](docs/设计与验收说明.md)。
 - 面向对象结构：`ApplicationLauncher` 管理入口和异常报告，`App` 协调操作，`FeatureRegistry` 按需装配功能模块，`WorkbenchView` / `FileBrowserView` 管理布局和文件树，`DesktopAppearance` / `theme` / `ForensicItemDelegate` / `HexItemDelegate` 管理视觉规范与自定义渲染，`TaskRunner` 管理后台任务，`FilePreview` / `PreviewReader` 分离预览显示与读取，`Case`、`TSK`、`VolumeReader` 负责核心取证业务与只读解析，`CaseService` / `LocalHttpMcpManager` 负责 MCP 编排与本地托管。
 - 主要入口：桌面入口 `main.py`、MCP 入口 `mcp_server.py`、控制器 `forensic/ui/controller.py`、窗口布局 `forensic/ui/workspace.py`、主题与委托 `forensic/ui/theme.py` / `appearance.py` / `delegates.py`、目录树 `forensic/ui/browser.py`、核心案件逻辑 `forensic/core/case.py`、TSK 与 EWF/随机读取适配 `forensic/engines/tsk.py` / `ewf.py` / `random_read.py`；完整模块清单见 [目录结构与维护指南](docs/目录结构.md)。
-- 标题栏、任务栏和工作台左上角使用浅冰晴空蓝渐变圆角底、晴空蓝磁道圆弧与纯白镜片准星的“精密取证盘片与准星”徽标（顶部命令带直接由 SVG 按屏幕缩放倍率光栅化），资源位于 `forensic/assets/`。修改 `tracedesk.svg` 后，可运行 `.\.venv\Scripts\python.exe scripts/make_icon.py` 重建 256 px PNG 和 16–256 px 多尺寸 ICO；重启程序生效。
+- 标题栏、任务栏和工作台左上角使用浅冰晴空蓝渐变圆角底、晴空蓝磁道圆弧与纯白镜片准星的“精密取证盘片与准星”徽标（顶部命令带直接由 SVG 按屏幕缩放倍率光栅化），资源位于 `forensic/assets/`。修改 `tracedesk.svg` 后，可运行 `.\.venv\Scripts\python.exe scripts/make_icon.py` 重建 256 px PNG 和 16–256 px 多尺寸 ICO；重启程序生效。工作台顶部的 **操作说明** 内置 9 个分主题图文引导页（附带编号标注的真实界面截图与点击放大查看器），界面改动后可运行 `.\.venv\Scripts\python.exe scripts/make_guide_images.py` 重新生成全部引导图。
 - `.\.venv\Scripts\python.exe scripts/package.py` 生成 `dist/学号_姓名_ForensicTool.zip`，提交前将文件名中的姓名和学号替换为本人信息。包内不含本地运行案件、私人证据和 `.venv`，解压后可重新运行演示脚本。
 
 ## 大容量镜像

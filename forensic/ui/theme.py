@@ -415,28 +415,28 @@ body {{
 h1, h2 {{
     color: {TEXT_PRIMARY};
     font-weight: 700;
-    margin-top: 4px;
+    margin-top: 2px;
     margin-bottom: 8px;
 }}
 h3 {{
     color: {ACCENT};
     font-weight: 600;
-    margin-top: 12px;
+    margin-top: 14px;
     margin-bottom: 6px;
 }}
 p {{
     margin-top: 4px;
     margin-bottom: 9px;
-    line-height: 155%;
+    line-height: 160%;
 }}
 ol, ul {{
     margin-top: 4px;
     margin-bottom: 10px;
 }}
 li {{
-    margin-top: 4px;
-    margin-bottom: 6px;
-    line-height: 155%;
+    margin-top: 5px;
+    margin-bottom: 7px;
+    line-height: 160%;
 }}
 strong, b {{
     color: {TEXT_PRIMARY};
@@ -454,8 +454,20 @@ pre {{
     background-color: {CHROME_BG};
     color: {TEXT_PRIMARY};
     border: 1px solid {BORDER_PANE};
-    padding: 8px 10px;
+    padding: 9px 12px;
     margin-top: 8px;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
+}}
+.callout {{
+    background-color: {ACCENT_SOFT_BG};
+    border: 1px solid {ACCENT_SOFT_BORDER};
+    color: {TEXT_PRIMARY};
+    padding: 8px 12px;
+    margin-top: 10px;
+    margin-bottom: 10px;
+}}
+.step-ref {{
+    color: #C93D31;
+    font-weight: 700;
 }}
 '''
