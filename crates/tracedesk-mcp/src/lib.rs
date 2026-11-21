@@ -17,9 +17,9 @@ use std::path::PathBuf;
 use tracedesk_core::AppPaths;
 
 pub use http::{
-    DEFAULT_HOST, DEFAULT_HTTP_PATH, DEFAULT_PORT, LOOPBACK_HOSTS, McpHttpServerHandle,
-    check_port_available, normalize_http_path, run_http_blocking, validate_loopback_host,
-    verify_dns_rebinding,
+    DEFAULT_HOST, DEFAULT_HTTP_PATH, DEFAULT_PORT, LOOPBACK_HOSTS, MAX_HTTP_BODY_BYTES,
+    McpHttpServerHandle, check_port_available, normalize_http_path, run_http_blocking,
+    validate_loopback_host, verify_dns_rebinding,
 };
 pub use runtime::{
     LocalHttpMcpManager, McpStatusSnapshot, build_claude_config, build_cli_command,

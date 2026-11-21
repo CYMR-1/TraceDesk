@@ -18,10 +18,10 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tracedesk_core::{AppPaths, AuditOrigin, Case, verify_bundle};
 use tracedesk_mcp::{
-    LocalHttpMcpManager, McpServer, TOOL_CATALOG, TransportMode, build_claude_config,
-    build_cli_command, build_cursor_config, build_http_config, build_stdio_config, create_server,
-    force_release_case_lock, format_config_json, parse_cli_args, run_stdio_loop,
-    validate_loopback_host,
+    LocalHttpMcpManager, MAX_HTTP_BODY_BYTES, McpServer, TOOL_CATALOG, TransportMode,
+    build_claude_config, build_cli_command, build_cursor_config, build_http_config,
+    build_stdio_config, create_server, force_release_case_lock, format_config_json,
+    parse_cli_args, run_stdio_loop, validate_loopback_host,
 };
 
 fn free_local_port() -> u16 {
@@ -586,20 +586,61 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
         verify_bundle(&bundle_path, Some(bundle_sha)).expect("verify_bundle must pass");
     assert!(verified_members >= 6);
 
+    // Warm read-only view cache for list_files and query_timeline BEFORE tampering audit chain
+    let warmed_files = call_json(
+        &server,
+        "tracedesk_list_files",
+        json!({ "case_dir": case_dir }),
+    );
+    assert!(warmed_files["total"].as_u64().unwrap_or(0) > 0);
+    let warmed_timeline = call_json(
+        &server,
+        "tracedesk_query_timeline",
+        json!({ "case_dir": case_dir }),
+    );
+    assert!(warmed_timeline["total"].as_u64().unwrap_or(0) > 0);
+
+    // Tamper with audit.head while case.json & inventory cache stay warm -> list_files & query_timeline must reject
+    let head_file = Path::new(&case_dir).join("audit.head");
+    let orig_head = fs::read_to_string(&head_file).expect("read audit.head");
+    fs::write(&head_file, "0".repeat(64)).expect("tamper audit.head");
+    let head_err_files = call_text(
+        &server,
+        "tracedesk_list_files",
+        json!({ "case_dir": case_dir }),
+    );
+    assert!(
+        head_err_files.contains("锚点不匹配"),
+        "expected audit.head tamper rejection in list_files, got: {head_err_files}"
+    );
+    let head_err_timeline = call_text(
+        &server,
+        "tracedesk_query_timeline",
+        json!({ "case_dir": case_dir }),
+    );
+    assert!(
+        head_err_timeline.contains("锚点不匹配"),
+        "expected audit.head tamper rejection in query_timeline, got: {head_err_timeline}"
+    );
+    fs::write(&head_file, orig_head).expect("restore audit.head");
+
     // Tamper with audit.jsonl (forge "origin":"mcp" -> "origin":"manual") and verify detection
+    // across query_audit_log, list_files, and query_timeline even on warm read cache
     let audit_file = Path::new(&case_dir).join("audit.jsonl");
     let raw_audit = fs::read_to_string(&audit_file).expect("read audit.jsonl");
     let tampered = raw_audit.replacen("\"origin\":\"mcp\"", "\"origin\":\"manual\"", 1);
     fs::write(&audit_file, tampered).expect("write tampered audit.jsonl");
-    let tamper_err = call_text(
-        &server,
+    for tool in [
         "tracedesk_query_audit_log",
-        json!({ "case_dir": case_dir }),
-    );
-    assert!(
-        tamper_err.contains("不完整或被修改"),
-        "unexpected tamper_err: {tamper_err}"
-    );
+        "tracedesk_list_files",
+        "tracedesk_query_timeline",
+    ] {
+        let tamper_err = call_text(&server, tool, json!({ "case_dir": case_dir }));
+        assert!(
+            tamper_err.contains("不完整或被修改"),
+            "unexpected tamper_err from {tool}: {tamper_err}"
+        );
+    }
 }
 
 #[test]
@@ -1121,7 +1162,73 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
     );
     assert_eq!(code_bad_origin, 403);
 
-    // 7. Stop server and verify clean shutdown
+    // 7. Root path "/" must return 404 Not Found (never misrouted to "/mcp")
+    let (code_root, _) = send_raw_http_request(
+        port,
+        "POST",
+        "/",
+        &[("Host", &host_hdr), ("Content-Type", "application/json")],
+        &json!({"jsonrpc": "2.0", "id": 6, "method": "ping"}).to_string(),
+    );
+    assert_eq!(code_root, 404);
+
+    // Trailing slash "/mcp/" matches configured "/mcp"
+    let (code_trailing, _) = send_raw_http_request(
+        port,
+        "POST",
+        "/mcp/",
+        &[("Host", &host_hdr), ("Content-Type", "application/json")],
+        &json!({"jsonrpc": "2.0", "id": 7, "method": "ping"}).to_string(),
+    );
+    assert_eq!(code_trailing, 200);
+
+    // 8. Oversized Content-Length (> MAX_HTTP_BODY_BYTES) -> HTTP 413 Payload Too Large
+    {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect 413 test");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let oversized = MAX_HTTP_BODY_BYTES + 1;
+        write!(
+            stream,
+            "POST /mcp HTTP/1.1\r\nHost: {host_hdr}\r\nContent-Length: {oversized}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut status_line = String::new();
+        reader.read_line(&mut status_line).expect("read 413 status");
+        assert!(
+            status_line.contains("413"),
+            "expected HTTP 413 for oversized Content-Length, got: {status_line}"
+        );
+    }
+
+    // 9. Oversized chunked Transfer-Encoding -> HTTP 413 Payload Too Large
+    {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect 413 chunked test");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let oversized_hex = format!("{:x}", MAX_HTTP_BODY_BYTES + 1);
+        write!(
+            stream,
+            "POST /mcp HTTP/1.1\r\nHost: {host_hdr}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{oversized_hex}\r\n"
+        )
+        .unwrap();
+        stream.flush().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut status_line = String::new();
+        reader
+            .read_line(&mut status_line)
+            .expect("read 413 chunked status");
+        assert!(
+            status_line.contains("413"),
+            "expected HTTP 413 for oversized chunked body, got: {status_line}"
+        );
+    }
+
+    // 10. Stop server and verify clean shutdown
     manager.stop();
     assert!(!manager.running());
 }

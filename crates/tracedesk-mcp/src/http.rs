@@ -30,6 +30,9 @@ pub const DEFAULT_HTTP_PATH: &str = "/mcp";
 /// 允许监听的回环地址白名单。
 pub const LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
 
+/// 单个 Streamable HTTP 请求体允许的最大字节数（16 MiB），防止恶意超长请求体导致 OOM。
+pub const MAX_HTTP_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// 校验监听地址是否属于本机回环地址（`127.0.0.1` / `localhost` / `::1`）。
 pub fn validate_loopback_host(host: &str) -> McpResult<String> {
     let trimmed = host.trim();
@@ -48,11 +51,23 @@ pub fn validate_loopback_host(host: &str) -> McpResult<String> {
     Ok(lower)
 }
 
-/// 规范化 HTTP 挂载路径为 `/` + `path.trim_matches('/')`。
+/// 规范化配置级 HTTP 挂载路径为 `/` + `path.trim_matches('/')`（空则回退到默认 `/mcp`）。
 pub fn normalize_http_path(path: &str) -> String {
     let clean = path.trim().trim_matches('/');
     if clean.is_empty() {
         DEFAULT_HTTP_PATH.to_string()
+    } else {
+        format!("/{clean}")
+    }
+}
+
+/// 规范化入站 HTTP 请求路径（仅去除尾部冗余 `/`，根路径保留为 `"/"`，绝不回退到 `/mcp`）。
+fn normalize_request_path(raw_path: &str) -> String {
+    let clean = raw_path.trim().trim_end_matches('/');
+    if clean.is_empty() {
+        "/".to_string()
+    } else if clean.starts_with('/') {
+        clean.to_string()
     } else {
         format!("/{clean}")
     }
@@ -193,19 +208,27 @@ fn read_crlf_line<R: BufRead>(reader: &mut R, max_len: usize) -> io::Result<Opti
     Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
 }
 
-fn read_chunked_body<R: BufRead>(reader: &mut R) -> io::Result<Vec<u8>> {
+enum HttpParseError {
+    Io,
+    BadRequest(&'static str),
+    PayloadTooLarge,
+}
+
+impl From<io::Error> for HttpParseError {
+    fn from(_err: io::Error) -> Self {
+        Self::Io
+    }
+}
+
+fn read_chunked_body<R: BufRead>(reader: &mut R) -> Result<Vec<u8>, HttpParseError> {
     let mut out = Vec::new();
     loop {
         let Some(size_line) = read_crlf_line(reader, 1024)? else {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "unexpected EOF in chunked body",
-            ));
+            return Err(HttpParseError::Io);
         };
         let hex_part = size_line.split(';').next().unwrap_or("").trim();
-        let chunk_len = usize::from_str_radix(hex_part, 16).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "invalid chunk size in HTTP body")
-        })?;
+        let chunk_len = usize::from_str_radix(hex_part, 16)
+            .map_err(|_| HttpParseError::BadRequest("invalid chunk size in HTTP body"))?;
         if chunk_len == 0 {
             // Consume trailing headers up to empty line.
             while let Some(trailer) = read_crlf_line(reader, 4096)? {
@@ -216,14 +239,22 @@ fn read_chunked_body<R: BufRead>(reader: &mut R) -> io::Result<Vec<u8>> {
             break;
         }
         let start = out.len();
-        out.resize(start + chunk_len, 0);
-        reader.read_exact(&mut out[start..start + chunk_len])?;
+        let next_len = start
+            .checked_add(chunk_len)
+            .ok_or(HttpParseError::PayloadTooLarge)?;
+        if next_len > MAX_HTTP_BODY_BYTES {
+            return Err(HttpParseError::PayloadTooLarge);
+        }
+        out.resize(next_len, 0);
+        reader.read_exact(&mut out[start..next_len])?;
         let _ = read_crlf_line(reader, 64)?;
     }
     Ok(out)
 }
 
-fn parse_http_request<R: BufRead>(reader: &mut R) -> io::Result<Option<ParsedHttpRequest>> {
+fn parse_http_request<R: BufRead>(
+    reader: &mut R,
+) -> Result<Option<ParsedHttpRequest>, HttpParseError> {
     let Some(request_line) = read_crlf_line(reader, 8192)? else {
         return Ok(None);
     };
@@ -252,10 +283,15 @@ fn parse_http_request<R: BufRead>(reader: &mut R) -> io::Result<Option<ParsedHtt
         .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"))
     {
         read_chunked_body(reader)?
-    } else if let Some(cl) = headers
-        .get("content-length")
-        .and_then(|v| v.parse::<usize>().ok())
-    {
+    } else if let Some(raw_cl) = headers.get("content-length") {
+        let cl_u64 = raw_cl
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| HttpParseError::BadRequest("invalid Content-Length header"))?;
+        if cl_u64 > MAX_HTTP_BODY_BYTES as u64 {
+            return Err(HttpParseError::PayloadTooLarge);
+        }
+        let cl = cl_u64 as usize;
         let mut buf = vec![0u8; cl];
         if cl > 0 {
             reader.read_exact(&mut buf)?;
@@ -320,7 +356,36 @@ fn handle_client_connection(
     while !shutdown.load(Ordering::Relaxed) {
         let req = match parse_http_request(&mut reader) {
             Ok(Some(r)) => r,
-            _ => break,
+            Ok(None) | Err(HttpParseError::Io) => break,
+            Err(HttpParseError::BadRequest(msg)) => {
+                let err_body = serde_json::to_vec(&json!({ "error": msg })).unwrap_or_default();
+                let _ = write_http_response(
+                    &mut stream,
+                    400,
+                    "Bad Request",
+                    Some("application/json; charset=utf-8"),
+                    &[],
+                    &err_body,
+                    true,
+                );
+                break;
+            }
+            Err(HttpParseError::PayloadTooLarge) => {
+                let err_body = serde_json::to_vec(&json!({
+                    "error": format!("Payload Too Large: request body exceeds {} bytes limit", MAX_HTTP_BODY_BYTES)
+                }))
+                .unwrap_or_default();
+                let _ = write_http_response(
+                    &mut stream,
+                    413,
+                    "Payload Too Large",
+                    Some("application/json; charset=utf-8"),
+                    &[],
+                    &err_body,
+                    true,
+                );
+                break;
+            }
         };
 
         let want_close = req
@@ -349,9 +414,9 @@ fn handle_client_connection(
             break;
         }
 
-        // 2. Endpoint path matching
+        // 2. Endpoint path matching (root "/" must NOT fall back to "/mcp")
         let raw_path = req.target.split('?').next().unwrap_or("/");
-        let norm_req_path = normalize_http_path(raw_path);
+        let norm_req_path = normalize_request_path(raw_path);
         if norm_req_path != expected_path {
             let err_body =
                 serde_json::to_vec(&json!({ "error": format!("Not Found: {raw_path}") }))
