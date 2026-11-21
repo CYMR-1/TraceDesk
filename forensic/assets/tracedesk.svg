@@ -1,12 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <title>TraceDesk 证据文件与放大镜</title>
-  <rect x="8" y="8" width="240" height="240" rx="54" fill="#087f6b"/>
-  <path d="M68 42h61l47 47v113a12 12 0 0 1-12 12H68a13 13 0 0 1-13-13V55a13 13 0 0 1 13-13Z" fill="#ffffff"/>
-  <path d="M129 42v35a12 12 0 0 0 12 12h35Z" fill="#ccebdd"/>
-  <path d="M79 112h50M79 139h25" fill="none" stroke="#087f6b" stroke-width="9" stroke-linecap="round"/>
-  <path d="m192 191 26 28" fill="none" stroke="#ffffff" stroke-width="26" stroke-linecap="round"/>
-  <path d="m192 191 26 28" fill="none" stroke="#7953be" stroke-width="14" stroke-linecap="round"/>
-  <circle cx="161" cy="160" r="44" fill="#ffffff"/>
-  <circle cx="161" cy="160" r="36" fill="#7953be"/>
-  <circle cx="161" cy="160" r="24" fill="#eee5fc"/>
+  <title>TraceDesk 精密取证盘片与准星徽标</title>
+  <defs>
+    <linearGradient id="bg" x1="16" y1="16" x2="240" y2="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1C2E45"/>
+      <stop offset="100%" stop-color="#121E2D"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#bg)" stroke="#2B425E" stroke-width="3"/>
+  <circle cx="114" cy="114" r="76" fill="none" stroke="#243850" stroke-width="2.5"/>
+  <path d="M94.3 187.4 A76 76 0 1 1 187.4 94.3" fill="none" stroke="#4C8FD6" stroke-width="10" stroke-linecap="round"/>
+  <path d="M75.7 146.1 A50 50 0 0 1 146.1 75.7" fill="none" stroke="#8CBCEB" stroke-width="8" stroke-linecap="round"/>
+  <path d="M88.2 117.5 A26 26 0 0 1 117.5 88.2" fill="none" stroke="#4C8FD6" stroke-width="5.5" stroke-linecap="round"/>
+  <path d="M171 171 L208 208" fill="none" stroke="#F4F7FB" stroke-width="20" stroke-linecap="round"/>
+  <path d="M182 182 L206 206" fill="none" stroke="#4C8FD6" stroke-width="7.5" stroke-linecap="round"/>
+  <circle cx="140" cy="140" r="42" fill="#162436" fill-opacity="0.86"/>
+  <path d="M140 108v13M140 159v13M108 140h13M159 140h13" fill="none" stroke="#6BA9E8" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="140" cy="140" r="4.5" fill="#8CBCEB"/>
+  <circle cx="140" cy="140" r="42" fill="none" stroke="#F4F7FB" stroke-width="11.5"/>
 </svg>
