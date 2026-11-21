@@ -38,16 +38,16 @@ fn read_u64_le(buf: &[u8], off: usize) -> u64 {
     ])
 }
 
-/// Single contiguous cluster run in a non-resident NTFS attribute.
+/// 非常驻 NTFS 属性中的单个连续簇运行段（data run）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct NtfsDataRun {
     pub vcn: u64,
     pub len_clusters: u64,
-    /// `Some(lcn)` for allocated on-disk clusters, `None` for sparse (zero-filled) runs.
+    /// `Some(lcn)` 表示磁盘上已分配的簇，`None` 表示稀疏（全零填充）运行段。
     pub lcn: Option<u64>,
 }
 
-/// Resolved NTFS file/attribute payload ready for fast random reads & sparse-interval planning.
+/// 已解析的 NTFS 文件/属性数据描述，供高速随机读取与稀疏区间规划使用。
 #[derive(Debug, Clone)]
 pub(crate) enum NtfsEntryData {
     Resident {
@@ -69,12 +69,12 @@ impl NtfsEntryData {
         }
     }
 
-    /// Compute non-sparse scan intervals matching `forensic/core/search_worker.py::_non_sparse_intervals`.
+    /// 计算与 `forensic/core/search_worker.py::_non_sparse_intervals` 对齐的非稀疏扫描区间。
     ///
-    /// - Resident attributes always return `[0, size)`.
-    /// - When `needle` is empty or all zero bytes, sparse regions are NOT skipped (`[0, size)`).
-    /// - Non-sparse runs are extended backward by `needle.len().saturating_sub(1)` bytes so
-    ///   cross-boundary matches starting in the trailing zeroes before a run are never missed.
+    /// - 常驻属性始终返回 `[0, size)`。
+    /// - 当 `needle` 为空或全零字节时，不跳过稀疏区域（返回 `[0, size)`）。
+    /// - 非稀疏运行段会向前扩展 `needle.len().saturating_sub(1)` 字节，
+    ///   从而避免漏掉起始于运行段前尾部零字节处的跨边界命中。
     pub fn non_sparse_intervals(&self, needle: &[u8]) -> Vec<ByteInterval> {
         let size = self.size();
         if size == 0 {
@@ -168,8 +168,8 @@ struct AttrListEntry {
     name_utf16: Vec<u16>,
 }
 
-/// Native read-only NTFS volume reader supporting MFT fixups, `$ATTRIBUTE_LIST`,
-/// non-resident multi-run & sparse data streams, and deleted (unallocated) MFT records.
+/// 原生只读 NTFS 卷读取器，支持 MFT 更新序列修复（USA fixup）、`$ATTRIBUTE_LIST`、
+/// 非常驻多段及稀疏数据流，以及已删除（未分配）的 MFT 记录。
 pub(crate) struct NtfsVolume {
     media: Arc<dyn MediaReader>,
     partition_base: u64,
@@ -227,7 +227,7 @@ impl NtfsVolume {
             )));
         }
 
-        // Bootstrap by reading MFT record 0 ($MFT) directly from `mft_lcn`.
+        // 自举引导：直接从 `mft_lcn` 读取 0 号 MFT 记录（$MFT）。
         let mft0_disk_off = partition_base
             .checked_add(
                 mft_lcn
@@ -241,7 +241,7 @@ impl NtfsVolume {
         apply_usa_fixup(&mut mft0)?;
 
         let attrs0 = parse_record_attributes(&mft0)?;
-        // First locate $MFT's initial $DATA attribute in record 0.
+        // 首先在 0 号记录中定位 $MFT 的初始 $DATA 属性。
         let mut initial_runs: Option<(Vec<NtfsDataRun>, u64)> = None;
         for attr in &attrs0 {
             if attr.attr_type == ATTR_TYPE_DATA
@@ -258,8 +258,8 @@ impl NtfsVolume {
         let (mft_runs, mft_size) = match initial_runs {
             Some(v) => v,
             None => {
-                // Rare case: $MFT's $DATA lives exclusively in an $ATTRIBUTE_LIST extension record
-                // located near the beginning of $MFT. Bootstrap a small provisional single-run map.
+                // 罕见情况：$MFT 的 $DATA 仅存在于靠近 $MFT 开头的 `$ATTRIBUTE_LIST` 扩展记录中。
+                // 先使用临时的单段小映射完成自举读取。
                 let provisional_clusters = 16u64;
                 let temp = Self {
                     media: Arc::clone(&media),
@@ -291,7 +291,7 @@ impl NtfsVolume {
             mft_size,
         };
 
-        // If $MFT itself has an $ATTRIBUTE_LIST, collect all $DATA extents across extension records.
+        // 若 $MFT 自身包含 $ATTRIBUTE_LIST，则跨扩展记录汇总所有 $DATA 区间。
         if attrs0.iter().any(|a| a.attr_type == ATTR_TYPE_ATTRIBUTE_LIST)
             && let Ok(NtfsEntryData::NonResident {
                 data_size, runs, ..
@@ -397,10 +397,10 @@ impl NtfsVolume {
         Ok(())
     }
 
-    /// Resolve an MFT entry's data attribute (active or deleted MFT record).
+    /// 解析 MFT 条目的数据属性（支持现存及已删除的 MFT 记录）。
     ///
-    /// Returns `Err` for compressed, encrypted, missing, size-mismatched, or empty-run attributes
-    /// so `VolumeReader` cleanly falls back to `icat`.
+    /// 若属性已压缩、已加密、缺失、长度不匹配或运行段为空，则返回 `Err`，
+    /// 以便 `VolumeReader` 平滑回退至 `icat`。
     pub fn resolve_entry(
         &self,
         mft_num: u64,
@@ -412,9 +412,9 @@ impl NtfsVolume {
         let attrs = parse_record_attributes(&record)?;
 
         let data = if attrs.iter().any(|a| a.attr_type == ATTR_TYPE_ATTRIBUTE_LIST) {
-            // Never silently fall back to `resolve_direct_attributes`: a multi-extent file whose
-            // `$ATTRIBUTE_LIST` or extension record is corrupt/compressed would otherwise expose
-            // only the base VCN-0 runs while still matching full `data_size`, risking missed hits.
+            // 严禁静默回退到 `resolve_direct_attributes`：若多扩展段文件的 `$ATTRIBUTE_LIST`
+            // 或扩展记录已损坏/已压缩，回退后只会暴露基础记录中的 VCN-0 运行段，
+            // 同时仍能匹配完整 `data_size`，从而导致检索漏报。
             self.resolve_via_attribute_list(mft_num, &attrs, attr_type, attr_id)?
         } else {
             self.resolve_direct_attributes(&attrs, attr_type, attr_id)?
@@ -521,7 +521,7 @@ impl NtfsVolume {
         let entries = parse_attribute_list(&list_bytes)?;
         let wanted_type = target_type.unwrap_or(ATTR_TYPE_DATA);
 
-        // Locate the base extent (`starting_vcn == 0`) matching `(wanted_type, target_id or unnamed)`.
+        // 定位匹配 `(wanted_type, target_id 或匿名流)` 的基础属性段（`starting_vcn == 0`）。
         let base_entry = entries
             .iter()
             .find(|e| {
@@ -631,7 +631,7 @@ impl NtfsVolume {
         })
     }
 
-    /// Read exact bytes from a resolved [`NtfsEntryData`] at `file_offset`.
+    /// 从已解析的 [`NtfsEntryData`] 在 `file_offset` 处精确读取字节。
     pub fn read_entry_data_at(
         &self,
         data: &NtfsEntryData,
@@ -663,7 +663,7 @@ impl NtfsVolume {
     }
 }
 
-/// Verify a single non-resident extent's runs cover `[lowest_vcn, highest_vcn]` contiguously.
+/// 校验单个非常驻属性段的运行段连续覆盖 `[lowest_vcn, highest_vcn]`。
 fn validate_extent_vcn_bounds(
     lowest_vcn: u64,
     highest_vcn: u64,
@@ -695,8 +695,8 @@ fn validate_extent_vcn_bounds(
     Ok(())
 }
 
-/// Verify merged non-resident runs start at VCN 0 with no gaps or overlaps and cover
-/// at least `min(initialized_size, data_size)` bytes.
+/// 校验合并后的非常驻运行段从 VCN 0 开始、无空洞与重叠，且至少覆盖
+/// `min(initialized_size, data_size)` 字节。
 fn validate_non_resident_runs(
     runs: &[NtfsDataRun],
     cluster_size: u64,
@@ -729,7 +729,7 @@ fn validate_non_resident_runs(
     Ok(())
 }
 
-/// Apply NTFS Update Sequence Array (USA) fixups to a raw MFT record buffer.
+/// 对原始 MFT 记录缓冲区应用 NTFS 更新序列数组（USA）修复。
 fn apply_usa_fixup(record: &mut [u8]) -> EngineResult<()> {
     if record.len() < 48 || &record[0..4] != b"FILE" {
         return Err(EngineError::Ntfs("无效的 MFT 记录魔数".to_string()));
@@ -755,7 +755,7 @@ fn apply_usa_fixup(record: &mut [u8]) -> EngineResult<()> {
     Ok(())
 }
 
-/// Parse all attributes inside a fixed-up MFT record.
+/// 解析已完成 USA 修复的 MFT 记录中的全部属性。
 fn parse_record_attributes(record: &[u8]) -> EngineResult<Vec<ParsedAttribute>> {
     let first_attr = read_u16_le(record, 20) as usize;
     let used_size = (read_u32_le(record, 24) as usize).min(record.len());
@@ -840,7 +840,7 @@ fn parse_record_attributes(record: &[u8]) -> EngineResult<Vec<ParsedAttribute>> 
     Ok(attrs)
 }
 
-/// Decode NTFS runlist bytes into a list of [`NtfsDataRun`] entries.
+/// 将 NTFS runlist 字节序列解码为 [`NtfsDataRun`] 列表。
 fn parse_data_runs(bytes: &[u8], lowest_vcn: u64) -> EngineResult<Vec<NtfsDataRun>> {
     let mut runs = Vec::new();
     let mut pos = 0usize;
@@ -873,7 +873,7 @@ fn parse_data_runs(bytes: &[u8], lowest_vcn: u64) -> EngineResult<Vec<NtfsDataRu
             for i in 0..off_size {
                 delta |= (bytes[pos + i] as i64) << (i * 8);
             }
-            // Sign-extend if top bit of the last byte is set.
+            // 若末字节最高位为 1，则执行符号扩展。
             if off_size < 8 && (bytes[pos + off_size - 1] & 0x80) != 0 {
                 delta |= !0i64 << (off_size * 8);
             }

@@ -1,10 +1,10 @@
-//! TraceDesk low-level forensic engines:
-//! - Windows native source protection (`SourceGuard`), cross-process `CaseFileLock`, and CP_ACP decoding
-//! - Streaming 4 MiB SHA-256 with pre/post identity verification (`sha256_file`)
-//! - Strictly whitelisted read-only Sleuth Kit CLI adapter (`TskCli`)
-//! - Pure Rust multi-core EWF1 parallel decoder & random reader (`ewf`)
-//! - Ultra-fast native FAT12/16/32 region mapper (`map_fat_regions`) and cluster reader
-//! - Thread-safe 64-bit `MediaReader` and in-process NTFS/FAT `VolumeReader`
+//! TraceDesk 底层取证引擎：
+//! - Windows 原生源证据保护（`SourceGuard`）、跨进程 `CaseFileLock` 以及 CP_ACP 解码
+//! - 带操作前后文件标识校验的 4 MiB 流式 SHA-256 计算（`sha256_file`）
+//! - 严格白名单约束的只读 Sleuth Kit CLI 适配器（`TskCli`）
+//! - 纯 Rust 多核 EWF1 并行解码器与随机读取器（`ewf`）
+//! - 高速原生 FAT12/16/32 区域映射器（`map_fat_regions`）与簇读取器
+//! - 线程安全的 64 位 `MediaReader` 以及进程内 NTFS/FAT `VolumeReader`
 
 pub mod error;
 pub mod ewf;
@@ -17,7 +17,7 @@ pub mod types;
 pub mod volume;
 pub mod win;
 
-/// Standard forensic disk sector size in bytes.
+/// 标准取证磁盘扇区大小（单位：字节）。
 pub const SECTOR_SIZE: u64 = 512;
 
 pub use error::{EngineError, EngineResult};

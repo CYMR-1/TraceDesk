@@ -43,13 +43,13 @@ fn make_volume_body(
     sector_count: u64,
 ) -> Vec<u8> {
     let mut body = vec![0u8; 1052];
-    body[0] = 0x01; // fixed disk
+    body[0] = 0x01; // 固定磁盘介质类型
     body[4..8].copy_from_slice(&chunk_count.to_le_bytes());
     body[8..12].copy_from_slice(&sectors_per_chunk.to_le_bytes());
     body[12..16].copy_from_slice(&bytes_per_sector.to_le_bytes());
     body[16..24].copy_from_slice(&sector_count.to_le_bytes());
-    body[36] = 0x01; // image media flag
-    body[52] = 0x01; // fast compression
+    body[36] = 0x01; // 镜像介质标志
+    body[52] = 0x01; // 快速压缩级别
     let crc = adler32_slice(&body[..1048]);
     body[1048..1052].copy_from_slice(&crc.to_le_bytes());
     body
@@ -62,8 +62,8 @@ fn make_header_body() -> Vec<u8> {
     enc.finish().unwrap()
 }
 
-/// Build a genuine, libewf-compatible multi-segment EWF1 image (`.E01`, `.E02`, ...) from `raw`.
-/// Alternates compressed (zlib) and uncompressed (raw + LE Adler-32) chunks to test both paths.
+/// 从 `raw` 构建真正的、兼容 libewf 的多分段 EWF1 镜像（`.E01`、`.E02` 等）。
+/// 交替写入压缩块（zlib）与非压缩块（原始数据 + 小端 Adler-32），以覆盖两条解码路径。
 fn build_ewf1_segments(
     dir: &Path,
     stem: &str,
@@ -73,7 +73,7 @@ fn build_ewf1_segments(
 ) -> Vec<PathBuf> {
     let bytes_per_sector: u32 = 512;
     let sectors_per_chunk: u32 = 64;
-    let chunk_size = (bytes_per_sector * sectors_per_chunk) as usize; // 32768
+    let chunk_size = (bytes_per_sector * sectors_per_chunk) as usize; // 32768 字节
     assert_eq!(raw.len() % bytes_per_sector as usize, 0);
     let sector_count = (raw.len() / bytes_per_sector as usize) as u64;
     let total_chunks = raw.len().div_ceil(chunk_size);
@@ -96,27 +96,27 @@ fn build_ewf1_segments(
         let is_last = seg + 1 == num_segments;
 
         let mut buf = Vec::new();
-        // 13-byte EWF1 file header.
+        // 13 字节 EWF1 文件头。
         buf.extend_from_slice(&EWF1_MAGIC);
         buf.push(0x01);
         buf.extend_from_slice(&seg_num.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes());
 
         if seg == 0 {
-            // header section
+            // header 节
             let hdr_sec_size = (76 + hdr_body.len()) as u64;
             let next = buf.len() as u64 + hdr_sec_size;
             write_section_desc(&mut buf, "header", next, hdr_sec_size);
             buf.extend_from_slice(&hdr_body);
 
-            // volume section
+            // volume 节
             let vol_sec_size = (76 + vol_body.len()) as u64;
             let next = buf.len() as u64 + vol_sec_size;
             write_section_desc(&mut buf, "volume", next, vol_sec_size);
             buf.extend_from_slice(&vol_body);
         }
 
-        // Encode chunks for this segment.
+        // 编码当前分段内的数据块。
         let sectors_sec_offset = buf.len() as u64;
         let sectors_data_start = sectors_sec_offset + 76;
         let mut sectors_payload = Vec::new();
@@ -131,7 +131,7 @@ fn build_ewf1_segments(
             let rel_off = sectors_data_start + sectors_payload.len() as u64;
             assert!(rel_off < 0x8000_0000);
 
-            // Alternate: even chunks zlib-compressed, odd chunks uncompressed + LE Adler-32.
+            // 交替编码：偶数块使用 zlib 压缩，奇数块保持非压缩并附带小端 Adler-32。
             if c % 2 == 0 {
                 let mut enc = ZlibEncoder::new(Vec::new(), Compression::fast());
                 enc.write_all(&plain).unwrap();
@@ -151,11 +151,11 @@ fn build_ewf1_segments(
         write_section_desc(&mut buf, "sectors", table_offset, sectors_sec_size);
         buf.extend_from_slice(&sectors_payload);
 
-        // Build table body (24-byte header + N*4 entries + 4-byte footer Adler-32).
+        // 构建 table 节体（24 字节头 + N*4 条目 + 4 字节尾部 Adler-32）。
         let mut table_body = Vec::with_capacity(24 + table_entries.len() * 4 + 4);
         let mut thdr = [0u8; 24];
         thdr[0..4].copy_from_slice(&(table_entries.len() as u32).to_le_bytes());
-        // base_offset = 0
+        // base_offset 设为 0
         let thdr_crc = adler32_slice(&thdr[..20]);
         thdr[20..24].copy_from_slice(&thdr_crc.to_le_bytes());
         table_body.extend_from_slice(&thdr);
@@ -173,18 +173,18 @@ fn build_ewf1_segments(
         if corrupt_primary_table_in_seg0 && seg == 0 {
             let mut bad_table = table_body.clone();
             let last = bad_table.len() - 1;
-            bad_table[last] ^= 0xff; // corrupt footer checksum
+            bad_table[last] ^= 0xff; // 破坏尾部校验和
             buf.extend_from_slice(&bad_table);
         } else {
             buf.extend_from_slice(&table_body);
         }
 
-        // table2 backup section
+        // table2 备份节
         let end_sec_offset = table2_offset + table_sec_size;
         write_section_desc(&mut buf, "table2", end_sec_offset, table_sec_size);
         buf.extend_from_slice(&table_body);
 
-        // next / done terminator (self-pointing next_offset per EWF1 spec)
+        // next / done 终止节（遵循 EWF1 规范，next_offset 指向自身）
         let term_name = if is_last { "done" } else { "next" };
         let term_off = buf.len() as u64;
         write_section_desc(&mut buf, term_name, term_off, 76);
@@ -204,7 +204,7 @@ fn test_ewf_segment_discovery_and_acquisition_info() {
     let e02 = tmp.path().join("disk.E02");
     fs::write(&e01, b"stub1").unwrap();
     fs::write(&e02, b"stub2").unwrap();
-    // Companion text file must be ignored.
+    // 同目录随附的文本文件必须被忽略。
     fs::write(tmp.path().join("disk.TXT"), b"notes").unwrap();
 
     let segs = discover_segments(&e01).unwrap();
@@ -212,17 +212,17 @@ fn test_ewf_segment_discovery_and_acquisition_info() {
     assert_eq!(segs[0].file_name().unwrap(), "disk.E01");
     assert_eq!(segs[1].file_name().unwrap(), "disk.E02");
 
-    // Non-first segment `.E02` must be rejected.
+    // 必须拒绝非首段 `.E02`。
     let err = discover_segments(&e02).unwrap_err();
     assert!(matches!(err, EngineError::InvalidArgument(_)));
 
-    // Missing middle segment must be rejected.
+    // 必须拒绝缺失中间分段的情况。
     fs::remove_file(&e02).unwrap();
     fs::write(tmp.path().join("disk.E03"), b"stub3").unwrap();
     let err = discover_segments(&e01).unwrap_err();
     assert!(matches!(err, EngineError::Ewf(_)));
 
-    // Alphabetic continuation (.EAA) after .E99: test invalid header detection + valid magic acceptance.
+    // `.E99` 之后的字母续段（`.EAA`）：测试无效文件头检测及有效魔数接受。
     let tmp_alpha = tempfile::tempdir().unwrap();
     for i in 1..=99 {
         fs::write(tmp_alpha.path().join(format!("big.E{i:02}")), b"seg").unwrap();
@@ -237,7 +237,7 @@ fn test_ewf_segment_discovery_and_acquisition_info() {
     assert_eq!(segs100.len(), 100);
     assert_eq!(segs100[99].file_name().unwrap(), "big.EAA");
 
-    // Guymager .info parsing
+    // Guymager `.info` 解析测试
     let info_path = e01.with_extension("info");
     fs::write(
         &info_path,
@@ -264,12 +264,12 @@ fn test_ewf1_parallel_decode_random_read_and_tsk_interop() {
     let expected_sha = sha256_file(&demo_path, None, None).unwrap();
 
     let tmp = tempfile::tempdir().unwrap();
-    // 288 chunks of 32 KiB split across 3 segments (96 chunks each), mixing compressed & uncompressed chunks.
+    // 288 个 32 KiB 块切分为 3 个分段（每段 96 块），混排压缩块与非压缩块。
     let segs = build_ewf1_segments(tmp.path(), "demo_ewf", &raw, 96, false);
     assert_eq!(segs.len(), 3);
     let e01 = &segs[0];
 
-    // 1. Verify official Sleuth Kit (libewf.dll) accepts our EWF1 image!
+    // 1. 验证官方 Sleuth Kit（libewf.dll）可正常识别我们构造的 EWF1 镜像。
     let tsk = TskCli::discover(None).expect("discover TSK");
     let (tsk_logical_size, tsk_sector_size) = tsk.img_stat_ewf(e01).expect("img_stat_ewf");
     assert_eq!(tsk_logical_size, raw.len() as u64);
@@ -285,7 +285,7 @@ fn test_ewf1_parallel_decode_random_read_and_tsk_interop() {
     assert_eq!(parts.len(), 1);
     assert_eq!(parts[0].offset, 2048);
 
-    // 2. Parallel physical segment hashing preserves exact segment order.
+    // 2. 并行计算物理分段哈希，并严格保持原始分段顺序。
     let phys_progress = AtomicU64::new(0);
     let total_phys: u64 = segs.iter().map(|p| fs::metadata(p).unwrap().len()).sum();
     let phys_cb = |done: u64, total: u64| {
@@ -300,7 +300,7 @@ fn test_ewf1_parallel_decode_random_read_and_tsk_interop() {
     }
     assert_eq!(phys_progress.load(Ordering::Relaxed), total_phys);
 
-    // 3. Pure Rust multi-core parallel EWF1 logical stream SHA-256.
+    // 3. 纯 Rust 多核并行计算 EWF1 逻辑流 SHA-256。
     let log_progress = AtomicU64::new(0);
     let log_cb = |done: u64, total: u64| {
         assert_eq!(total, raw.len() as u64);
@@ -314,7 +314,7 @@ fn test_ewf1_parallel_decode_random_read_and_tsk_interop() {
     let stream_sha = hash_logical_stream(&tsk, e01, raw.len() as u64, None, None).unwrap();
     assert_eq!(stream_sha, expected_sha);
 
-    // Cancellation must propagate without falling back to img_cat.
+    // 取消信号必须直接向上传播，不得回退到 img_cat。
     let cancel = AtomicBool::new(true);
     assert!(
         hash_logical_stream(&tsk, e01, raw.len() as u64, Some(&cancel), None)
@@ -322,7 +322,7 @@ fn test_ewf1_parallel_decode_random_read_and_tsk_interop() {
             .is_cancelled()
     );
 
-    // 4. Thread-safe EwfMediaReader random cross-chunk & cross-segment reads.
+    // 4. 线程安全 EwfMediaReader 跨块与跨分段并发随机读取测试。
     let media: Arc<dyn MediaReader> = open_media(e01).expect("open_media EWF1");
     assert_eq!(media.media_size(), raw.len() as u64);
 
@@ -334,9 +334,9 @@ fn test_ewf1_parallel_decode_random_read_and_tsk_interop() {
         handles.push(thread::spawn(move || {
             let offsets = [
                 0usize,
-                32_760,           // crosses chunk 0 -> 1 (compressed -> uncompressed)
-                96 * 32_768 - 17, // crosses segment .E01 -> .E02!
-                192 * 32_768 - 9, // crosses segment .E02 -> .E03!
+                32_760,           // 跨越第 0 块 -> 第 1 块（压缩块 -> 非压缩块）
+                96 * 32_768 - 17, // 跨越分段 .E01 -> .E02
+                192 * 32_768 - 9, // 跨越分段 .E02 -> .E03
                 2048 * 512 + t * 4093,
                 r.len() - 1024,
             ];
@@ -352,7 +352,7 @@ fn test_ewf1_parallel_decode_random_read_and_tsk_interop() {
         h.join().unwrap();
     }
 
-    // 5. VolumeReader over EWF1 reads FAT16 files identically to TSK icat!
+    // 5. 基于 EWF1 的 VolumeReader 读取 FAT16 文件，结果与 TSK icat 完全一致。
     let entries = tsk.list_entries(e01, 2048, true, None, "", None).unwrap();
     let mut volume = VolumeReader::open(e01).expect("VolumeReader over EWF1");
     for name in ["README.TXT", "PAYLOAD.BIN", "DOCS/CASE.TXT"] {
@@ -381,7 +381,7 @@ fn test_ewf1_table2_recovery_and_corruption_detection() {
         .collect();
     let tmp = tempfile::tempdir().unwrap();
 
-    // Corrupt primary `table` checksum in segment 0; parser must recover transparently from `table2`.
+    // 破坏 0 号分段中主 `table` 的校验和；解析器必须能通过 `table2` 透明恢复。
     let segs = build_ewf1_segments(tmp.path(), "backup", &raw, 2, true);
     let idx = EwfIndex::open(&segs[0]).expect("recover via table2");
     assert_eq!(idx.chunks.len(), 4);
@@ -391,8 +391,8 @@ fn test_ewf1_table2_recovery_and_corruption_detection() {
     reader.read_exact_at(0, &mut out).unwrap();
     assert_eq!(out, raw);
 
-    // Corrupt an uncompressed chunk payload -> Adler-32 mismatch must be caught.
-    let bad_chunk_loc = idx.chunks[1]; // chunk 1 is uncompressed
+    // 破坏一个非压缩块载荷 -> 必须检出 Adler-32 校验不匹配。
+    let bad_chunk_loc = idx.chunks[1]; // 第 1 块为非压缩块
     assert!(!bad_chunk_loc.compressed);
     let seg_path = &segs[bad_chunk_loc.segment_idx as usize];
     let mut seg_bytes = fs::read(seg_path).unwrap();
@@ -409,8 +409,8 @@ fn test_ewf_hash_logical_stream_auto_fallback_to_img_cat() {
     let raw = fs::read(&demo_path).unwrap();
     let expected_sha = sha256_file(&demo_path, None, None).unwrap();
 
-    // Build a valid EWF1 with an extra `notes` section right before `done` that libewf ignores,
-    // while our strict EWF1 parser rejects unknown section types and falls back to `img_cat`.
+    // 构造一个在 `done` 前插入自定义节的合法 EWF1：libewf 会忽略未知节，
+    // 而严格的纯 Rust EWF1 解析器会拒绝未知节类型并回退到 `img_cat`。
     let tmp = tempfile::tempdir().unwrap();
     let segs = build_ewf1_segments(tmp.path(), "fallback", &raw, 512, false);
     let e01 = &segs[0];
@@ -423,10 +423,10 @@ fn test_ewf_hash_logical_stream_auto_fallback_to_img_cat() {
     write_section_desc(&mut data, "done", new_done_off, 76);
     fs::write(e01, &data).unwrap();
 
-    // Strict pure Rust EWF1 parser must reject the unknown section type.
+    // 严格的纯 Rust EWF1 解析器必须拒绝未知节类型。
     assert!(EwfIndex::open(e01).is_err());
 
-    // `hash_logical_stream` must transparently fall back to `TskCli::img_cat` and match SHA-256!
+    // `hash_logical_stream` 必须透明回退至 `TskCli::img_cat` 并得到一致的 SHA-256。
     let tsk = TskCli::discover(None).unwrap();
     let fallback_sha = hash_logical_stream(&tsk, e01, raw.len() as u64, None, None).unwrap();
     assert_eq!(fallback_sha, expected_sha);

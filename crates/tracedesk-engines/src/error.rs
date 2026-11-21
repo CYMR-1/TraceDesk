@@ -1,7 +1,7 @@
 use std::io;
 use thiserror::Error;
 
-/// Unified error type for `tracedesk-engines`.
+/// `tracedesk-engines` 的统一错误类型。
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("I/O 错误：{0}")]
@@ -51,7 +51,7 @@ pub enum EngineError {
 }
 
 impl EngineError {
-    /// Returns `true` when this error represents cooperative cancellation.
+    /// 当此错误表示协作式取消时返回 `true`。
     pub fn is_cancelled(&self) -> bool {
         matches!(self, Self::Cancelled(_))
     }
