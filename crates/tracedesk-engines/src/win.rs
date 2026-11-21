@@ -6,7 +6,7 @@ use std::process::Stdio;
 use crate::error::{EngineError, EngineResult};
 use crate::types::FileStamp;
 
-/// Internal file identity snapshot used to verify a file was not modified or replaced.
+/// 内部文件标识快照，用于校验文件未被修改或替换。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FileIdentity {
     pub size: u64,
@@ -15,7 +15,7 @@ pub(crate) struct FileIdentity {
     pub dev: u64,
 }
 
-/// Strip Windows verbatim prefix (`\\?\` or `\\?\UNC\`) so 32-bit TSK CLI tools accept paths.
+/// 去除 Windows 原义路径前缀（`\\?\` 或 `\\?\UNC\`），以便 32 位 TSK CLI 工具正常接收路径。
 pub(crate) fn strip_verbatim_prefix(path: &Path) -> PathBuf {
     #[cfg(windows)]
     {
@@ -54,7 +54,7 @@ mod platform {
     use windows_sys::Win32::System::IO::OVERLAPPED;
     use windows_sys::Win32::System::Pipes::CreatePipe;
 
-    /// Windows 100-nanosecond ticks between 1601-01-01 and 1970-01-01 UTC.
+    /// UTC 1601-01-01 到 1970-01-01 之间的 Windows 100 纳秒计数偏移量。
     const WINDOWS_EPOCH_OFFSET_100NS: i128 = 116_444_736_000_000_000;
 
     fn to_wide_null(s: &OsStr) -> Vec<u16> {
@@ -79,18 +79,17 @@ mod platform {
         }
     }
 
-    /// RAII wrapper around a Win32 HANDLE that is safe to transfer across threads.
+    /// 可安全跨线程传递的 Win32 `HANDLE` RAII 封装。
     pub(super) struct GuardHandle(HANDLE);
 
-    // SAFETY: Win32 file handles are kernel objects whose lifetime is exclusively owned
-    // by `GuardHandle` and closed once on `Drop`.
+    // 安全性说明：Win32 文件句柄是内核对象，其生命周期由 `GuardHandle` 独占所有，并在 `Drop` 时仅关闭一次。
     unsafe impl Send for GuardHandle {}
     unsafe impl Sync for GuardHandle {}
 
     impl Drop for GuardHandle {
         fn drop(&mut self) {
             if !self.0.is_null() && self.0 != INVALID_HANDLE_VALUE {
-                // SAFETY: `self.0` is an exclusively owned valid handle.
+                // 安全性说明：`self.0` 为当前结构体独占的有效句柄。
                 unsafe {
                     CloseHandle(self.0);
                 }
@@ -133,7 +132,7 @@ mod platform {
 
     pub(super) fn open_source_guard_handle(path: &Path) -> EngineResult<GuardHandle> {
         let wide = to_wide_null(path.as_os_str());
-        // FILE_SHARE_READ only: denies concurrent write and delete opens at the OS kernel level.
+        // 仅允许 FILE_SHARE_READ：在操作系统内核层拒绝并发写入和删除打开。
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),
@@ -160,7 +159,7 @@ mod platform {
         handle: HANDLE,
     }
 
-    // SAFETY: `LockHandle` exclusively owns the Win32 file handle and unlocks/closes on Drop.
+    // 安全性说明：`LockHandle` 独占所有 Win32 文件句柄，并在 `Drop` 时解锁并关闭。
     unsafe impl Send for LockHandle {}
     unsafe impl Sync for LockHandle {}
 
@@ -264,7 +263,7 @@ mod platform {
         if bytes.is_empty() {
             return String::new();
         }
-        // Chunk if extremely large so we never overflow i32.
+        // 输入过大时按块切分，避免转换为 i32 时发生溢出。
         const MAX_CHUNK: usize = 64 * 1024 * 1024;
         if bytes.len() > MAX_CHUNK {
             let mut out = String::new();
@@ -297,7 +296,7 @@ mod platform {
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
-        // SAFETY: `CreatePipe` succeeded and returned newly created exclusively owned handles.
+        // 安全性说明：`CreatePipe` 调用成功并返回了新创建的独占句柄。
         let read_owned = unsafe { OwnedHandle::from_raw_handle(read_raw as _) };
         let write_owned = unsafe { OwnedHandle::from_raw_handle(write_raw as _) };
         Ok((File::from(read_owned), Stdio::from(write_owned)))
@@ -378,8 +377,8 @@ pub(crate) use platform::{
 };
 pub use platform::{decode_acp_lossy, decode_acp_strict};
 
-/// Holds read-only shared handles (`FILE_SHARE_READ` on Windows) to all source image files
-/// so concurrent writers and deleters are rejected by the OS kernel while analysis runs.
+/// 为所有源镜像文件持有只读共享句柄（Windows 上使用 `FILE_SHARE_READ`），
+/// 从而在分析运行期间由操作系统内核拒绝并发写入与删除操作。
 pub struct SourceGuard {
     #[allow(dead_code)]
     handles: Vec<platform::GuardHandle>,
@@ -388,7 +387,7 @@ pub struct SourceGuard {
 }
 
 impl SourceGuard {
-    /// Acquire `FILE_SHARE_READ` handles for every path and capture the initial [`FileStamp`] snapshot.
+    /// 为每个路径获取 `FILE_SHARE_READ` 句柄，并采集初始 [`FileStamp`] 快照。
     pub fn acquire(paths: &[PathBuf]) -> EngineResult<Self> {
         let mut handles = Vec::with_capacity(paths.len());
         for path in paths {
@@ -402,7 +401,7 @@ impl SourceGuard {
         })
     }
 
-    /// Capture `(name, size, mtime_ns, ino)` stamps for all source paths.
+    /// 采集所有源路径的 `(name, size, mtime_ns, ino)` 文件印记快照。
     pub fn snapshot(paths: &[PathBuf]) -> EngineResult<Vec<FileStamp>> {
         let mut stamps = Vec::with_capacity(paths.len());
         for path in paths {
@@ -421,7 +420,7 @@ impl SourceGuard {
         Ok(stamps)
     }
 
-    /// Verify that the given paths still exist with the exact same stamps recorded on `acquire`.
+    /// 校验给定路径仍然存在，且其文件印记与 `acquire` 时记录的完全一致。
     pub fn verify_unchanged(&self, paths: &[PathBuf]) -> EngineResult<()> {
         if paths.len() != self.paths.len() {
             return Err(EngineError::SourceChanged(
@@ -437,18 +436,18 @@ impl SourceGuard {
         Ok(())
     }
 
-    /// Initial stamps captured when the guard was acquired.
+    /// 获取创建保护器时记录的初始文件印记快照。
     pub fn stamps(&self) -> &[FileStamp] {
         &self.initial_stamps
     }
 
-    /// Paths currently protected by this guard.
+    /// 获取当前受此保护器保护的路径列表。
     pub fn paths(&self) -> &[PathBuf] {
         &self.paths
     }
 }
 
-/// Exclusive non-blocking byte-0 lock on `<case_dir>/case.lock`, interoperable with Python `msvcrt.locking`.
+/// 针对 `<case_dir>/case.lock` 第 0 字节的独占非阻塞锁，可与 Python `msvcrt.locking` 互操作。
 pub struct CaseFileLock {
     #[allow(dead_code)]
     handle: platform::LockHandle,
@@ -456,7 +455,7 @@ pub struct CaseFileLock {
 }
 
 impl CaseFileLock {
-    /// Open or create `lock_path` and acquire an exclusive non-blocking 1-byte lock at offset 0.
+    /// 打开或创建 `lock_path`，并在偏移 0 处获取 1 字节的独占非阻塞锁。
     pub fn acquire(lock_path: &Path) -> EngineResult<Self> {
         let handle = platform::LockHandle::acquire(lock_path)?;
         Ok(Self {
@@ -465,12 +464,12 @@ impl CaseFileLock {
         })
     }
 
-    /// Path of the lock file.
+    /// 锁文件的路径。
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Explicitly release the lock (identical to dropping `self`).
+    /// 显式释放锁（与直接 drop `self` 等效）。
     pub fn unlock(self) {
         drop(self);
     }

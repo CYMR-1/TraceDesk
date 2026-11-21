@@ -8,9 +8,9 @@ use sha2::{Digest, Sha256};
 use crate::error::{EngineError, EngineResult};
 use crate::win::{file_identity_from_file, file_identity_from_path};
 
-const STREAM_BUF_MAX: usize = 4 << 20; // 4 MiB
+const STREAM_BUF_MAX: usize = 4 << 20; // 4 MiB 缓冲区上限
 
-/// Convert raw SHA-256 bytes into a 64-character lowercase hexadecimal string.
+/// 将原始 SHA-256 字节转换为 64 位小写十六进制字符串。
 pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -21,8 +21,8 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-/// Streaming SHA-256 with a reusable 4 MiB buffer, pre/post metadata identity verification,
-/// cooperative cancellation, and progress callback `(bytes_done, total_bytes)`.
+/// 使用可复用的 4 MiB 缓冲区进行流式 SHA-256 计算，支持计算前后元数据标识校验、
+/// 协作式取消以及进度回调 `(bytes_done, total_bytes)`。
 pub fn sha256_file(
     path: &Path,
     cancel: Option<&AtomicBool>,

@@ -33,10 +33,9 @@ enum ResolvedEntry {
     Fat(FatFileRuns),
 }
 
-/// In-process 64-bit volume & file random reader supporting NTFS (including sparse run
-/// skipping and deleted MFT records) and FAT12/16/32 (non-deleted regular files), over both
-/// RAW and EWF1 media. Unsupported/compressed/encrypted attributes and deleted FAT entries
-/// return [`EntryReadPlan::FallbackToIcat`].
+/// 进程内 64 位卷与文件随机读取器，支持基于 RAW 和 EWF1 介质的 NTFS（含稀疏运行段跳过
+/// 及已删除 MFT 记录）与 FAT12/16/32（未删除的常规文件）。对于不支持、已压缩或已加密的属性
+/// 以及已删除的 FAT 条目，均返回 [`EntryReadPlan::FallbackToIcat`]。
 pub struct VolumeReader {
     media: Arc<dyn MediaReader>,
     partitions: HashMap<u64, CachedPartition>,
@@ -44,13 +43,13 @@ pub struct VolumeReader {
 }
 
 impl VolumeReader {
-    /// Open a RAW or EWF1 image and initialize a new [`VolumeReader`].
+    /// 打开 RAW 或 EWF1 镜像并初始化新的 [`VolumeReader`]。
     pub fn open(image: &Path) -> EngineResult<Self> {
         let media = open_media(image)?;
         Ok(Self::open_with_media(media))
     }
 
-    /// Construct a [`VolumeReader`] sharing an existing thread-safe [`MediaReader`].
+    /// 基于已有的线程安全 [`MediaReader`] 构造 [`VolumeReader`]。
     pub fn open_with_media(media: Arc<dyn MediaReader>) -> Self {
         Self {
             media,
@@ -59,7 +58,7 @@ impl VolumeReader {
         }
     }
 
-    /// Underlying [`MediaReader`].
+    /// 返回底层 [`MediaReader`] 的引用。
     pub fn media(&self) -> &Arc<dyn MediaReader> {
         &self.media
     }
@@ -122,7 +121,7 @@ impl VolumeReader {
                 ResolvedEntry::Ntfs(data)
             }
             CachedPartition::Fat(fat) => {
-                // Deleted FAT records always fall back to `icat -r`.
+                // 已删除的 FAT 记录始终回退到 `icat -r`。
                 if entry.deleted || attr_type.is_some() {
                     return Err(EngineError::RandomRead(
                         "FAT 删除记录需回退 icat 恢复读取".to_string(),
@@ -142,10 +141,10 @@ impl VolumeReader {
         Ok(resolved)
     }
 
-    /// Inspect an entry's attributes and compute non-sparse byte intervals to scan.
+    /// 检查条目属性并计算需要扫描的非稀疏字节区间。
     ///
-    /// Returns [`EntryReadPlan::FallbackToIcat`] for compressed/encrypted/anomalous NTFS
-    /// attributes, empty-run NTFS attributes, FAT deleted records, or unsupported filesystems.
+    /// 若遇到已压缩/已加密/异常的 NTFS 属性、空运行段的 NTFS 属性、FAT 已删除记录
+    /// 或不受支持的文件系统，则返回 [`EntryReadPlan::FallbackToIcat`]。
     pub fn plan_entry(&mut self, entry: &InventoryEntry, needle: &[u8]) -> EntryReadPlan {
         let Ok(resolved) = self.resolve_entry(entry) else {
             return EntryReadPlan::FallbackToIcat;
@@ -175,7 +174,7 @@ impl VolumeReader {
         }
     }
 
-    /// Read `len` exact bytes from `entry` starting at `file_offset`.
+    /// 从 `entry` 的 `file_offset` 处精确读取 `len` 字节。
     pub fn read_entry_at(
         &mut self,
         entry: &InventoryEntry,
@@ -206,7 +205,7 @@ impl VolumeReader {
     }
 }
 
-/// Parse TSK inode format `<mft_or_ino>` or `<mft>-<attr_type>-<attr_id>`.
+/// 解析 TSK inode 格式：`<mft_or_ino>` 或 `<mft>-<attr_type>-<attr_id>`。
 pub(crate) fn parse_inode(inode: &str) -> Option<(u64, Option<u32>, Option<u16>)> {
     let mut parts = inode.split('-');
     let first = parts.next()?.parse::<u64>().ok()?;

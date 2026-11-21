@@ -4,17 +4,17 @@ use std::sync::Arc;
 
 use crate::error::{EngineError, EngineResult};
 
-/// Thread-safe 64-bit read-only random-access interface over a logical forensic media image
-/// (RAW `.dd`/`.img` or multi-segment EWF1 `.E01`).
+/// 面向逻辑取证介质镜像（RAW `.dd`/`.img` 或多分段 EWF1 `.E01`）的
+/// 线程安全 64 位只读随机访问接口。
 pub trait MediaReader: Send + Sync {
-    /// Total logical size of the media in bytes.
+    /// 介质的总逻辑大小（单位：字节）。
     fn media_size(&self) -> u64;
 
-    /// Read exactly `buf.len()` bytes starting at logical byte `offset`.
+    /// 从逻辑字节偏移 `offset` 处精确读取 `buf.len()` 字节。
     fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> EngineResult<()>;
 }
 
-/// Platform-portable positional exact read using `&File` without mutating user-space seek state.
+/// 跨平台的定位精确读取，通过 `&File` 读取且不修改用户态文件偏移状态。
 pub(crate) fn file_read_exact_at(file: &File, mut offset: u64, mut buf: &mut [u8]) -> EngineResult<()> {
     #[cfg(windows)]
     use std::os::windows::fs::FileExt;
@@ -40,7 +40,7 @@ pub(crate) fn file_read_exact_at(file: &File, mut offset: u64, mut buf: &mut [u8
     Ok(())
 }
 
-/// Thread-safe 64-bit random reader for raw forensic disk/volume images.
+/// 面向原始取证磁盘/卷镜像的线程安全 64 位随机读取器。
 pub struct RawMediaReader {
     file: File,
     size: u64,
@@ -76,7 +76,7 @@ impl MediaReader for RawMediaReader {
     }
 }
 
-/// Open a RAW or EWF1 (`.E01`) image as a thread-safe [`MediaReader`].
+/// 将 RAW 或 EWF1（`.E01`）镜像打开为线程安全的 [`MediaReader`]。
 pub fn open_media(image: &Path) -> EngineResult<Arc<dyn MediaReader>> {
     let is_e01 = image
         .extension()

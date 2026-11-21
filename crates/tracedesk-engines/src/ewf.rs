@@ -20,7 +20,7 @@ use crate::tsk::TskCli;
 use crate::types::SegmentDigest;
 use crate::win::strip_verbatim_prefix;
 
-/// EWF1 (EnCase v1) 8-byte file header signature: `EVF\x09\x0d\x0a\xff\x00`.
+/// EWF1（EnCase v1）8 字节文件头魔数：`EVF\x09\x0d\x0a\xff\x00`。
 pub const EWF1_MAGIC: [u8; 8] = [0x45, 0x56, 0x46, 0x09, 0x0d, 0x0a, 0xff, 0x00];
 
 const FILE_HEADER_LEN: u64 = 13;
@@ -40,8 +40,8 @@ static INFO_STARTED_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^Acquisition started\s*:\s*([^\r\n(]+)").expect("valid started regex")
 });
 
-/// Discover and validate all contiguous EWF segments starting from `.E01`
-/// (supports `.E01`–`.E99` and `.EAA`+ alphabetic continuations).
+/// 从 `.E01` 起发现并校验所有连续的 EWF 分段
+/// （支持 `.E01`–`.E99` 及 `.EAA`+ 字母续段）。
 pub fn discover_segments(e01: &Path) -> EngineResult<Vec<PathBuf>> {
     let resolved = fs::canonicalize(e01).map_err(|_| {
         EngineError::InvalidArgument(format!("E01 文件不存在：{}", e01.display()))
@@ -133,7 +133,7 @@ pub fn discover_segments(e01: &Path) -> EngineResult<Vec<PathBuf>> {
         .collect())
 }
 
-/// Parse companion Guymager `.info` acquisition metadata alongside an `.E01` file.
+/// 解析与 `.E01` 文件同目录随附的 Guymager `.info` 采集元数据。
 pub fn acquisition_info(e01: &Path) -> HashMap<String, String> {
     let info_path = e01.with_extension("info");
     let Ok(meta) = fs::metadata(&info_path) else {
@@ -170,7 +170,7 @@ pub fn acquisition_info(e01: &Path) -> HashMap<String, String> {
     result
 }
 
-/// Hash all physical EWF segment files in parallel using `rayon` and return digests in original order.
+/// 使用 `rayon` 并行计算所有物理 EWF 分段文件的哈希，并按原始顺序返回摘要列表。
 pub fn hash_physical_segments(
     parts: &[PathBuf],
     cancel: Option<&AtomicBool>,
@@ -223,7 +223,7 @@ pub fn hash_physical_segments(
     })
 }
 
-/// Global index entry locating a single EWF1 chunk within one physical segment file.
+/// 用于在单个物理分段文件内定位某个 EWF1 数据块的全局索引项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkLoc {
     pub segment_idx: u16,
@@ -232,7 +232,7 @@ pub struct ChunkLoc {
     pub compressed: bool,
 }
 
-/// Parsed EWF1 global chunk index across all segments.
+/// 跨所有分段解析得到的 EWF1 全局块索引。
 #[derive(Debug, Clone)]
 pub struct EwfIndex {
     pub segments: Vec<PathBuf>,
@@ -372,7 +372,7 @@ fn parse_table_section(
         let next_off = if i + 1 < entry_count {
             raw_entries[i + 1].0
         } else {
-            // Find the end of the `sectors` section containing `off`.
+            // 查找包含 `off` 的 `sectors` 节的结束位置。
             sectors_ranges
                 .iter()
                 .rev()
@@ -401,7 +401,7 @@ fn parse_table_section(
 }
 
 impl EwfIndex {
-    /// Parse an EWF1 (EnCase v1) segment set starting at `.E01` and build the global chunk index.
+    /// 从 `.E01` 起解析 EWF1（EnCase v1）分段集合并构建全局块索引。
     pub fn open(e01: &Path) -> EngineResult<Self> {
         let segments = discover_segments(e01)?;
         let mut volume_meta: Option<VolumeMeta> = None;
@@ -521,7 +521,7 @@ impl EwfIndex {
                         }
                     }
                     "table2" => {
-                        // Backup table: only consume if the primary `table` failed checksum/parse.
+                        // 备份表：仅在主 `table` 节校验或解析失败时使用。
                         if last_table_failed {
                             let mut locs = parse_table_section(
                                 &file,
@@ -616,7 +616,7 @@ impl EwfIndex {
     }
 }
 
-/// Decode and verify a single EWF1 chunk (zlib compressed or raw + trailing LE Adler-32).
+/// 解码并校验单个 EWF1 数据块（zlib 压缩块，或原始数据加末尾小端 Adler-32 校验和）。
 fn decode_chunk(
     raw: &[u8],
     compressed: bool,
@@ -641,7 +641,7 @@ fn decode_chunk(
         out.truncate(expected_logical_len);
         Ok(out)
     } else {
-        // Uncompressed EWF1 chunk: raw chunk bytes followed by 4-byte LE Adler-32 checksum.
+        // 非压缩 EWF1 数据块：原始块字节后紧跟 4 字节小端 Adler-32 校验和。
         if raw.len() >= chunk_size + 4 {
             let expected = read_u32_le(raw, chunk_size);
             if adler32_slice(&raw[..chunk_size]) == expected {
@@ -660,7 +660,7 @@ fn decode_chunk(
     }
 }
 
-/// Thread-safe random-access reader for EWF1 multi-segment images with a sharded LRU chunk cache.
+/// 带有分片 LRU 块缓存的 EWF1 多分段镜像线程安全随机读取器。
 pub struct EwfMediaReader {
     index: Arc<EwfIndex>,
     files: Vec<File>,
@@ -668,7 +668,7 @@ pub struct EwfMediaReader {
 }
 
 impl EwfMediaReader {
-    /// Open an EWF1 image starting from its `.E01` segment.
+    /// 从 `.E01` 首段打开 EWF1 镜像。
     pub fn open(e01: &Path) -> EngineResult<Self> {
         let index = Arc::new(EwfIndex::open(e01)?);
         let mut files = Vec::with_capacity(index.segments.len());
@@ -686,7 +686,7 @@ impl EwfMediaReader {
         })
     }
 
-    /// Access the parsed [`EwfIndex`].
+    /// 访问已解析的 [`EwfIndex`]。
     pub fn index(&self) -> &EwfIndex {
         &self.index
     }
@@ -767,7 +767,7 @@ impl MediaReader for EwfMediaReader {
     }
 }
 
-/// Multi-core `rayon` parallel EWF1 logical stream SHA-256 decoder (no fallback).
+/// 基于 `rayon` 的多核并行 EWF1 逻辑流 SHA-256 解码器（不包含回退逻辑）。
 pub fn hash_logical_ewf1_parallel(
     e01: &Path,
     logical_size: u64,
@@ -799,7 +799,7 @@ pub fn hash_logical_ewf1_parallel(
         let batch_end = (batch_start + PARALLEL_BATCH_CHUNKS).min(total_chunks);
         let mut raw_batch = Vec::with_capacity(batch_end - batch_start);
 
-        // Stage 1: Sequential I/O reading compressed/raw chunk payloads in disk order.
+        // 阶段 1：按磁盘顺序执行顺序 I/O，读取压缩或原始块载荷。
         for chunk_idx in batch_start..batch_end {
             let loc = index.chunks[chunk_idx];
             let mut raw = vec![0u8; loc.stored_size as usize];
@@ -808,7 +808,7 @@ pub fn hash_logical_ewf1_parallel(
             raw_batch.push((raw, loc.compressed, expected_len));
         }
 
-        // Stage 2: Multi-core parallel zlib decompression & Adler-32 verification via rayon.
+        // 阶段 2：通过 rayon 执行多核并行 zlib 解压与 Adler-32 校验。
         let decoded_batch: Vec<Vec<u8>> = raw_batch
             .into_par_iter()
             .map(|(raw, compressed, expected_len)| {
@@ -821,7 +821,7 @@ pub fn hash_logical_ewf1_parallel(
             })
             .collect::<EngineResult<Vec<Vec<u8>>>>()?;
 
-        // Stage 3: Deterministic ordered SHA-256 feeding.
+        // 阶段 3：按确定顺序依次送入 SHA-256 计算。
         for block in decoded_batch {
             hasher.update(&block);
             done += block.len() as u64;
@@ -840,8 +840,8 @@ pub fn hash_logical_ewf1_parallel(
     Ok(hex_lower(&hasher.finalize()))
 }
 
-/// Compute logical SHA-256 of an EWF image using multi-core pure Rust EWF1 parallel decompression,
-/// automatically falling back to `TskCli::img_cat` for EWF2, encrypted, or non-standard images.
+/// 使用多核纯 Rust EWF1 并行解压计算 EWF 镜像的逻辑 SHA-256，
+/// 遇到 EWF2、加密或非标准镜像时自动回退至 `TskCli::img_cat`。
 pub fn hash_logical_stream(
     tsk: &TskCli,
     e01: &Path,

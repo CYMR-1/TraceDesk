@@ -34,7 +34,7 @@ static IMG_STAT_SIZE_RE: LazyLock<Regex> =
 static IMG_STAT_SECTOR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"Sector size:\s*(\d+)").expect("valid img_stat sector regex"));
 
-/// Strictly whitelisted read-only Sleuth Kit CLI commands.
+/// 严格白名单约束的只读 Sleuth Kit CLI 命令集合。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TskCommand {
     Mmls,
@@ -46,7 +46,7 @@ pub enum TskCommand {
 }
 
 impl TskCommand {
-    /// Canonical lowercase tool name without file extension.
+    /// 不含扩展名的规范小写工具名。
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Mmls => "mmls",
@@ -58,7 +58,7 @@ impl TskCommand {
         }
     }
 
-    /// Platform executable filename (`.exe` on Windows).
+    /// 当前平台的可执行文件名（Windows 上带 `.exe` 后缀）。
     pub const fn executable_name(self) -> &'static str {
         #[cfg(windows)]
         {
@@ -77,7 +77,7 @@ impl TskCommand {
         }
     }
 
-    /// Parse a command name against the strict 6-command read-only whitelist.
+    /// 依据严格的 6 命令只读白名单解析命令名称。
     pub fn parse_whitelisted(name: &str) -> EngineResult<Self> {
         match name {
             "mmls" => Ok(Self::Mmls),
@@ -204,13 +204,12 @@ fn validate_inode(inode: &str, msg: &str) -> EngineResult<()> {
     Ok(())
 }
 
-/// Prepare command arguments and optional working directory for RAW or EWF images.
+/// 为 RAW 或 EWF 镜像准备命令参数及可选工作目录。
 ///
-/// Mirrors `forensic/engines/tsk.py::TSK.image_args`:
-/// - When an image ends with `.e01` (case-insensitive), sets `cwd = image.parent()`,
-///   replaces the image path with just its filename (avoiding 32-bit `libewf` path issues),
-///   and switches `-i raw` to `-i ewf`.
-/// - Always strips Windows verbatim `\\?\` prefix so 32-bit TSK binaries accept the path.
+/// 与 `forensic/engines/tsk.py::TSK.image_args` 保持一致：
+/// - 当镜像路径以 `.e01`（不区分大小写）结尾时，将 `cwd` 设为 `image.parent()`，
+///   把镜像参数替换为纯文件名（规避 32 位 `libewf` 路径问题），并将 `-i raw` 切换为 `-i ewf`。
+/// - 始终去除 Windows 原义路径前缀 `\\?\`，确保 32 位 TSK 可执行文件能够识别路径。
 fn prepare_image_args(mut args: Vec<OsString>) -> (Vec<OsString>, Option<PathBuf>) {
     for idx in 0..args.len() {
         let p = PathBuf::from(&args[idx]);
@@ -238,7 +237,7 @@ fn clean_image_arg(image: &Path) -> OsString {
     strip_verbatim_prefix(image).into_os_string()
 }
 
-/// Watchdog that terminates a blocking child process if `cancel` is triggered or `deadline` passes.
+/// 看门狗定时器：当触发 `cancel` 或超过 `deadline` 时终止阻塞中的子进程。
 struct ChildWatchdog {
     done: Arc<AtomicBool>,
     reason: Arc<AtomicU8>,
@@ -280,13 +279,9 @@ impl ChildWatchdog {
 
         let done_bg = Arc::clone(&done);
         let reason_bg = Arc::clone(&reason);
-        // SAFETY: `ChildWatchdog::stop` joins this thread before `cancel` can be invalidated,
-        // and `Drop` always calls `stop()`. Still, to avoid any lifetime unsafety we poll via
-        // raw pointer ONLY if we guarantee join before return — wait: better yet, take an
-        // `Option<*const AtomicBool>`? No! Even safer: only store a `usize`? No, Rust's
-        // `thread::scope` handles borrowed `&AtomicBool` with 100% safe zero-unsafe lifetimes!
-        // Here we only need timeout when `cancel` is None; when `cancel` is Some we use
-        // `thread::scope` directly in `stream_entry` / `img_cat_ewf_stream`!
+        // 说明：为避免任何生命周期相关的不安全操作，此处不通过裸指针轮询 `cancel`，
+        // 仅处理超时场景（`cancel` 为 `None`）；当需要协作式取消时，在 `stream_entry` 与
+        // `img_cat_ewf_stream` 中直接使用 `thread::scope` 安全借用 `&AtomicBool`。
         let _ = cancel;
         let deadline = Instant::now() + timeout;
 
@@ -346,7 +341,7 @@ impl Drop for ChildWatchdog {
     }
 }
 
-/// Safe Windows process terminator for scoped threads (duplicated `PROCESS_TERMINATE` handle).
+/// 供作用域线程使用的安全 Windows 进程终止器（持有复制后的 `PROCESS_TERMINATE` 句柄）。
 struct ProcessTerminator {
     #[cfg(windows)]
     raw_handle: Option<usize>,
@@ -407,7 +402,7 @@ impl Drop for ProcessTerminator {
     }
 }
 
-/// Read-only Sleuth Kit CLI adapter (strictly whitelisted to 6 commands, no shell, CP_ACP decoded).
+/// 只读 Sleuth Kit CLI 适配器（严格限制 6 个白名单命令，不经由 shell，输出按 CP_ACP 解码）。
 #[derive(Debug, Clone)]
 pub struct TskCli {
     bin_dir: PathBuf,
@@ -419,8 +414,8 @@ fn normalize_bin_dir(dir: PathBuf) -> PathBuf {
 }
 
 impl TskCli {
-    /// Discover Sleuth Kit binaries in strict priority order:
-    /// `override_dir` -> `TSK_BIN` -> `<app_root>/tools/**/bin` -> `PATH`.
+    /// 按严格优先级顺序发现 Sleuth Kit 二进制目录：
+    /// `override_dir` -> `TSK_BIN` -> `<app_root>/tools/**/bin` -> `PATH`。
     pub fn discover(override_dir: Option<&Path>) -> EngineResult<Self> {
         let mut candidates: Vec<PathBuf> = Vec::new();
         if let Some(dir) = override_dir {
@@ -449,19 +444,19 @@ impl TskCli {
         ))
     }
 
-    /// Construct directly from an explicit `bin` directory (primarily for tests).
+    /// 直接从指定的 `bin` 目录构造实例（主要用于测试）。
     pub fn from_bin_dir(bin_dir: PathBuf) -> Self {
         Self {
             bin_dir: normalize_bin_dir(bin_dir),
         }
     }
 
-    /// Resolved Sleuth Kit `bin` directory.
+    /// 已解析的 Sleuth Kit `bin` 目录路径。
     pub fn bin_dir(&self) -> &Path {
         &self.bin_dir
     }
 
-    /// Resolve an executable path for a whitelisted command.
+    /// 解析白名单命令对应的可执行文件路径。
     pub fn resolve_executable(&self, cmd: TskCommand) -> EngineResult<PathBuf> {
         let exe = self.bin_dir.join(cmd.executable_name());
         if !exe.is_file() {
@@ -544,7 +539,7 @@ impl TskCli {
         }
     }
 
-    /// Query Sleuth Kit version via `fls -V`.
+    /// 通过 `fls -V` 查询 Sleuth Kit 版本。
     pub fn version(&self) -> EngineResult<String> {
         let bytes = self.run_captured(
             TskCommand::Fls,
@@ -554,7 +549,7 @@ impl TskCli {
         Ok(decode_acp_lossy(&bytes).trim().to_string())
     }
 
-    /// Inspect partition table via `mmls`, falling back to offset 0 verification via `fsstat -t`.
+    /// 通过 `mmls` 检查分区表；若无可用分区表，则通过 `fsstat -t` 回退校验偏移 0。
     pub fn inspect(&self, image: &Path) -> EngineResult<(String, Vec<PartitionInfo>)> {
         let mmls_args = vec![
             OsString::from("-i"),
@@ -596,7 +591,7 @@ impl TskCli {
         ))
     }
 
-    /// Run `fsstat` (full or `-t` type-only) for the partition at `offset` (in 512-byte sectors).
+    /// 对位于 `offset`（以 512 字节扇区计）的分区执行 `fsstat`（完整输出或 `-t` 仅输出类型）。
     pub fn fsstat(&self, image: &Path, offset: u64, type_only: bool) -> EngineResult<String> {
         let mut args = Vec::with_capacity(6);
         if type_only {
@@ -610,7 +605,7 @@ impl TskCli {
         self.run_text(TskCommand::Fsstat, args, Duration::from_secs(300))
     }
 
-    /// Run `fsstat` and stream raw stdout directly to `dest`.
+    /// 执行 `fsstat` 并将原始标准输出直接流式写入 `dest`。
     pub fn fsstat_to_file(&self, image: &Path, offset: u64, dest: &Path) -> EngineResult<()> {
         let args = vec![
             OsString::from("-i"),
@@ -633,7 +628,7 @@ impl TskCli {
             .stderr(Stdio::from(stderr_tmp.try_clone()?));
 
         let spawn_res = command.spawn();
-        drop(command); // Release parent's handle to `dest` immediately.
+        drop(command); // 立即释放父进程持有的 `dest` 句柄。
         let mut child = spawn_res.map_err(|e| {
             let _ = fs::remove_file(dest);
             EngineError::TskFailed {
@@ -665,8 +660,8 @@ impl TskCli {
         Ok(())
     }
 
-    /// List allocated (`-u`) and deleted (`-d`) entries concurrently, merging results strictly
-    /// in original order: all `-u` entries first, followed by all `-d` entries.
+    /// 并发列举现存（`-u`）与已删除（`-d`）条目，并严格按原始顺序合并结果：
+    /// 先包含全部 `-u` 条目，随后拼接全部 `-d` 条目。
     pub fn list_entries(
         &self,
         image: &Path,
@@ -712,12 +707,12 @@ impl TskCli {
             (a, d)
         });
 
-        // If cancelled by caller, surface cancellation deterministically.
+        // 若调用方主动取消，则确定性地返回取消错误。
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return Err(EngineError::Cancelled("已取消建立索引".to_string()));
         }
 
-        // If one side failed and aborted the sibling, surface the real root error instead of the sibling abort.
+        // 若一侧失败并中止了另一侧，则向上暴露真正的根因错误而非同行中止错误。
         let (mut allocated, mut deleted) = match (alloc_res, del_res) {
             (Ok(a), Ok(d)) => (a, d),
             (Err(e1), Err(e2)) => {
@@ -853,7 +848,7 @@ impl TskCli {
         Ok(entries)
     }
 
-    /// Build `icat` arguments for a specific `(offset, inode)` pair.
+    /// 为指定的 `(offset, inode)` 组合构造 `icat` 参数。
     pub fn file_args(
         &self,
         image: &Path,
@@ -875,7 +870,7 @@ impl TskCli {
         Ok(args)
     }
 
-    /// Build `icat` arguments for an [`InventoryEntry`] (adds `-r` for non-reallocated deleted entries).
+    /// 为 [`InventoryEntry`] 构造 `icat` 参数（对未重分配的已删除条目附加 `-r`）。
     pub fn entry_args(&self, image: &Path, entry: &InventoryEntry) -> EngineResult<Vec<OsString>> {
         self.file_args(
             image,
@@ -885,7 +880,7 @@ impl TskCli {
         )
     }
 
-    /// Export a regular file via `icat` directly to `dest` (fails if `dest` already exists).
+    /// 通过 `icat` 将常规文件直接导出到 `dest`（若 `dest` 已存在则失败）。
     pub fn export_file(
         &self,
         image: &Path,
@@ -906,7 +901,7 @@ impl TskCli {
             .stderr(Stdio::from(stderr_tmp.try_clone()?));
 
         let spawn_res = command.spawn();
-        drop(command); // Release parent's handle to `dest` immediately.
+        drop(command); // 立即释放父进程持有的 `dest` 句柄。
         let mut child = spawn_res.map_err(|e| {
             let _ = fs::remove_file(dest);
             EngineError::TskFailed {
@@ -941,8 +936,8 @@ impl TskCli {
         Ok(())
     }
 
-    /// Stream entry bytes via `icat` (with 1 MiB kernel pipe on Windows and cooperative cancellation).
-    /// Returns `(bytes_written, read_note)`, preserving recoverable prefix for deleted entries.
+    /// 通过 `icat` 流式读取条目字节（在 Windows 上使用 1 MiB 内核管道并支持协作式取消）。
+    /// 返回 `(bytes_written, read_note)`，对已删除条目会保留可恢复的前缀数据。
     pub fn stream_entry<F>(
         &self,
         image: &Path,
@@ -979,7 +974,7 @@ impl TskCli {
                     command: "icat".to_string(),
                     message: format!("无法启动 icat：{e}"),
                 })?;
-                // Dropping `command` closes our copy of the write handle so EOF arrives when child exits.
+                // 释放 `command` 以关闭父进程持有的写端句柄，使子进程退出后读端能够收到 EOF。
                 drop(command);
                 stdout_reader = Box::new(read_file);
                 child
@@ -1044,7 +1039,7 @@ impl TskCli {
                     written += n as u64;
                 }
 
-                // Check for unexpected trailing byte if we hit `limit`.
+                // 当读取达到 `limit` 时，探测是否存在预期之外的多余尾随字节。
                 if written == limit {
                     let mut extra = [0u8; 1];
                     let extra_read = stdout_reader.read(&mut extra)?;
@@ -1117,7 +1112,7 @@ impl TskCli {
         })
     }
 
-    /// Query EWF logical media size and sector size via `img_stat -i ewf`.
+    /// 通过 `img_stat -i ewf` 查询 EWF 逻辑介质大小与扇区大小。
     pub fn img_stat_ewf(&self, e01: &Path) -> EngineResult<(u64, u32)> {
         let args = vec![
             OsString::from("-i"),
@@ -1128,10 +1123,10 @@ impl TskCli {
         parse_img_stat_ewf(&info)
     }
 
-    /// Read a single 512-byte logical sector from an EWF image via `img_cat -i ewf`.
+    /// 通过 `img_cat -i ewf` 从 EWF 镜像读取单个 512 字节逻辑扇区。
     ///
-    /// Note: Sleuth Kit 4.15 `img_cat` rejects `-s 0` / `-e 0` ("must be positive"), so for
-    /// sector 0 we invoke `-e 1` (sectors 0..=1) and return the first 512 bytes.
+    /// 注意：Sleuth Kit 4.15 的 `img_cat` 会拒绝 `-s 0` / `-e 0`（提示“must be positive”），
+    /// 因此读取 0 号扇区时使用 `-e 1`（读取 0..=1 号扇区）并截取前 512 字节返回。
     pub fn read_ewf_sector(&self, e01: &Path, sector: u64) -> EngineResult<Vec<u8>> {
         if sector == 0 {
             let args = vec![
@@ -1160,7 +1155,7 @@ impl TskCli {
         self.run_captured(TskCommand::ImgCat, args, Duration::from_secs(300))
     }
 
-    /// Stream the full logical contents of an EWF image via `img_cat -i ewf` (fallback path).
+    /// 通过 `img_cat -i ewf` 流式读取 EWF 镜像的完整逻辑内容（回退路径）。
     pub(crate) fn img_cat_ewf_stream<F>(
         &self,
         e01: &Path,
@@ -1281,7 +1276,7 @@ impl TskCli {
     }
 }
 
-/// Parse `mmls` text output into [`PartitionInfo`] entries (filtering out Unallocated/Extended).
+/// 将 `mmls` 文本输出解析为 [`PartitionInfo`] 列表（过滤掉 Unallocated 与 Extended 分区）。
 pub fn parse_mmls_output(raw: &str) -> Vec<PartitionInfo> {
     let mut partitions = Vec::new();
     for line in raw.lines() {
@@ -1303,7 +1298,7 @@ pub fn parse_mmls_output(raw: &str) -> Vec<PartitionInfo> {
     partitions
 }
 
-/// Parse a single `fls -m /` bodyfile line, matching `forensic/engines/tsk.py::_body_entries`.
+/// 解析单行 `fls -m /` bodyfile 输出，与 `forensic/engines/tsk.py::_body_entries` 行为一致。
 pub fn parse_bodyfile_line(
     line: &str,
     offset: u64,
@@ -1375,7 +1370,7 @@ pub fn parse_bodyfile_line(
     })
 }
 
-/// Parse `img_stat -i ewf` output into `(logical_size, sector_size)`.
+/// 将 `img_stat -i ewf` 的输出解析为 `(logical_size, sector_size)`。
 pub fn parse_img_stat_ewf(info: &str) -> EngineResult<(u64, u32)> {
     let size = IMG_STAT_SIZE_RE
         .captures(info)

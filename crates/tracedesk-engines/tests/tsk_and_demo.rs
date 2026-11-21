@@ -47,7 +47,7 @@ fn test_tsk_whitelist_and_parsers() {
         assert!(matches!(err, EngineError::TskCommandDenied(_)));
     }
 
-    // Both DOS (`000:000`) and GPT (`000`) slot formats must be recognized.
+    // 必须同时兼容识别 DOS（`000:000`）与 GPT（`000`）槽位格式。
     for slot in ["000", "000:000"] {
         let sample = format!(
             "000: Meta 0000000000 0000000033 0000000034 Table\n\
@@ -61,7 +61,7 @@ fn test_tsk_whitelist_and_parsers() {
         assert_eq!(parts[0].description, "FAT16");
     }
 
-    // Bodyfile parser: pipe in path, deleted vs deleted-realloc, normal file ending with " (deleted)".
+    // bodyfile 解析器测试：路径含竖线、deleted 与 deleted-realloc 区分，以及文件名本身以 " (deleted)" 结尾的普通文件。
     let normal = parse_bodyfile_line(
         "0|/DIR/a|b (deleted)|15|r/rrwxrwxrwx|0|0|128|1|2|3|4",
         2048,
@@ -108,14 +108,14 @@ fn test_demo_dd_full_pipeline_and_volume_reader_parity() {
     let tsk = TskCli::discover(None).expect("discover bundled TSK");
     assert!(!tsk.version().unwrap().is_empty());
 
-    // 1. inspect
+    // 1. 分区探测（inspect）
     let (layout, partitions) = tsk.inspect(&demo).expect("inspect demo.dd");
     assert!(layout.contains("DOS Partition Table"));
     assert_eq!(partitions.len(), 1);
     assert_eq!(partitions[0].offset, 2048);
     assert!(partitions[0].description.contains("FAT16"));
 
-    // 2. fsstat + fsstat_to_file
+    // 2. fsstat 与 fsstat_to_file 校验
     let fsstat_full = tsk.fsstat(&demo, 2048, false).expect("fsstat full");
     assert!(fsstat_full.contains("File System Type: FAT16"));
     let fsstat_type = tsk.fsstat(&demo, 2048, true).expect("fsstat type");
@@ -126,17 +126,17 @@ fn test_demo_dd_full_pipeline_and_volume_reader_parity() {
     tsk.fsstat_to_file(&demo, 2048, &fsstat_file).unwrap();
     assert_eq!(fs::read_to_string(&fsstat_file).unwrap(), fsstat_full);
 
-    // 3. list_entries (concurrent -u & -d)
+    // 3. list_entries（并发执行 -u 与 -d）
     let mut entries = tsk
         .list_entries(&demo, 2048, true, None, "", None)
         .expect("list_entries");
     assert_eq!(entries.len(), 10);
 
-    // Verify UTC mtime on README.TXT matches golden baseline (2026-09-01 08:05 UTC).
+    // 校验 README.TXT 的 UTC mtime 与黄金基线一致（2026-09-01 08:05 UTC）。
     let readme = entries.iter().find(|e| e.path == "README.TXT").unwrap();
     assert_eq!(readme.mtime, 1788249900);
 
-    // Verify single-directory listing with dir_inode + prefix_path.
+    // 校验带 dir_inode 与 prefix_path 的单目录列举。
     let docs_dir = entries.iter().find(|e| e.path == "DOCS").unwrap();
     assert!(docs_dir.directory);
     let docs_children = tsk
@@ -144,7 +144,7 @@ fn test_demo_dd_full_pipeline_and_volume_reader_parity() {
         .expect("list DOCS");
     assert!(docs_children.iter().any(|e| e.path == "DOCS/CASE.TXT"));
 
-    // Pre-cancelled list_entries returns Cancelled immediately.
+    // 预先取消的 list_entries 应立即返回 Cancelled。
     let cancel = AtomicBool::new(true);
     assert!(
         tsk.list_entries(&demo, 2048, true, None, "", Some(&cancel))
@@ -152,7 +152,7 @@ fn test_demo_dd_full_pipeline_and_volume_reader_parity() {
             .is_cancelled()
     );
 
-    // 4. map_fat_regions matches golden case byte-for-byte.
+    // 4. map_fat_regions 结果与黄金用例逐字节一致。
     let regions = map_fat_regions(&demo, 2048, &fsstat_full, &mut entries, None)
         .expect("map_fat_regions");
     assert_eq!(regions.len(), 3);
@@ -166,7 +166,7 @@ fn test_demo_dd_full_pipeline_and_volume_reader_parity() {
     assert_eq!(regions[2].size, 0);
     assert_eq!(regions[2].extents, Some(vec![]));
 
-    // 5. export_file, stream_entry, and VolumeReader byte-for-byte parity on EVERY manifest file!
+    // 5. 校验清单中每个文件经由 export_file、stream_entry 和 VolumeReader 读取的逐字节一致性。
     let mut volume = VolumeReader::open(&demo).expect("VolumeReader::open");
     for (rel_path, expected) in &manifest.files {
         let entry = entries
@@ -175,13 +175,13 @@ fn test_demo_dd_full_pipeline_and_volume_reader_parity() {
             .unwrap_or_else(|| panic!("missing manifest entry {rel_path}"));
         assert_eq!(entry.size, expected.size);
 
-        // export_file
+        // export_file 导出校验
         let exported = tmp.path().join(rel_path.replace('/', "_"));
         tsk.export_file(&demo, entry.offset, &entry.inode, entry.size, &exported)
             .unwrap();
         assert_eq!(sha256_file(&exported, None, None).unwrap(), expected.sha256);
 
-        // stream_entry
+        // stream_entry 流式读取校验
         let mut streamed = Vec::new();
         let (written, note) = tsk
             .stream_entry(&demo, entry, None, |chunk| {
@@ -193,7 +193,7 @@ fn test_demo_dd_full_pipeline_and_volume_reader_parity() {
         assert!(note.is_empty());
         assert_eq!(sha256_hex(&streamed), expected.sha256);
 
-        // VolumeReader plan_entry & full read
+        // VolumeReader 的 plan_entry 与全量读取校验
         match volume.plan_entry(entry, b"TraceDesk") {
             EntryReadPlan::Direct {
                 intervals,
@@ -212,7 +212,7 @@ fn test_demo_dd_full_pipeline_and_volume_reader_parity() {
             .expect("VolumeReader full read");
         assert_eq!(direct, streamed, "byte mismatch for {rel_path}");
 
-        // Random sliced read across cluster boundary (especially PAYLOAD.BIN: 1536 bytes = 3 clusters)
+        // 跨簇边界的随机切片读取（尤其是 PAYLOAD.BIN：1536 字节 = 3 簇）
         if entry.size > 20 {
             let start = entry.size / 3;
             let len = ((entry.size - start) / 2).max(1) as usize;
@@ -251,7 +251,7 @@ fn test_deleted_fat_entries_and_idle_clusters() {
     let mutated = tmp.path().join("demo_deleted.dd");
     fs::copy(&demo, &mutated).unwrap();
 
-    // Mirror tests/core/test_workflow.py::test_deleted_records_and_fat_regions
+    // 对照 tests/core/test_workflow.py::test_deleted_records_and_fat_regions 构造测试镜像
     let volume_base = 2048u64 * 512;
     let root_dir = volume_base + (1 + 2 * 64) * 512;
     let data_base = root_dir + 32 * 512;
@@ -279,7 +279,7 @@ fn test_deleted_fat_entries_and_idle_clusters() {
     let fsstat = tsk.fsstat(&mutated, 2048, false).unwrap();
     let mut entries = tsk.list_entries(&mutated, 2048, true, None, "", None).unwrap();
 
-    // Verify strict ordering: all allocated (-u) entries appear before all deleted (-d) entries.
+    // 校验严格顺序：所有现存条目（-u）必须排在所有已删除条目（-d）之前。
     let first_del = entries.iter().position(|e| e.deleted).expect("has deleted");
     assert!(entries[..first_del].iter().all(|e| !e.deleted));
     assert!(entries[first_del..].iter().all(|e| e.deleted));
@@ -294,14 +294,14 @@ fn test_deleted_fat_entries_and_idle_clusters() {
     assert_eq!(deleted[0].start_cluster_allocated, None);
     assert_eq!(deleted[1].start_cluster_allocated, Some(true));
 
-    // FAT deleted entries MUST fall back to icat in VolumeReader.
+    // 在 VolumeReader 中，FAT 已删除条目必须回退至 icat。
     let mut vol = VolumeReader::open(&mutated).unwrap();
     assert_eq!(
         vol.plan_entry(deleted[1], b"TraceDesk"),
         EntryReadPlan::FallbackToIcat
     );
 
-    // Recovering via stream_entry matches README.TXT SHA-256 (and 0-byte empty returns 0 bytes).
+    // 通过 stream_entry 恢复的数据应与 README.TXT 的 SHA-256 一致（0 字节空文件返回 0 字节）。
     let (n0, _) = tsk.stream_entry(&mutated, deleted[0], None, |_| Ok(())).unwrap();
     assert_eq!(n0, 0);
 
@@ -315,7 +315,7 @@ fn test_deleted_fat_entries_and_idle_clusters() {
     assert_eq!(n1, manifest.files["README.TXT"].size);
     assert_eq!(sha256_hex(&recovered), manifest.files["README.TXT"].sha256);
 
-    // Verify idle and free extents match exact expected disk offsets.
+    // 校验闲置空间与空余空间区间与预期磁盘偏移完全一致。
     let idle = regions
         .iter()
         .find(|r| r.path == "闲置空间（已分配未关联簇）")
@@ -333,7 +333,7 @@ fn test_deleted_fat_entries_and_idle_clusters() {
 
 #[test]
 fn test_tsk_bin_dir_normalization_and_no_stray_dest_on_missing_tool() {
-    // Discovered bin_dir must always be absolute without Windows `\\?\` verbatim prefix.
+    // 发现到的 bin_dir 必须始终为绝对路径，且不含 Windows `\\?\` 原义前缀。
     let discovered = TskCli::discover(None).expect("discover TSK");
     assert!(discovered.bin_dir().is_absolute());
     assert!(
@@ -343,7 +343,7 @@ fn test_tsk_bin_dir_normalization_and_no_stray_dest_on_missing_tool() {
             .starts_with(r"\\?\")
     );
 
-    // Missing tool in `fsstat_to_file` / `export_file` must fail before creating `dest`.
+    // 当工具缺失时，`fsstat_to_file` 与 `export_file` 必须在创建 `dest` 之前失败。
     let tmp = tempfile::tempdir().unwrap();
     let empty_bin = tmp.path().join("empty_bin");
     fs::create_dir(&empty_bin).unwrap();

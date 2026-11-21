@@ -19,7 +19,7 @@ static FSSTAT_FAT_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 const FAT_PAGE_SIZE: usize = 64 * 1024;
-const FAT_PAGE_CACHE_CAP: usize = 64; // 4 MiB bounded cache for random reads
+const FAT_PAGE_CACHE_CAP: usize = 64; // 用于随机读取的 4 MiB 有界缓存
 
 #[inline]
 fn read_u16_le(buf: &[u8], off: usize) -> u16 {
@@ -31,7 +31,7 @@ fn read_u32_le(buf: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
 }
 
-/// Parsed FAT12/16/32 boot parameter block geometry.
+/// 解析后的 FAT12/16/32 引导参数块（BPB）几何布局。
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FatGeometry {
     pub bits: u8,
@@ -197,7 +197,7 @@ fn next_cluster_slice(table: &[u8], bits: u8, cluster: u64) -> u32 {
     }
 }
 
-/// Compact 64-bit word bitset for tracking owned clusters with minimal cache footprint.
+/// 紧凑型 64 位字位图，以最小缓存占用追踪已被占用的簇。
 struct ClusterBitset {
     words: Vec<u64>,
 }
@@ -214,7 +214,7 @@ impl ClusterBitset {
         (self.words[bit >> 6] & (1u64 << (bit & 63))) != 0
     }
 
-    /// Sets `bit` and returns `true` if it was newly set (`false` if already set).
+    /// 置位 `bit`；若该位此前未置位则返回 `true`（已置位则返回 `false`）。
     #[inline]
     fn set(&mut self, bit: usize) -> bool {
         let word = &mut self.words[bit >> 6];
@@ -242,11 +242,11 @@ fn push_extent(ranges: &mut Vec<(u64, u64)>, start: u64, length: u64) {
     ranges.push((start, length));
 }
 
-/// Map FAT12/16/32 root directory, unallocated clusters (`空余空间（未分配簇）`), and
-/// allocated-but-unreferenced clusters (`闲置空间（已分配未关联簇）`) into read-only region
-/// entries, while annotating deleted FAT entries whose start cluster is currently allocated.
+/// 将 FAT12/16/32 根目录、未分配簇（`空余空间（未分配簇）`）及已分配但未关联簇
+/// （`闲置空间（已分配未关联簇）`）映射为只读区域条目，同时标注起始簇已被占用的
+/// 已删除 FAT 条目。
 ///
-/// 100% behaviorally aligned with `forensic/engines/fat.py::fat_regions` at native Rust speed.
+/// 在原生 Rust 性能下与 `forensic/engines/fat.py::fat_regions` 保持 100% 行为一致。
 pub fn map_fat_regions(
     image: &Path,
     offset: u64,
@@ -279,7 +279,7 @@ pub fn map_fat_regions(
     let table_len_usize = usize::try_from(geom.table_length)
         .map_err(|_| EngineError::Fat("FAT 分配表超过寻址空间".to_string()))?;
 
-    // Map the active FAT read-only (memmap2 aligns allocation granularity internally).
+    // 以只读方式映射活动 FAT 表（memmap2 内部会自动对齐分配粒度）。
     let mmap = unsafe {
         MmapOptions::new()
             .offset(geom.table_start)
@@ -370,7 +370,7 @@ pub fn map_fat_regions(
         if bits == 32 || bits == 16 {
             let width = (bits / 8) as usize;
             let slice = &table[(first as usize) * width..(end as usize) * width];
-            // Fast vectorized all-zero block check for sparse FAT volumes.
+            // 针对稀疏 FAT 卷进行高速向量化全零块检测。
             if slice.iter().all(|&b| b == 0) {
                 let start = data_base + (first - 2) * csize;
                 let len = (end - first) * csize;
@@ -380,8 +380,8 @@ pub fn map_fat_regions(
             }
         }
 
-        // Run-length coalesced inner scan to keep register pressure & vector pushes minimal.
-        let mut run_kind: u8 = 0; // 0=none, 1=free, 2=idle
+        // 内层扫描采用游程合并，以降低寄存器压力并减少向量追加次数。
+        let mut run_kind: u8 = 0; // 0=无，1=空余，2=闲置
         let mut run_start_cluster: u64 = 0;
         let mut run_count: u64 = 0;
 
@@ -508,15 +508,15 @@ pub fn map_fat_regions(
     ])
 }
 
-/// Coalesced physical disk extent `(disk_byte_offset, byte_len)` for a FAT file.
+/// FAT 文件合并后的物理磁盘区间集合。
 #[derive(Debug, Clone)]
 pub(crate) struct FatFileRuns {
     pub size: u64,
-    /// `(logical_start, disk_offset, byte_len)` sorted by `logical_start`.
+    /// 按 `logical_start` 升序排列的 `(logical_start, disk_offset, byte_len)` 三元组列表。
     pub extents: Vec<(u64, u64, u64)>,
 }
 
-/// Read-only random-access FAT12/16/32 volume reader operating over any [`MediaReader`] (RAW or EWF1).
+/// 基于任意 [`MediaReader`]（RAW 或 EWF1）的只读随机访问 FAT12/16/32 卷读取器。
 pub(crate) struct FatVolume {
     media: Arc<dyn MediaReader>,
     geom: FatGeometry,
@@ -533,8 +533,8 @@ impl FatVolume {
         if boot[510..512] != [0x55, 0xaa] {
             return Err(EngineError::Fat("无效的 FAT 引导签名".to_string()));
         }
-        // Verify FAT signature or valid BPB (note: some valid FAT images leave label blank,
-        // so we check OEM/signature hints and geometry consistency).
+        // 校验 FAT 签名或有效 BPB（注：部分合法 FAT 镜像的文件系统标签可能为空，
+        // 因此同时检查 OEM/签名提示以及几何参数一致性）。
         if &boot[3..11] == b"NTFS    " {
             return Err(EngineError::Fat("分区为 NTFS 而非 FAT".to_string()));
         }
@@ -600,7 +600,7 @@ impl FatVolume {
         }
     }
 
-    /// Resolve cluster chain for a non-deleted regular FAT file.
+    /// 解析未删除常规 FAT 文件的簇链。
     pub fn resolve_regular_file(&mut self, inode_num: u64, expected_size: u64) -> EngineResult<FatFileRuns> {
         let slot = inode_num
             .checked_sub(3)
@@ -671,7 +671,7 @@ impl FatVolume {
         })
     }
 
-    /// Read exact bytes from a resolved FAT file using binary search over coalesced extents.
+    /// 在合并后的区间上通过二分查找，从已解析的 FAT 文件中精确读取字节。
     pub fn read_file_at(
         &self,
         runs: &FatFileRuns,
