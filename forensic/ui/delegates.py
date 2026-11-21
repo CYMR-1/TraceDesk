@@ -98,7 +98,12 @@ class ForensicItemDelegate(QStyledItemDelegate):
             opt.font = mono
             opt.fontMetrics = QFontMetrics(mono)
 
-        if not is_selected and is_enabled:
+        if not is_enabled:
+            disabled_color = QColor(theme.TEXT_MUTED)
+            for group in (QPalette.ColorGroup.Disabled, QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
+                opt.palette.setColor(group, QPalette.ColorRole.Text, disabled_color)
+                opt.palette.setColor(group, QPalette.ColorRole.WindowText, disabled_color)
+        elif not is_selected:
             if self._is_muted(raw):
                 muted_color = QColor(theme.TEXT_MUTED)
                 opt.palette.setColor(QPalette.ColorRole.Text, muted_color)

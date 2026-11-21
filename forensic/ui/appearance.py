@@ -876,6 +876,9 @@ def build_stylesheet() -> str:
             background: {t.SURFACE_SELECTED_INACTIVE};
             color: {t.SURFACE_SELECTED_TEXT};
         }}
+        QTreeView::item:disabled, QTableView::item:disabled {{
+            color: {t.TEXT_MUTED};
+        }}
         QTreeView::branch {{
             background: transparent;
             border-image: none;

@@ -124,7 +124,7 @@ class ReviewPanel(QWidget):
         )
         self.header.toggled.connect(self._set_all_checked)
         self.header.filter_changed.connect(self._apply_offset_filter)
-        for column, width in ((0, 68), (1, 64), (2, 118), (3, 110), (4, 88), (5, 320), (6, 168), (7, 168)):
+        for column, width in ((0, 68), (1, 64), (2, 118), (3, 110), (4, 88), (5, 280), (6, 240), (7, 240)):
             self.table.setColumnWidth(column, width)
         self.table.itemDoubleClicked.connect(self.preview)
         self.table.itemChanged.connect(self._on_item_changed)

@@ -227,14 +227,17 @@ class RecordsPanel(QWidget):
             self.text.clear()
         elif not self.text.isHidden():
             self.text.setHtml(self.details(item.data(0, Qt.ItemDataRole.UserRole)))
+            self.text.verticalScrollBar().setValue(0)
+            self.text.horizontalScrollBar().setValue(0)
 
     def _open_detail(self, item, column):
         needs_space = self.text.isHidden() or self.split.sizes()[1] == 0
         self.text.show()
-        self._detail(item, None)
         if needs_space:
             height = max(200, self.split.height())
             self.split.setSizes([height * 2 // 3, height // 3])
+        self._detail(item, None)
+        self.text.verticalScrollBar().setValue(0)
 
 
 class TimelinePanel(RecordsPanel):
