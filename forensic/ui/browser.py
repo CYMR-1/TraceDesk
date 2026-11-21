@@ -10,11 +10,16 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QFrame, QHBoxLayout
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..core.formatting import display_time
+from . import theme
+from .delegates import ForensicItemDelegate
 from .preview import FilePreview
 from ..core.browser_index import prepare
 from .pagination import PageLabel
-from .icons import entry_icon_kind, outline_icon
-from .metrics import CONTROL_GAP, PANEL_GAP, PANEL_PADDING, SECTION_GAP
+from .icons import entry_icon_kind, outline_icon, ui_icon
+from .metrics import (
+    CONTROL_GAP, PANEL_GAP, PANEL_PADDING,
+    ROW_HEIGHT_TABLE, ROW_HEIGHT_TREE, SUB_BAR_HEIGHT,
+)
 from ..engines.tsk import entry_name, entry_status
 
 
@@ -54,49 +59,94 @@ class FileBrowserView(QWidget):
         self._batch_timer.setSingleShot(True)
         self._batch_timer.timeout.connect(self._insert_batch)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, SECTION_GAP, 0, 0)
-        layout.setSpacing(SECTION_GAP)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         self.horizontal_split = QSplitter(Qt.Orientation.Horizontal)
         self.horizontal_split.setChildrenCollapsible(False)
         self.horizontal_split.setHandleWidth(PANEL_GAP)
         layout.addWidget(self.horizontal_split, 1)
+
         nav_panel = QFrame()
         nav_panel.setObjectName('navigationPanel')
-        nav_panel.setMinimumWidth(190)
+        nav_panel.setMinimumWidth(220)
         nav_layout = QVBoxLayout(nav_panel)
         nav_layout.setContentsMargins(PANEL_PADDING, PANEL_PADDING, PANEL_PADDING, PANEL_PADDING)
-        nav_layout.setSpacing(SECTION_GAP)
-        nav_layout.addWidget(label('数据源 / 完整文件树', 'section'))
+        nav_layout.setSpacing(0)
+
         self.navigation = QTreeWidget()
         self.navigation.setObjectName('evidenceTree')
         self.navigation.setHeaderHidden(True)
         self.navigation.setUniformRowHeights(True)
-        self.navigation.setIconSize(QSize(18, 18))
-        self.navigation.setIndentation(16)
+        self.navigation.setAnimated(False)
+        self.navigation.setIconSize(QSize(16, 16))
+        self.navigation.setIndentation(14)
         self.navigation.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.navigation.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.navigation.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.navigation.header().setStretchLastSection(False)
         self.navigation.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.navigation.setItemDelegate(
+            ForensicItemDelegate(self.navigation, row_height=ROW_HEIGHT_TREE, accent_column=0)
+        )
         self.navigation.itemSelectionChanged.connect(self._navigation_selected)
         self.navigation.itemExpanded.connect(self._expand_branch)
+
+        nav_header = QFrame()
+        nav_header.setObjectName('paneHeader')
+        nav_header_layout = QVBoxLayout(nav_header)
+        nav_header_layout.setContentsMargins(10, 8, 10, 8)
+        nav_header_layout.setSpacing(6)
+        nav_header_layout.addWidget(label('数据源 / 完整文件树', 'section'))
         nav_buttons = QHBoxLayout()
+        nav_buttons.setContentsMargins(0, 0, 0, 0)
+        nav_buttons.setSpacing(6)
         self.expand_button = self._button('全部展开', self._expand_all)
+        self.expand_button.setProperty('role', 'compact')
+        self.expand_button.setIcon(ui_icon('expand', theme.TEXT_SECONDARY, 12))
+        self.expand_button.setIconSize(QSize(12, 12))
         self.collapse_button = self._button('全部折叠', self.navigation.collapseAll)
-        nav_buttons.addWidget(self.expand_button)
-        nav_buttons.addWidget(self.collapse_button)
-        nav_layout.addLayout(nav_buttons)
+        self.collapse_button.setProperty('role', 'compact')
+        self.collapse_button.setIcon(ui_icon('collapse', theme.TEXT_SECONDARY, 12))
+        self.collapse_button.setIconSize(QSize(12, 12))
+        nav_buttons.addWidget(self.expand_button, 1)
+        nav_buttons.addWidget(self.collapse_button, 1)
+        nav_header_layout.addLayout(nav_buttons)
+        nav_layout.addWidget(nav_header)
+
+        self._nav_context_bar = QFrame()
+        self._nav_context_bar.setObjectName('panelSubBar')
+        nav_context_layout = QVBoxLayout(self._nav_context_bar)
+        nav_context_layout.setContentsMargins(10, 6, 10, 6)
+        nav_context_layout.setSpacing(6)
         self.parent_button = self._button('返回上级目录', self._parent_directory)
-        nav_layout.addWidget(self.parent_button)
+        self.parent_button.setProperty('role', 'soft')
+        self.parent_button.setIcon(ui_icon('folder_up', theme.ACCENT_SOFT_TEXT, 14))
+        self.parent_button.setIconSize(QSize(14, 14))
+        nav_context_layout.addWidget(self.parent_button)
         self.parent_button.hide()
         self.index_button = self._button('建立完整文件索引', self._index_clicked)
-        nav_layout.addWidget(self.index_button)
+        self.index_button.setProperty('role', 'soft')
+        self.index_button.setIcon(ui_icon('index', theme.ACCENT_SOFT_TEXT, 14))
+        self.index_button.setIconSize(QSize(14, 14))
+        nav_context_layout.addWidget(self.index_button)
         self.index_button.hide()
+        self._nav_context_bar.hide()
+        nav_layout.addWidget(self._nav_context_bar)
+
         nav_layout.addWidget(self.navigation, 1)
+
+        nav_footer = QFrame()
+        nav_footer.setObjectName('paneFooter')
+        nav_footer_layout = QHBoxLayout(nav_footer)
+        nav_footer_layout.setContentsMargins(10, 6, 10, 6)
+        nav_footer_layout.setSpacing(0)
         self.tree_count = label('尚未读取文件树', 'muted')
+        self.tree_count.setFont(theme.ui_font(8.5))
         self.tree_count.setWordWrap(True)
-        nav_layout.addWidget(self.tree_count)
+        nav_footer_layout.addWidget(self.tree_count, 1)
+        nav_layout.addWidget(nav_footer)
         self.horizontal_split.addWidget(nav_panel)
+
         self.split = QSplitter(Qt.Orientation.Vertical)
         self.split.setChildrenCollapsible(False)
         self.split.setHandleWidth(PANEL_GAP)
@@ -104,27 +154,39 @@ class FileBrowserView(QWidget):
         self.horizontal_split.addWidget(self.split)
         self.horizontal_split.setStretchFactor(0, 0)
         self.horizontal_split.setStretchFactor(1, 1)
-        self.horizontal_split.setSizes([270, 1000])
+        self.horizontal_split.setSizes([276, 1164])
+
         results = QFrame()
         results.setObjectName('resultsPanel')
         result_layout = QVBoxLayout(results)
-        result_layout.setContentsMargins(PANEL_PADDING, PANEL_PADDING, PANEL_PADDING, 1)
-        result_layout.setSpacing(SECTION_GAP)
-        filters = QHBoxLayout()
+        result_layout.setContentsMargins(PANEL_PADDING, PANEL_PADDING, PANEL_PADDING, PANEL_PADDING)
+        result_layout.setSpacing(0)
+
+        filter_bar = QFrame()
+        filter_bar.setObjectName('filterToolbar')
+        filters = QHBoxLayout(filter_bar)
+        filters.setContentsMargins(12, 8, 12, 8)
+        filters.setSpacing(CONTROL_GAP)
         self.suffix = QLineEdit()
         self.suffix.setPlaceholderText('后缀，如 .txt')
         self.suffix.setAccessibleName('文件后缀')
-        self.suffix.setMaximumWidth(120)
+        self.suffix.setMaximumWidth(118)
+        self.suffix.setFont(theme.mono_font(9.5, cjk_fallback=True))
         self.keyword = QLineEdit()
         self.keyword.setPlaceholderText('当前目录内的路径关键词')
         self.keyword.setAccessibleName('路径关键词')
         self.keyword.setClearButtonEnabled(True)
+        self.keyword.addAction(
+            ui_icon('search', theme.TEXT_MUTED, 14),
+            QLineEdit.ActionPosition.LeadingPosition,
+        )
         for field in (self.suffix, self.keyword):
             field.returnPressed.connect(commands['filter'])
         filters.addWidget(self.suffix)
         filters.addWidget(self.keyword, 1)
         self.status_filter = QComboBox()
         self.status_filter.setAccessibleName('文件状态')
+        self.status_filter.setMinimumWidth(104)
         self.status_filter.addItems(['全部状态', '现存文件', '已删除'])
         self.status_filter.currentIndexChanged.connect(self._apply_visibility)
         filters.addWidget(self.status_filter)
@@ -133,11 +195,19 @@ class FileBrowserView(QWidget):
         self.reset_button = self._button('重置', self.reset_filter)
         filters.addWidget(self.filter_button)
         filters.addWidget(self.reset_button)
-        result_layout.addLayout(filters)
+        result_layout.addWidget(filter_bar)
+
+        breadcrumb_bar = QFrame()
+        breadcrumb_bar.setObjectName('breadcrumbBar')
+        breadcrumb_layout = QHBoxLayout(breadcrumb_bar)
+        breadcrumb_layout.setContentsMargins(12, 5, 12, 5)
+        breadcrumb_layout.setSpacing(6)
         self.breadcrumb = label('加载镜像后自动展示所有分区', 'muted')
         self.breadcrumb.setObjectName('breadcrumb')
         self.breadcrumb.setWordWrap(True)
-        result_layout.addWidget(self.breadcrumb)
+        breadcrumb_layout.addWidget(self.breadcrumb, 1)
+        result_layout.addWidget(breadcrumb_bar)
+
         self.tree = QTreeWidget()
         self.tree.setObjectName('fileResults')
         self.tree.setRootIsDecorated(False)
@@ -146,17 +216,27 @@ class FileBrowserView(QWidget):
                                    'M 修改 (UTC+8)', 'A 访问 (UTC+8)', 'C 变更 (UTC+8)', 'B 创建 (UTC+8)', '分区偏移（扇区）'])
         self.tree.headerItem().setToolTip(6, 'C 为元数据变更时间。FAT 不保存此时间；创建时间请查看 B 列。')
         self.tree.setUniformRowHeights(True)
-        self.tree.setIconSize(QSize(18, 18))
+        self.tree.setIconSize(QSize(16, 16))
         self.tree.setAlternatingRowColors(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tree.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.tree.setMinimumHeight(110)
+        self.tree.setItemDelegate(
+            ForensicItemDelegate(
+                self.tree,
+                pill_columns={1},
+                mono_columns={2, 3, 4, 5, 6, 7, 8},
+                subtle_columns={8},
+                accent_column=0,
+                row_height=ROW_HEIGHT_TABLE,
+            )
+        )
         header = self.tree.header()
         header.setObjectName('recordHeader')
         header.setStretchLastSection(False)
         header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        for column, width in enumerate((260, 120, 120, 120, 170, 170, 170, 170, 140)):
+        for column, width in enumerate((280, 118, 124, 120, 168, 168, 168, 168, 136)):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
             self.tree.setColumnWidth(column, width)
         for column in (2, 3):
@@ -164,10 +244,13 @@ class FileBrowserView(QWidget):
         self.tree.itemSelectionChanged.connect(self._result_selected)
         self.tree.itemDoubleClicked.connect(self._open_directory)
         result_layout.addWidget(self.tree, 1)
+
+        table_footer = QFrame()
+        table_footer.setObjectName('tableFooter')
+        footer = QHBoxLayout(table_footer)
+        footer.setContentsMargins(12, 5, 12, 5)
+        footer.setSpacing(6)
         self.result_count = label('0 项', 'muted')
-        footer = QHBoxLayout()
-        footer.setContentsMargins(0, 0, 0, 0)
-        footer.setSpacing(3)
         self.result_count.setObjectName('fileResultCount')
         footer.addWidget(self.result_count, 1)
         self.previous_page = self._button('上一页', lambda: self._show_page(self._page - 1))
@@ -177,36 +260,49 @@ class FileBrowserView(QWidget):
         footer.addWidget(self.previous_page)
         self.page_label = PageLabel(self._show_page)
         self.page_label.setObjectName('filePageNumber')
+        self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         footer.addWidget(self.page_label)
         footer.addWidget(self.next_page)
-        result_layout.addLayout(footer)
+        result_layout.addWidget(table_footer)
         self.split.addWidget(results)
+
         content = QFrame()
         content.setObjectName('previewPanel')
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(PANEL_PADDING, PANEL_PADDING, PANEL_PADDING, PANEL_PADDING)
-        content_layout.setSpacing(SECTION_GAP)
-        content_header = QHBoxLayout()
-        content_header.addWidget(label('内容预览', 'section'))
-        content_header.addStretch()
+        content_layout.setSpacing(0)
+
+        preview_header = QFrame()
+        preview_header.setObjectName('paneHeader')
+        preview_header.setMinimumHeight(SUB_BAR_HEIGHT)
+        content_header = QHBoxLayout(preview_header)
+        content_header.setContentsMargins(12, 4, 12, 4)
         content_header.setSpacing(CONTROL_GAP)
+        content_header.addWidget(label('内容预览', 'section'))
+        content_header.addStretch(1)
         self.preview_actions = preview_actions
         self.file_action_buttons = {}
         for action in preview_actions:
             button = self._button(action.title, commands[action.key])
-            if action.role:
-                button.setProperty('role', action.role)
+            role = action.role or ('soft' if action.key == 'export' else None)
+            if role:
+                button.setProperty('role', role)
+            if action.key == 'export':
+                button.setIcon(ui_icon('export', theme.ACCENT_SOFT_TEXT, 14))
+                button.setIconSize(QSize(14, 14))
+            button.setFixedHeight(28)
             self.file_action_buttons[action.key] = button
             content_header.addWidget(button)
         self.export_button = self.file_action_buttons.get('export')
-        content_layout.addLayout(content_header)
+        content_layout.addWidget(preview_header)
+
         self.preview = FilePreview(content)
         self.preview.setMinimumHeight(160)
         content_layout.addWidget(self.preview, 1)
         self.split.addWidget(content)
         self.split.setStretchFactor(0, 3)
         self.split.setStretchFactor(1, 2)
-        self.split.setSizes([370, 290])
+        self.split.setSizes([380, 300])
         self.detail = label('选择目录定位文件；拖动分隔条调整树、列表和内容区域。', 'muted')
         self.detail.setWordWrap(False)
         self.detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -269,9 +365,12 @@ class FileBrowserView(QWidget):
             self._ancestors = {key: value for key, value in self._ancestors.items()
                                if key[0] == offset and path.startswith(key[1] + '/')}
             self._ancestors[offset, path] = inode
-        self.index_button.setVisible(bool(evidence and evidence.get('large_image')))
+        show_index = bool(evidence and evidence.get('large_image'))
+        show_parent = bool(self.quick and location and location[2])
+        self.index_button.setVisible(show_index)
         self.index_button.setText('建立完整文件索引' if self.quick else '重新建立文件索引')
-        self.parent_button.setVisible(bool(self.quick and location and location[2]))
+        self.parent_button.setVisible(show_parent)
+        self._nav_context_bar.setVisible(show_index or show_parent)
         self._evidence = evidence
         self._filesystems = {}
         # 兼容旧案件：从已保存的各分区 fsstat 识别时间能力，无须重扫证据。
@@ -468,7 +567,7 @@ class FileBrowserView(QWidget):
         if entry.get('deleted'):
             item.setForeground(1, QColor(self.appearance.DELETED))
         elif entry['mode'].lower().startswith('v/'):
-            item.setForeground(1, QColor('#7352b8'))
+            item.setForeground(1, QColor(theme.SYSTEM_FG))
         if self._paged:
             self.entries[key], self._items[key] = entry, item
             return
@@ -675,9 +774,16 @@ class FileBrowserView(QWidget):
             widget.setEnabled(not busy)
         if busy and self.index_cancel is not None:
             self.index_button.setText('取消建立索引')
+            self.index_button.setProperty('role', 'warning')
+            self.index_button.setIcon(ui_icon('warning', theme.WARN_FG, 14))
+            theme.repolish(self.index_button)
             self.index_button.setEnabled(True)
         elif not busy:
             self.index_cancel = None
+            if self.index_button.property('role') != 'soft':
+                self.index_button.setProperty('role', 'soft')
+                self.index_button.setIcon(ui_icon('index', theme.ACCENT_SOFT_TEXT, 14))
+                theme.repolish(self.index_button)
         selected = self.tree.selectedItems()
         entry = selected[0].data(0, Qt.ItemDataRole.UserRole) if selected else None
         self._update_file_actions(entry)

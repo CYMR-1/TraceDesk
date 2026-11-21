@@ -7,8 +7,10 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, QObject, QTimer, Qt
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
+from . import theme
 from .appearance import DesktopAppearance
 from .branding import set_window_icon, set_windows_app_id
+from .icons import ui_icon
 from ..core.tasks import TaskRunner
 from ..features.api import FeatureContext, FeatureRegistry
 from ..features.catalog import load_features
@@ -110,6 +112,9 @@ class App(QObject):
 
         self.hash_runner.submit(lambda: case.measure_hash(progress))
         self.browser.verify_button.setText('取消校验')
+        self.browser.verify_button.setProperty('role', 'warning')
+        self.browser.verify_button.setIcon(ui_icon('warning', theme.WARN_FG, 14))
+        theme.repolish(self.browser.verify_button)
         self.status.setText('后台读取整镜像 · 可继续浏览')
 
     def _poll_hash(self):
@@ -124,6 +129,9 @@ class App(QObject):
                 self.status.setText(f'后台读取整镜像 · {percent}% · {rate:.0f} MiB/s')
             return
         self.browser.verify_button.setText('校验完整性')
+        self.browser.verify_button.setProperty('role', None)
+        self.browser.verify_button.setIcon(ui_icon('verify', theme.TEXT_SECONDARY, 14))
+        theme.repolish(self.browser.verify_button)
         if self._cancel_hash.is_set():
             self.case.log('HASH_VERIFY', self.case.image(), '已取消')
             self.status.setText('已取消校验')
@@ -213,8 +221,27 @@ class App(QObject):
         selected = self.tree.selectedItems()
         return selected[0].data(0, Qt.ItemDataRole.UserRole) if selected else None
 
+    def _custody_state(self) -> str:
+        if not self.case:
+            return 'idle'
+        data = self.case.data
+        evidence = data.get('evidence')
+        if not evidence:
+            return 'active'
+        if data.get('verification', {}).get('ok') is False:
+            return 'error'
+        expected = (evidence.get('provenance') or {}).get('expected_sha256')
+        if expected and evidence.get('sha256') and expected.lower() != evidence['sha256'].lower():
+            return 'error'
+        if not evidence.get('sha256'):
+            return 'warning'
+        if evidence.get('large_image') and not getattr(self.case, '_session_verified', False):
+            return 'warning'
+        return 'verified'
+
     def refresh(self, reset=False):
         if not self.case:
+            self.view.set_custody_state('idle')
             if reset:
                 self.summary.setText('尚未打开案件。新建案件并加载镜像，或打开已有案件继续分析。')
                 self.summary.setToolTip('')
@@ -233,6 +260,7 @@ class App(QObject):
                 hash_status = '警告：完整性校验不匹配'
         self.summary.setText(f'案件 {data["number"]}  ·  取证人员 {data["examiner"]}  ·  对象 {data["target"]}\n' + (f'证据 {Path(evidence["path"]).name}  ·  {hash_status}' if evidence else '尚未加载镜像'))
         self.summary.setToolTip(f'SHA-256：{evidence["sha256"] or "待固定"}' if evidence else '')
+        self.view.set_custody_state(self._custody_state())
         self.browser.set_context(evidence, data.get('partition_scans', []), data.get('fsstat', ''),
                                  getattr(self.case, 'directory_location', None) if evidence and evidence.get('large_image') else None)
         if reset:
