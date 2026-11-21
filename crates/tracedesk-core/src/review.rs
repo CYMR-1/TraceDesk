@@ -21,8 +21,8 @@ use crate::findings::operation_title;
 use crate::formatting::{canonical_json_value, format_commas, hex_lower, sha256_hex};
 use crate::paths::{is_within, resolve_clean, strip_verbatim_prefix};
 
-/// Exact source bytes of the standalone `scripts/verify_bundle.py` verifier embedded at compile time.
-pub const EMBEDDED_VERIFY_BUNDLE_PY: &[u8] = include_bytes!("../../../scripts/verify_bundle.py");
+/// Exact source bytes of the standalone `verify_bundle.py` verifier embedded at compile time.
+pub const EMBEDDED_VERIFY_BUNDLE_PY: &[u8] = include_bytes!("../resources/verify_bundle.py");
 
 /// Inspected status of a single historical export record prior to bundle creation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -582,7 +582,7 @@ pub fn build_bundle(
         // 8. 复核说明.txt
         let mut instructions = String::from(
             "1. 与交付方单独保存的 ZIP SHA-256 比对；包内清单不能证明签名身份。\n\
-             2. 可使用独立取得的 scripts/verify_bundle.py 核验 ZIP（包中也附一份），或解压后逐项核对 SHA256SUMS.json。\n\
+             2. 可使用独立取得的 tracedesk-cli verify-bundle 或包内附带的 verify_bundle.py 核验 ZIP，或解压后逐项核对 SHA256SUMS.json。\n\
              3. 原始镜像不在包内。独立取得镜像，核对 manifest.json 中的 SHA-256、覆盖范围和交付方摘要。\n\
              4. 用 TSK icat -i raw -o 分区扇区偏移 镜像 inode 提取内容；EWF 改用 -i ewf 并指定 E01 首段；删除且未重分配时加 -r。\n\
              5. 搜索命中 file_byte 是文件流内从零起的字节偏移；按 needle 的十六进制字节复查。\n\

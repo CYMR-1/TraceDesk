@@ -48,17 +48,9 @@ fn make_entry(path: &str, offset: u64, inode: &str, size: u64, dir: bool, del: b
     }
 }
 
-fn find_python(root: &Path) -> PathBuf {
-    for cand in [
-        root.join(".venv").join("Scripts").join("python.exe"),
-        PathBuf::from(r"C:\Users\cymr1\Desktop\qimo\TraceDesk\.venv\Scripts\python.exe"),
-        PathBuf::from("python"),
-    ] {
-        if cand.is_file() {
-            return cand;
-        }
-    }
-    PathBuf::from("python")
+fn find_python(root: &Path) -> Option<PathBuf> {
+    let cand = root.join(".venv").join("Scripts").join("python.exe");
+    cand.is_file().then_some(cand)
 }
 
 #[test]
@@ -98,30 +90,32 @@ fn canonical_json_matches_python_byte_for_byte() {
         r#"{"alpha":"取证测试/路径","ctrl":"\u0001\b\f\r\n\t","empty":null,"flag":true,"nested":{"a_list":[{"k1":1,"k2":2},null,false],"b_zh":"中文内容\n换行\t制表\"引号\\反斜杠"},"slash":"a/b/c","zebra":42}"#
     );
 
-    // Cross-check directly against Python json.dumps(..., ensure_ascii=False, sort_keys=True, separators=(',', ':')).
+    // Optional cross-check against Python json.dumps(..., ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    // when local `.venv\Scripts\python.exe` is available.
     let paths = AppPaths::discover();
-    let py = find_python(&paths.root);
-    let out = Command::new(&py)
-        .args([
-            "-X",
-            "utf8",
-            "-c",
-            "import json, sys; v = json.loads(sys.stdin.read()); sys.stdout.write(json.dumps(v, ensure_ascii=False, sort_keys=True, separators=(',', ':')))",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            child
-                .stdin
-                .as_mut()
-                .unwrap()
-                .write_all(rust_canonical.as_bytes())?;
-            child.wait_with_output()
-        })
-        .expect("run python canonical check");
-    assert!(out.status.success());
-    assert_eq!(out.stdout, rust_canonical.as_bytes());
+    if let Some(py) = find_python(&paths.root) {
+        let out = Command::new(&py)
+            .args([
+                "-X",
+                "utf8",
+                "-c",
+                "import json, sys; v = json.loads(sys.stdin.read()); sys.stdout.write(json.dumps(v, ensure_ascii=False, sort_keys=True, separators=(',', ':')))",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child
+                    .stdin
+                    .as_mut()
+                    .unwrap()
+                    .write_all(rust_canonical.as_bytes())?;
+                child.wait_with_output()
+            })
+            .expect("run python canonical check");
+        assert!(out.status.success());
+        assert_eq!(out.stdout, rust_canonical.as_bytes());
+    }
 }
 
 #[test]

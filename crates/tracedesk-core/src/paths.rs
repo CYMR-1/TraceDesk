@@ -198,12 +198,12 @@ impl AppPaths {
         } else {
             root.join("tools")
         };
-        let default_assets = if root.join("forensic").join("assets").is_dir() {
-            root.join("forensic").join("assets")
-        } else if root.join("frontend").join("public").join("assets").is_dir() {
+        let default_assets = if root.join("frontend").join("public").join("assets").is_dir() {
             root.join("frontend").join("public").join("assets")
         } else if root.join("resources").join("assets").is_dir() {
             root.join("resources").join("assets")
+        } else if root.join("forensic").join("assets").is_dir() {
+            root.join("forensic").join("assets")
         } else {
             root.join("assets")
         };
@@ -286,11 +286,16 @@ impl AppPaths {
         find_tsk_bin_under(&self.tools_dir, 3)
     }
 
-    /// Locate `scripts/verify_bundle.py` if present on disk.
+    /// Locate the standalone `verify_bundle.py` script if present on disk.
     pub fn verify_bundle_script(&self) -> Option<PathBuf> {
         let candidates = [
-            self.root.join("scripts").join("verify_bundle.py"),
+            self.root
+                .join("crates")
+                .join("tracedesk-core")
+                .join("resources")
+                .join("verify_bundle.py"),
             self.root.join("resources").join("verify_bundle.py"),
+            self.root.join("scripts").join("verify_bundle.py"),
         ];
         candidates.into_iter().find(|p| p.is_file())
     }
