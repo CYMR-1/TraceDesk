@@ -620,6 +620,199 @@ fn test_native_ntfs_volume_reader_all_features_and_fallbacks() {
     );
     write_mft(&mut img, 21, &rec21);
 
+    // Record 22 + 23: $ATTRIBUTE_LIST whose base MFT has full `data_size` (2 clusters) at VCN 0,
+    // but extension MFT 23 has mismatched `base_ref` (99 != 22) -> MUST FallbackToIcat (never fall back to base runs!).
+    let mut al22 = make_attr_list_entry(0x80, 0, 22, 1, "");
+    al22.extend_from_slice(&make_attr_list_entry(0x80, 1, 23, 4, ""));
+    let rec22 = build_mft_record(
+        true,
+        0,
+        &[
+            make_resident_attr(0x20, 0, 0, "", &al22),
+            make_non_resident_attr(
+                0x80,
+                1,
+                0,
+                "",
+                0,
+                0,
+                (2 * cluster_size) as u64,
+                (2 * cluster_size) as u64,
+                &encode_data_run(1, Some(33)),
+            ),
+        ],
+    );
+    let rec23 = build_mft_record(
+        true,
+        99, // mismatched base_mft_record!
+        &[make_non_resident_attr(
+            0x80,
+            4,
+            0,
+            "",
+            1,
+            1,
+            0,
+            0,
+            &encode_data_run(1, Some(34)),
+        )],
+    );
+    write_mft(&mut img, 22, &rec22);
+    write_mft(&mut img, 23, &rec23);
+
+    // Record 24 + 25: $ATTRIBUTE_LIST with uncompressed base MFT, but compressed extension MFT -> MUST FallbackToIcat.
+    let mut al24 = make_attr_list_entry(0x80, 0, 24, 1, "");
+    al24.extend_from_slice(&make_attr_list_entry(0x80, 1, 25, 4, ""));
+    let rec24 = build_mft_record(
+        true,
+        0,
+        &[
+            make_resident_attr(0x20, 0, 0, "", &al24),
+            make_non_resident_attr(
+                0x80,
+                1,
+                0,
+                "",
+                0,
+                0,
+                (2 * cluster_size) as u64,
+                (2 * cluster_size) as u64,
+                &encode_data_run(1, Some(35)),
+            ),
+        ],
+    );
+    let rec25 = build_mft_record(
+        true,
+        24,
+        &[make_non_resident_attr(
+            0x80,
+            4,
+            0x0001, // COMPRESSED extension!
+            "",
+            1,
+            1,
+            0,
+            0,
+            &encode_data_run(1, Some(36)),
+        )],
+    );
+    write_mft(&mut img, 24, &rec24);
+    write_mft(&mut img, 25, &rec25);
+
+    // Record 26: Single-record truncated runs (1 cluster = 4096 bytes < initialized_size 8192) -> MUST FallbackToIcat.
+    let rec26 = build_mft_record(
+        true,
+        0,
+        &[make_non_resident_attr(
+            0x80,
+            1,
+            0,
+            "",
+            0,
+            0,
+            (2 * cluster_size) as u64,
+            (2 * cluster_size) as u64,
+            &encode_data_run(1, Some(37)),
+        )],
+    );
+    write_mft(&mut img, 26, &rec26);
+
+    // Record 27 + 28: $ATTRIBUTE_LIST with a VCN gap (base VCN 0, extension VCN 2, missing VCN 1) -> MUST FallbackToIcat.
+    let mut al27 = make_attr_list_entry(0x80, 0, 27, 1, "");
+    al27.extend_from_slice(&make_attr_list_entry(0x80, 2, 28, 4, ""));
+    let rec27 = build_mft_record(
+        true,
+        0,
+        &[
+            make_resident_attr(0x20, 0, 0, "", &al27),
+            make_non_resident_attr(
+                0x80,
+                1,
+                0,
+                "",
+                0,
+                0,
+                (3 * cluster_size) as u64,
+                (3 * cluster_size) as u64,
+                &encode_data_run(1, Some(38)),
+            ),
+        ],
+    );
+    let rec28 = build_mft_record(
+        true,
+        27,
+        &[make_non_resident_attr(
+            0x80,
+            4,
+            0,
+            "",
+            2,
+            2,
+            0,
+            0,
+            &encode_data_run(1, Some(39)),
+        )],
+    );
+    write_mft(&mut img, 27, &rec27);
+    write_mft(&mut img, 28, &rec28);
+
+    // Record 29 + 30: $ATTRIBUTE_LIST with overlapping VCNs (base VCN 0..=1, extension VCN 1..=2) -> MUST FallbackToIcat.
+    let mut al29 = make_attr_list_entry(0x80, 0, 29, 1, "");
+    al29.extend_from_slice(&make_attr_list_entry(0x80, 1, 30, 4, ""));
+    let rec29 = build_mft_record(
+        true,
+        0,
+        &[
+            make_resident_attr(0x20, 0, 0, "", &al29),
+            make_non_resident_attr(
+                0x80,
+                1,
+                0,
+                "",
+                0,
+                1,
+                (3 * cluster_size) as u64,
+                (3 * cluster_size) as u64,
+                &encode_data_run(2, Some(40)),
+            ),
+        ],
+    );
+    let rec30 = build_mft_record(
+        true,
+        29,
+        &[make_non_resident_attr(
+            0x80,
+            4,
+            0,
+            "",
+            1,
+            2,
+            0,
+            0,
+            &encode_data_run(2, Some(42)),
+        )],
+    );
+    write_mft(&mut img, 29, &rec29);
+    write_mft(&mut img, 30, &rec30);
+
+    // Record 31: highest_vcn mismatch (1 cluster run but highest_vcn = 5) -> MUST FallbackToIcat.
+    let rec31 = build_mft_record(
+        true,
+        0,
+        &[make_non_resident_attr(
+            0x80,
+            1,
+            0,
+            "",
+            0,
+            5,
+            cluster_size as u64,
+            cluster_size as u64,
+            &encode_data_run(1, Some(44)),
+        )],
+    );
+    write_mft(&mut img, 31, &rec31);
+
     // Run VolumeReader assertions!
     let media: Arc<dyn MediaReader> = Arc::new(MemoryMedia(img));
     let mut vol = VolumeReader::open_with_media(media);
@@ -742,4 +935,36 @@ fn test_native_ntfs_volume_reader_all_features_and_fallbacks() {
     let read21 = vol.read_entry_at(&e21, 0, 4096).unwrap();
     assert!(read21[..2000].iter().all(|&b| b == 0x77));
     assert!(read21[2000..].iter().all(|&b| b == 0x00));
+
+    // 9. $ATTRIBUTE_LIST failure / malformed runlist MUST return FallbackToIcat (never partial Direct).
+    assert_eq!(
+        vol.plan_entry(&ntfs_entry("22-128-1", (2 * cluster_size) as u64, false), b"ab"),
+        EntryReadPlan::FallbackToIcat,
+        "$ATTRIBUTE_LIST mismatched base_ref must fall back to icat"
+    );
+    assert_eq!(
+        vol.plan_entry(&ntfs_entry("24-128-1", (2 * cluster_size) as u64, false), b"ab"),
+        EntryReadPlan::FallbackToIcat,
+        "$ATTRIBUTE_LIST compressed extension must fall back to icat"
+    );
+    assert_eq!(
+        vol.plan_entry(&ntfs_entry("26-128-1", (2 * cluster_size) as u64, false), b"ab"),
+        EntryReadPlan::FallbackToIcat,
+        "truncated non-resident runs must fall back to icat"
+    );
+    assert_eq!(
+        vol.plan_entry(&ntfs_entry("27-128-1", (3 * cluster_size) as u64, false), b"ab"),
+        EntryReadPlan::FallbackToIcat,
+        "VCN gap in $ATTRIBUTE_LIST runs must fall back to icat"
+    );
+    assert_eq!(
+        vol.plan_entry(&ntfs_entry("29-128-1", (3 * cluster_size) as u64, false), b"ab"),
+        EntryReadPlan::FallbackToIcat,
+        "overlapping VCN runs must fall back to icat"
+    );
+    assert_eq!(
+        vol.plan_entry(&ntfs_entry("31-128-1", cluster_size as u64, false), b"ab"),
+        EntryReadPlan::FallbackToIcat,
+        "highest_vcn mismatch must fall back to icat"
+    );
 }

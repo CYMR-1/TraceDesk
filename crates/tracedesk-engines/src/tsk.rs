@@ -413,6 +413,11 @@ pub struct TskCli {
     bin_dir: PathBuf,
 }
 
+fn normalize_bin_dir(dir: PathBuf) -> PathBuf {
+    let resolved = fs::canonicalize(&dir).unwrap_or(dir);
+    strip_verbatim_prefix(&resolved)
+}
+
 impl TskCli {
     /// Discover Sleuth Kit binaries in strict priority order:
     /// `override_dir` -> `TSK_BIN` -> `<app_root>/tools/**/bin` -> `PATH`.
@@ -429,10 +434,14 @@ impl TskCli {
         candidates.extend(candidate_tool_bins());
 
         if let Some(dir) = candidates.into_iter().find(|p| has_fls(p)) {
-            return Ok(Self { bin_dir: dir });
+            return Ok(Self {
+                bin_dir: normalize_bin_dir(dir),
+            });
         }
         if let Some(dir) = find_fls_on_path() {
-            return Ok(Self { bin_dir: dir });
+            return Ok(Self {
+                bin_dir: normalize_bin_dir(dir),
+            });
         }
         Err(EngineError::TskNotFound(
             "未找到 Sleuth Kit。请运行 scripts/install_tsk.ps1，或设置 TSK_BIN 为 bin 目录。"
@@ -442,7 +451,9 @@ impl TskCli {
 
     /// Construct directly from an explicit `bin` directory (primarily for tests).
     pub fn from_bin_dir(bin_dir: PathBuf) -> Self {
-        Self { bin_dir }
+        Self {
+            bin_dir: normalize_bin_dir(bin_dir),
+        }
     }
 
     /// Resolved Sleuth Kit `bin` directory.
@@ -608,6 +619,7 @@ impl TskCli {
             OsString::from(offset.to_string()),
             clean_image_arg(image),
         ];
+        let mut command = self.build_command(TskCommand::Fsstat, args)?;
         let mut stderr_tmp = tempfile::tempfile()?;
         let out_file = OpenOptions::new()
             .write(true)
@@ -615,13 +627,14 @@ impl TskCli {
             .truncate(true)
             .open(dest)?;
 
-        let mut command = self.build_command(TskCommand::Fsstat, args)?;
         command
             .stdin(Stdio::null())
             .stdout(Stdio::from(out_file))
             .stderr(Stdio::from(stderr_tmp.try_clone()?));
 
-        let mut child = command.spawn().map_err(|e| {
+        let spawn_res = command.spawn();
+        drop(command); // Release parent's handle to `dest` immediately.
+        let mut child = spawn_res.map_err(|e| {
             let _ = fs::remove_file(dest);
             EngineError::TskFailed {
                 command: "fsstat".to_string(),
@@ -882,17 +895,19 @@ impl TskCli {
         dest: &Path,
     ) -> EngineResult<()> {
         let args = self.file_args(image, offset, inode, false)?;
+        let mut command = self.build_command(TskCommand::Icat, args)?;
         let timeout = Duration::from_secs(300u64.max(size / (1 << 20)));
         let mut stderr_tmp = tempfile::tempfile()?;
 
         let out_file = OpenOptions::new().write(true).create_new(true).open(dest)?;
-        let mut command = self.build_command(TskCommand::Icat, args)?;
         command
             .stdin(Stdio::null())
             .stdout(Stdio::from(out_file))
             .stderr(Stdio::from(stderr_tmp.try_clone()?));
 
-        let mut child = command.spawn().map_err(|e| {
+        let spawn_res = command.spawn();
+        drop(command); // Release parent's handle to `dest` immediately.
+        let mut child = spawn_res.map_err(|e| {
             let _ = fs::remove_file(dest);
             EngineError::TskFailed {
                 command: "icat".to_string(),
