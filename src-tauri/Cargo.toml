@@ -7,4 +7,18 @@ edition.workspace = true
 name = "tracedesk_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tracedesk-core = { path = "../crates/tracedesk-core" }
+tracedesk-engines = { path = "../crates/tracedesk-engines" }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"

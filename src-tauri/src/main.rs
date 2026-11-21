@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    println!("tracedesk-desktop placeholder");
+    tracedesk_desktop_lib::run();
 }
