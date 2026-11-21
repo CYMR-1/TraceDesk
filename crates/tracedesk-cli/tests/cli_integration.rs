@@ -1,10 +1,9 @@
-//! Integration tests for `tracedesk-cli`:
-//! 1. `verify-bundle` on the Python golden baseline ZIP (`scratch/baseline/golden_case/demo_case`)
-//! 2. `verify-bundle` tamper detection across all attack surfaces (external SHA-256, member bytes,
-//!    audit chain, 64-byte `audit.head` newline injection, `report.md`, `manifest.json` exports,
-//!    `searches/*.json`, and member set mismatch)
-//! 3. `make-demo` pure-Rust FAT16 image generation (byte-for-byte parity + deleted file recovery)
-//! 4. `run-demo` full closed-loop forensic workflow & self-verification
+//! `tracedesk-cli` 集成测试：
+//! 1. 在 Python 黄金基线复核包 ZIP（`scratch/baseline/golden_case/demo_case`）上运行 `verify-bundle`
+//! 2. 全攻击面篡改检测（外部 SHA-256、成员字节、审计链、64 字节 `audit.head` 换行注入、
+//!    `report.md`、`manifest.json` 导出记录、`searches/*.json` 及成员集合不一致）
+//! 3. `make-demo` 纯 Rust FAT16 镜像生成（逐字节一致性与已删除文件恢复）
+//! 4. `run-demo` 完整闭环取证演示流程与自我核验
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -30,7 +29,7 @@ fn cli_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_tracedesk-cli"))
 }
 
-/// Helper to read all members from an existing ZIP into an ordered map.
+/// 辅助函数：将现有 ZIP 中的全部成员读取到有序映射中。
 fn read_zip_members(zip_path: &Path) -> BTreeMap<String, Vec<u8>> {
     let file = File::open(zip_path).expect("open zip");
     let mut archive = ZipArchive::new(file).expect("parse zip");
@@ -45,7 +44,7 @@ fn read_zip_members(zip_path: &Path) -> BTreeMap<String, Vec<u8>> {
     map
 }
 
-/// Write a map of members to a new ZIP file, optionally recalculating `SHA256SUMS.json`.
+/// 将成员映射写入新的 ZIP 文件，并可选择重新计算 `SHA256SUMS.json`。
 fn write_zip_members(
     dst_path: &Path,
     mut members: BTreeMap<String, Vec<u8>>,
@@ -81,7 +80,7 @@ fn verify_bundle_passes_golden_case_and_detects_all_tampering() {
     let (bundle_zip, expected_sha256, expected_count) = if golden_candidate.is_file() {
         (golden_candidate, GOLDEN_BUNDLE_SHA256.to_string(), 10usize)
     } else {
-        // Pure-Rust self-contained fallback when external Python golden baseline is absent.
+        // 当外部 Python 黄金基线不存在时，使用纯 Rust 自包含回退流程生成复核包。
         let fallback_cases = tmp.path().join("fallback_cases");
         let fallback_logs = tmp.path().join("fallback_logs");
         fs::create_dir_all(&fallback_cases).expect("create fallback cases");
@@ -112,7 +111,7 @@ fn verify_bundle_passes_golden_case_and_detects_all_tampering() {
     };
     let expected_msg = format!("核验通过：{expected_count} 份材料及审计链。");
 
-    // 1. Pass with explicit `--sha256`
+    // 1. 显式传入 `--sha256` 时核验通过
     let out = Command::new(cli_bin())
         .arg("verify-bundle")
         .arg(&bundle_zip)
@@ -128,7 +127,7 @@ fn verify_bundle_passes_golden_case_and_detects_all_tampering() {
     );
     assert_eq!(stdout.trim(), expected_msg);
 
-    // 2. Pass without `--sha256`
+    // 2. 不传入 `--sha256` 时核验通过
     let out_no_sha = Command::new(cli_bin())
         .arg("verify-bundle")
         .arg(&bundle_zip)
@@ -140,7 +139,7 @@ fn verify_bundle_passes_golden_case_and_detects_all_tampering() {
         expected_msg
     );
 
-    // 3. Reject wrong outer `--sha256`
+    // 3. 拒绝错误的外部 `--sha256`
     let out_bad_sha = Command::new(cli_bin())
         .arg("verify-bundle")
         .arg(&bundle_zip)
@@ -157,7 +156,7 @@ fn verify_bundle_passes_golden_case_and_detects_all_tampering() {
 
     let base_members = read_zip_members(&bundle_zip);
 
-    // 4. Tamper `report.md` without updating SHA256SUMS.json -> "成员摘要不匹配：report.md"
+    // 4. 篡改 `report.md` 但不更新 SHA256SUMS.json -> 应报 "成员摘要不匹配：report.md"
     {
         let mut m = base_members.clone();
         m.get_mut("report.md")
@@ -178,7 +177,7 @@ fn verify_bundle_passes_golden_case_and_detects_all_tampering() {
         );
     }
 
-    // 5. Tamper `report.md` AND recompute SHA256SUMS.json -> caught by audit chain REPORT_GENERATE digest check!
+    // 5. 篡改 `report.md` 并重算 SHA256SUMS.json -> 应被审计链 REPORT_GENERATE 摘要核验拦截
     {
         let mut m = base_members.clone();
         m.get_mut("report.md")
@@ -199,7 +198,7 @@ fn verify_bundle_passes_golden_case_and_detects_all_tampering() {
         );
     }
 
-    // 6. Tamper `audit.jsonl` AND recompute SHA256SUMS.json -> caught by audit hash chain check!
+    // 6. 篡改 `audit.jsonl` 并重算 SHA256SUMS.json -> 应被审计哈希链核验拦截
     {
         let mut m = base_members.clone();
         let audit_str = String::from_utf8(m["audit.jsonl"].clone()).unwrap();
@@ -220,7 +219,7 @@ fn verify_bundle_passes_golden_case_and_detects_all_tampering() {
         );
     }
 
-    // 7. Tamper `audit.head` by appending a trailing `\n` (65 bytes) AND recompute SHA256SUMS.json -> "审计链尾不匹配"
+    // 7. 向 `audit.head` 末尾追加 `\n`（65 字节）并重算 SHA256SUMS.json -> 应报 "审计链尾不匹配"
     {
         let mut m = base_members.clone();
         m.get_mut("audit.head").unwrap().push(b'\n');
@@ -239,7 +238,7 @@ fn verify_bundle_passes_golden_case_and_detects_all_tampering() {
         );
     }
 
-    // 8. Tamper `manifest.json` export size AND recompute SHA256SUMS.json -> "导出记录不匹配"
+    // 8. 篡改 `manifest.json` 导出大小并重算 SHA256SUMS.json -> 应报 "导出记录不匹配"
     {
         let mut m = base_members.clone();
         let mut manifest: Value = serde_json::from_slice(&m["manifest.json"]).unwrap();
@@ -263,7 +262,7 @@ fn verify_bundle_passes_golden_case_and_detects_all_tampering() {
         );
     }
 
-    // 9. Tamper `searches/search_*.json` AND recompute SHA256SUMS.json -> "搜索记录不匹配"
+    // 9. 篡改 `searches/search_*.json` 并重算 SHA256SUMS.json -> 应报 "搜索记录不匹配"
     {
         let mut m = base_members.clone();
         let search_key = m
@@ -287,7 +286,7 @@ fn verify_bundle_passes_golden_case_and_detects_all_tampering() {
         );
     }
 
-    // 10. Add an unlisted member to ZIP without adding to SHA256SUMS.json -> "成员重复或与清单不一致"
+    // 10. 向 ZIP 添加未登记成员且不更新 SHA256SUMS.json -> 应报 "成员重复或与清单不一致"
     {
         let mut m = base_members;
         m.insert("extra_unlisted.txt".to_string(), b"rogue".to_vec());
@@ -314,7 +313,7 @@ fn make_demo_and_run_demo_closed_loop_via_cli() {
     let cases_dir = tmp.path().join("cases");
     let logs_dir = tmp.path().join("logs");
 
-    // 1. Run `make-demo --out-dir <evidence_dir>`
+    // 1. 运行 `make-demo --out-dir <evidence_dir>`
     let make_out = Command::new(cli_bin())
         .arg("make-demo")
         .arg("--out-dir")
@@ -338,7 +337,7 @@ fn make_demo_and_run_demo_closed_loop_via_cli() {
     assert!(evidence_dir.join("demo_volume.manifest.json").is_file());
     assert!(evidence_dir.join("demo_volume.dd.sha256").is_file());
 
-    // Byte-for-byte SHA-256 parity with Python `scripts/make_demo.py`
+    // 校验与 Python `scripts/make_demo.py` 的逐字节 SHA-256 一致性
     assert_eq!(
         sha256_file(&demo_dd, None, None).unwrap(),
         EXPECTED_DEMO_DD_SHA256
@@ -348,7 +347,7 @@ fn make_demo_and_run_demo_closed_loop_via_cli() {
         EXPECTED_DEMO_VOLUME_DD_SHA256
     );
 
-    // Running `make-demo` a second time must preserve existing images without overwriting
+    // 第二次运行 `make-demo` 必须保留已有镜像且不覆盖
     let make_again = Command::new(cli_bin())
         .arg("make-demo")
         .arg("--out-dir")
@@ -361,7 +360,7 @@ fn make_demo_and_run_demo_closed_loop_via_cli() {
         "expected preservation message"
     );
 
-    // 2. Verify pure-Rust FAT16 image with deleted entry (`0xE5`) can be scanned and recovered by TSK
+    // 2. 验证带已删除目录项（`0xE5`）的纯 Rust FAT16 镜像可被 TSK 正常扫描并恢复
     let deleted_dd = evidence_dir.join("demo_deleted.dd");
     let del_manifest =
         create_demo_image_with_deleted(&deleted_dd, true).expect("create deleted demo image");
@@ -386,7 +385,7 @@ fn make_demo_and_run_demo_closed_loop_via_cli() {
         b"Deleted forensic artifact recoverable via TSK icat -r.\r\n"
     );
 
-    // 3. Run `run-demo --cases-dir <cases_dir> --evidence <demo_dd>`
+    // 3. 运行 `run-demo --cases-dir <cases_dir> --evidence <demo_dd>`
     let demo_out = Command::new(cli_bin())
         .arg("run-demo")
         .arg("--cases-dir")
@@ -409,13 +408,13 @@ fn make_demo_and_run_demo_closed_loop_via_cli() {
     assert!(demo_stdout.contains("核验通过：10 份材料及审计链。"));
     assert!(demo_stdout.contains("耗时明细："));
 
-    // Verify `latest-demo.txt` marker was written and points to a valid case directory
+    // 验证 `latest-demo.txt` 标记文件已写入且指向有效的案件目录
     let marker_path = logs_dir.join("latest-demo.txt");
     assert!(marker_path.is_file(), "latest-demo.txt missing");
     let case_dir = PathBuf::from(fs::read_to_string(&marker_path).unwrap().trim());
     assert!(case_dir.is_dir(), "case_dir missing: {}", case_dir.display());
 
-    // Open the generated case in Rust and verify all artifacts & audit chain
+    // 在 Rust 中打开生成的案件并验证全部产物与审计链
     let mut case = Case::open(&case_dir, None, AuditOrigin::Manual).expect("open demo case");
     assert_eq!(case.data().inventory.len(), 13);
     assert_eq!(case.data().exports.len(), 2);
@@ -428,7 +427,7 @@ fn make_demo_and_run_demo_closed_loop_via_cli() {
     assert!(records.iter().any(|r| r.action == "REVIEW_EXPORT"));
     case.close();
 
-    // Find the review bundle ZIP in `<case_dir>/reports/` and verify via `verify-bundle` CLI
+    // 在 `<case_dir>/reports/` 下找到复核包 ZIP 并通过 `verify-bundle` CLI 核验
     let reports_dir = case_dir.join("reports");
     let zip_path = fs::read_dir(&reports_dir)
         .unwrap()

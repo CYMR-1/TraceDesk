@@ -1,5 +1,5 @@
-//! Standalone review bundle verifier (`verify-bundle <zip_path> [--sha256 <hex64>]`),
-//! 100% compatible with `scripts/verify_bundle.py`.
+//! 独立复核包核验器（`verify-bundle <zip_path> [--sha256 <hex64>]`），
+//! 与 `scripts/verify_bundle.py` 100% 兼容。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
@@ -10,11 +10,11 @@ use serde_json::Value;
 use tracedesk_core::{CoreError, CoreResult, verify_bundle};
 use zip::ZipArchive;
 
-/// Verify a TraceDesk review bundle ZIP file and all embedded materials, audit chain,
-/// `audit.head` (exact 64 ASCII bytes), `report.md`, `manifest.json` exports, and
-/// `searches/*.json` digests against the audit chain.
+/// 核验 TraceDesk 复核包 ZIP 文件及其内嵌材料、审计链、
+/// `audit.head`（严格 64 字节 ASCII）、`report.md`、`manifest.json` 导出记录，
+/// 以及 `searches/*.json` 摘要与审计链的一致性。
 ///
-/// Returns the number of verified material files in `SHA256SUMS.json`.
+/// 返回 `SHA256SUMS.json` 中通过核验的材料文件数量。
 pub fn verify_bundle_strict(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResult<usize> {
     if !zip_path.is_file() {
         return Err(CoreError::NotFound(format!(
@@ -23,16 +23,16 @@ pub fn verify_bundle_strict(zip_path: &Path, expected_sha256: Option<&str>) -> C
         )));
     }
 
-    // 1. Run core verification:
-    //    - outer ZIP SHA-256 (if provided)
-    //    - unique ZIP member names & exact set equality with SHA256SUMS.json + {"SHA256SUMS.json"}
-    //    - per-member SHA-256 recomputation
-    //    - full audit.jsonl canonical JSON SHA-256 hash chain from genesis 0^64
-    //    - exact 64-byte audit.head (no newline strip) & manifest.json audit_head match
-    //    - manifest.json exports member SHA-256 and uncompressed size match
+    // 1. 执行核心核验：
+    //    - 外部 ZIP 文件的 SHA-256（若已提供）
+    //    - ZIP 成员名唯一性，且成员集合与 SHA256SUMS.json + {"SHA256SUMS.json"} 完全一致
+    //    - 逐成员重新计算 SHA-256 摘要
+    //    - 从创世哈希 0^64 起校验 audit.jsonl 的完整规范 JSON SHA-256 哈希链
+    //    - 校验严格 64 字节的 audit.head（不去除换行符）并与 manifest.json 中的 audit_head 比对
+    //    - 校验 manifest.json 中导出成员的 SHA-256 与未压缩大小是否匹配
     let count = verify_bundle(zip_path, expected_sha256)?;
 
-    // 2. Additional cross-checks on report.md and searches/*.json against audit.jsonl & manifest.json.
+    // 2. 针对 report.md 与 searches/*.json 补充与 audit.jsonl 及 manifest.json 的交叉校验。
     let file = File::open(zip_path)?;
     let mut archive = ZipArchive::new(file)?;
 
@@ -58,7 +58,7 @@ pub fn verify_bundle_strict(zip_path: &Path, expected_sha256: Option<&str>) -> C
         serde_json::from_str(&raw)?
     };
 
-    // Parse audit.jsonl records for latest REPORT_GENERATE and all CONTENT_SEARCH digests.
+    // 解析 audit.jsonl 记录，提取最新一次 REPORT_GENERATE 及全部 CONTENT_SEARCH 摘要。
     let mut last_report_sha: Option<String> = None;
     let mut audit_searches: HashMap<String, String> = HashMap::new();
     {
@@ -97,7 +97,7 @@ pub fn verify_bundle_strict(zip_path: &Path, expected_sha256: Option<&str>) -> C
         ));
     }
 
-    // Collect omitted search names from manifest.json.
+    // 从 manifest.json 中收集被省略的搜索记录名称。
     let mut omitted_search_names: HashSet<String> = HashSet::new();
     if let Some(omitted) = manifest.get("omitted_searches").and_then(Value::as_array) {
         for item in omitted {
@@ -107,7 +107,7 @@ pub fn verify_bundle_strict(zip_path: &Path, expected_sha256: Option<&str>) -> C
         }
     }
 
-    // Every `searches/<name>` member in the ZIP must match its CONTENT_SEARCH audit record digest.
+    // ZIP 中的每个 `searches/<name>` 成员均须与对应的 CONTENT_SEARCH 审计记录摘要一致。
     for (member, actual_sha) in &checks {
         if let Some(search_name) = member.strip_prefix("searches/") {
             match audit_searches.get(search_name) {
@@ -121,7 +121,7 @@ pub fn verify_bundle_strict(zip_path: &Path, expected_sha256: Option<&str>) -> C
         }
     }
 
-    // Every CONTENT_SEARCH audit record with a sha256 must either be present in `searches/` or listed in `omitted_searches`.
+    // 每条包含 sha256 的 CONTENT_SEARCH 审计记录，必须存在于 `searches/` 中或已登记在 `omitted_searches` 中。
     for (search_name, expected_sha) in &audit_searches {
         let member = format!("searches/{search_name}");
         if let Some(actual_sha) = checks.get(&member) {
@@ -140,7 +140,7 @@ pub fn verify_bundle_strict(zip_path: &Path, expected_sha256: Option<&str>) -> C
     Ok(count)
 }
 
-/// Run the `verify-bundle` CLI command and return the formatted success line.
+/// 运行 `verify-bundle` CLI 子命令，并返回格式化后的成功提示信息。
 pub fn run_verify_bundle_command(
     zip_path: &Path,
     expected_sha256: Option<&str>,

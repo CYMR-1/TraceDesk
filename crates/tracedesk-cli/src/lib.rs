@@ -1,8 +1,8 @@
-//! TraceDesk native command-line utility and benchmark driver (`tracedesk-cli`):
-//! - `verify-bundle <zip_path> [--sha256 <hex64>]`: standalone verifiable review bundle checker
-//! - `run-demo [--cases-dir <dir>] [--evidence <path>]`: full closed-loop forensic demo workflow
-//! - `make-demo [--out-dir <dir>]`: deterministic pure-Rust FAT16 demo image generator
-//! - `bench [--json-out <path>]`: native Rust performance benchmark suite & Python speedup comparison
+//! TraceDesk 原生命令行工具与性能基准驱动程序（`tracedesk-cli`）：
+//! - `verify-bundle <zip_path> [--sha256 <hex64>]`：独立复核包核验器
+//! - `run-demo [--cases-dir <dir>] [--evidence <path>]`：完整闭环取证演示流程
+//! - `make-demo [--out-dir <dir>]`：纯 Rust 确定性 FAT16 演示镜像生成器
+//! - `bench [--json-out <path>]`：原生 Rust 性能基准测试套件及与 Python 基线的加速比对比
 
 pub mod bench;
 pub mod demo;
@@ -22,7 +22,7 @@ pub use make_demo::{
 };
 pub use verify::{run_verify_bundle_command, verify_bundle_strict};
 
-/// Parsed CLI subcommand.
+/// 已解析的 CLI 子命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
     VerifyBundle {
@@ -43,7 +43,7 @@ pub enum CliCommand {
     Version,
 }
 
-/// Usage help text in Chinese.
+/// 中文使用说明文本。
 pub fn usage_text() -> &'static str {
     "TraceDesk 原生取证命令行工具与性能基准套件 (tracedesk-cli)\n\
      \n\
@@ -85,7 +85,7 @@ fn split_flag(arg: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Parse command-line arguments (excluding `argv[0]`) into a [`CliCommand`].
+/// 将命令行参数（不含 `argv[0]`）解析为 [`CliCommand`]。
 pub fn parse_cli_args(args: &[String]) -> CoreResult<CliCommand> {
     let Some(first) = args.first() else {
         return Ok(CliCommand::Help);
@@ -152,7 +152,7 @@ pub fn parse_cli_args(args: &[String]) -> CoreResult<CliCommand> {
                         )?));
                     }
                     "--gui" => {
-                        // Ignore legacy `--gui` flag gracefully for script compatibility.
+                        // 为兼容旧版脚本，静默忽略遗留的 `--gui` 参数。
                     }
                     other => {
                         return Err(CoreError::InvalidInput(format!(
@@ -223,7 +223,7 @@ pub fn parse_cli_args(args: &[String]) -> CoreResult<CliCommand> {
     }
 }
 
-/// Execute a parsed [`CliCommand`].
+/// 执行已解析的 [`CliCommand`]。
 pub fn execute_command(cmd: CliCommand) -> CoreResult<()> {
     match cmd {
         CliCommand::Help => {
@@ -257,7 +257,7 @@ pub fn execute_command(cmd: CliCommand) -> CoreResult<()> {
     }
 }
 
-/// Top-level CLI runner taking raw argument strings (excluding `argv[0]`).
+/// 顶层 CLI 入口，接收原始参数切片（不含 `argv[0]`）。
 pub fn run_cli(args: &[String]) -> CoreResult<()> {
     let cmd = parse_cli_args(args)?;
     execute_command(cmd)

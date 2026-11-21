@@ -1,5 +1,5 @@
-//! Pure Rust deterministic FAT16 forensic demo image generator (`make-demo [--out-dir <dir>]`),
-//! 100% byte-for-byte compatible with `scripts/make_demo.py`.
+//! 纯 Rust 确定性 FAT16 取证演示镜像生成器（`make-demo [--out-dir <dir>]`），
+//! 与 `scripts/make_demo.py` 实现 100% 逐字节兼容。
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -9,22 +9,22 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tracedesk_core::{AppPaths, CoreResult, sha256_hex};
 
-/// Expected SHA-256 of the standard partitioned `demo.dd` image (`scripts/make_demo.py`).
+/// 标准分区版 `demo.dd` 镜像的预期 SHA-256（与 `scripts/make_demo.py` 一致）。
 pub const EXPECTED_DEMO_DD_SHA256: &str =
     "83029884b25c65f5cd8e94415c9a4e6a60f762459130cf96eac1e626890c70e8";
 
-/// Expected SHA-256 of the standard unpartitioned `demo_volume.dd` image (`scripts/make_demo.py`).
+/// 标准无分区版 `demo_volume.dd` 镜像的预期 SHA-256（与 `scripts/make_demo.py` 一致）。
 pub const EXPECTED_DEMO_VOLUME_DD_SHA256: &str =
     "a67bd44a28eb789dc7dbd29c6994ca66a905a96f3166a7312ba4327ee17c5f3d";
 
-/// Single file entry in `<stem>.manifest.json`.
+/// `<stem>.manifest.json` 中的单个文件摘要条目。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DemoFileDigest {
     pub size: usize,
     pub sha256: String,
 }
 
-/// Manifest written alongside a generated demo image (`<stem>.manifest.json` and `<file>.sha256`).
+/// 随演示镜像一并生成的清单信息（`<stem>.manifest.json` 与 `<file>.sha256`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DemoImageManifest {
     pub image_path: PathBuf,
@@ -35,7 +35,7 @@ pub struct DemoImageManifest {
     pub files: Vec<(String, DemoFileDigest)>,
 }
 
-/// Summary returned by [`run_make_demo_command`].
+/// [`run_make_demo_command`] 返回的执行摘要。
 #[derive(Debug, Clone)]
 pub struct MakeDemoSummary {
     pub out_dir: PathBuf,
@@ -68,12 +68,12 @@ fn make_fat_dir_entry(
     record
 }
 
-/// Construct the raw bytes and file payload list of the deterministic FAT16 demo image.
+/// 构造确定性 FAT16 演示镜像的原始字节与内置文件载荷列表。
 ///
-/// When `include_deleted` is `false`, the output is 100% byte-for-byte identical to
-/// `scripts/make_demo.py::create(path, partitioned)`.
-/// When `include_deleted` is `true`, an additional FAT deleted directory entry (`0xE5` marker)
-/// and data cluster are written after `DOCS` so deleted-file recovery can also be exercised.
+/// 当 `include_deleted` 为 `false` 时，输出结果与
+/// `scripts/make_demo.py::create(path, partitioned)` 100% 逐字节一致。
+/// 当 `include_deleted` 为 `true` 时，会在 `DOCS` 之后额外写入一个已删除的 FAT 目录项
+/// （`0xE5` 标记）及对应数据簇，用于测试已删除文件恢复流程。
 pub fn build_demo_image_bytes(
     partitioned: bool,
     include_deleted: bool,
@@ -85,7 +85,7 @@ pub fn build_demo_image_bytes(
 
     let mut image = vec![0u8; (sectors + offset) * 512];
     if partitioned {
-        // MBR partition entry #1 at offset 446: type 0x06 (DOS FAT16), start=2048, count=16384
+        // 偏移 446 处的 MBR 第 1 分区表项：类型 0x06（DOS FAT16），起始扇区=2048，扇区数=16384
         image[446] = 0;
         image[447..450].copy_from_slice(&[0, 2, 0]);
         image[450] = 6;
@@ -99,7 +99,7 @@ pub fn build_demo_image_bytes(
     let mut boot = [0u8; 512];
     boot[0..3].copy_from_slice(&[0xeb, 0x3c, 0x90]);
     boot[3..11].copy_from_slice(b"TRACEDSK");
-    // struct.pack_into('<HBHBHHBHHHII', boot, 11, 512, 1, 1, 2, 512, sectors, 0xf8, fat_size, 32, 64, offset, 0)
+    // 按小端序写入 FAT16 引导扇区 BPB 字段（对应 struct.pack_into('<HBHBHHBHHHII', ...)）
     boot[11..13].copy_from_slice(&512u16.to_le_bytes());
     boot[13] = 1;
     boot[14..16].copy_from_slice(&1u16.to_le_bytes());
@@ -173,7 +173,7 @@ pub fn build_demo_image_bytes(
         image[root + i * 32..root + (i + 1) * 32].copy_from_slice(&dir_rec);
     }
 
-    // Add subdirectory `DOCS` and nested file `DOCS/CASE.TXT`
+    // 添加子目录 `DOCS` 及其嵌套文件 `DOCS/CASE.TXT`
     let folder_cluster = cluster;
     let child_cluster = cluster + 1;
     for c in [folder_cluster, child_cluster] {
@@ -209,7 +209,7 @@ pub fn build_demo_image_bytes(
     payloads.push(("DOCS/CASE.TXT".to_string(), case_content));
 
     if include_deleted {
-        // Add an unallocated deleted file entry (`0xE5` marker) at root slot `i + 1`
+        // 在根目录槽位 `i + 1` 添加一个未分配的已删除文件目录项（`0xE5` 标记）
         let del_cluster = child_cluster + 1;
         let del_content =
             b"Deleted forensic artifact recoverable via TSK icat -r.\r\n".to_vec();
@@ -221,7 +221,7 @@ pub fn build_demo_image_bytes(
             fat_time,
             fat_date,
         );
-        del_rec[0] = 0xe5; // FAT deleted marker
+        del_rec[0] = 0xe5; // FAT 已删除标记
         let slot = i + 1;
         image[root + slot * 32..root + (slot + 1) * 32].copy_from_slice(&del_rec);
         let del_off = data + ((del_cluster as usize) - 2) * 512;
@@ -249,7 +249,7 @@ fn write_demo_image_files(
     let (image, payloads) = build_demo_image_bytes(partitioned, include_deleted);
     let image_sha256 = sha256_hex(&image);
 
-    // Never clobber an existing evidence file (`open('xb')` semantics).
+    // 绝不覆盖已有证据文件（保持 Python `open('xb')` 独占创建语义）。
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(&image)?;
     file.flush()?;
@@ -278,7 +278,7 @@ fn write_demo_image_files(
     let manifest_json = serde_json::to_string_pretty(&Value::Object(root_manifest))?;
     fs::write(&manifest_path, manifest_json.as_bytes())?;
 
-    // Write companion `.sha256` checksum manifest (`<sha256>  <filename>\n`).
+    // 写入配套的 `.sha256` 校验清单文件（格式：`<sha256>  <filename>\n`）。
     let file_name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -299,12 +299,12 @@ fn write_demo_image_files(
     })
 }
 
-/// Create a deterministic FAT16 demo image at `path` (100% compatible with `scripts/make_demo.py::create`).
+/// 在 `path` 处生成确定性 FAT16 演示镜像（与 `scripts/make_demo.py::create` 100% 兼容）。
 pub fn create_demo_image(path: &Path, partitioned: bool) -> CoreResult<DemoImageManifest> {
     write_demo_image_files(path, partitioned, false)
 }
 
-/// Create a deterministic FAT16 demo image at `path` that also includes a deleted root entry (`0xE5`).
+/// 在 `path` 处生成确定性 FAT16 演示镜像，并在根目录额外包含一个已删除目录项（`0xE5`）。
 pub fn create_demo_image_with_deleted(
     path: &Path,
     partitioned: bool,
@@ -312,10 +312,10 @@ pub fn create_demo_image_with_deleted(
     write_demo_image_files(path, partitioned, true)
 }
 
-/// Execute the `make-demo [--out-dir <dir>]` subcommand.
+/// 执行 `make-demo [--out-dir <dir>]` 子命令。
 ///
-/// Generates `demo.dd` (partitioned) and `demo_volume.dd` (unpartitioned) in `out_dir`
-/// (defaulting to `<repo_root>/evidence`), preserving existing files without overwriting.
+/// 在 `out_dir`（默认为 `<repo_root>/evidence`）下生成 `demo.dd`（分区镜像）与
+/// `demo_volume.dd`（无分区卷镜像），若目标文件已存在则保留且不覆盖。
 pub fn run_make_demo_command(out_dir: Option<&Path>) -> CoreResult<MakeDemoSummary> {
     let paths = AppPaths::discover();
     let target_dir = match out_dir {

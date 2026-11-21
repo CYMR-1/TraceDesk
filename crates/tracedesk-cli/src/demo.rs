@@ -1,6 +1,6 @@
-//! Full end-to-end forensic demonstration workflow (`run-demo [--cases-dir <dir>] [--evidence <path>]`),
-//! aligned with `scripts/run_demo.py` plus findings, content search, review bundle building,
-//! self-verification, `logs/latest-demo.txt` update, and per-stage timing breakdown.
+//! 完整端到端取证演示流程（`run-demo [--cases-dir <dir>] [--evidence <path>]`），
+//! 在对齐 `scripts/run_demo.py` 的基础上，涵盖发现记录、内容搜索、复核包构建、
+//! 自我独立核验、`logs/latest-demo.txt` 更新及分阶段耗时统计。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ use tracedesk_engines::TskCli;
 use crate::make_demo::create_demo_image;
 use crate::verify::verify_bundle_strict;
 
-/// Per-stage and total timings (in milliseconds) for [`run_demo_command`].
+/// [`run_demo_command`] 的分阶段耗时与总耗时（单位：毫秒）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DemoTimings {
     pub create_ms: f64,
@@ -34,7 +34,7 @@ pub struct DemoTimings {
     pub total_ms: f64,
 }
 
-/// Complete output summary returned by [`run_demo_command`].
+/// [`run_demo_command`] 返回的完整输出摘要。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DemoRunSummary {
     pub case_folder: PathBuf,
@@ -73,7 +73,7 @@ fn round_ms(start: Instant) -> f64 {
     (start.elapsed().as_secs_f64() * 1000.0 * 100.0).round() / 100.0
 }
 
-/// Execute the `run-demo [--cases-dir <dir>] [--evidence <path>]` workflow.
+/// 执行 `run-demo [--cases-dir <dir>] [--evidence <path>]` 演示流程。
 pub fn run_demo_command(
     cases_dir: Option<&Path>,
     evidence: Option<&Path>,

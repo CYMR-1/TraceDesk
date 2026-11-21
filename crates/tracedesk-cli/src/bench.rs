@@ -1,7 +1,7 @@
-//! Native Rust performance benchmark suite (`bench [--json-out <path>]`),
-//! using the exact same dataset sizes and formulas as `scratch/baseline/run_baseline.py`
-//! plus multi-core EWF1 (64 MiB) parallel decode hashing and multi-core AVX2 content search
-//! throughput benchmarks, with automatic speedup calculation against `python_bench.json`.
+//! 原生 Rust 性能基准测试套件（`bench [--json-out <path>]`），
+//! 采用与 `scratch/baseline/run_baseline.py` 完全一致的数据集规模与计算公式，
+//! 并额外包含多核 EWF1（64 MiB）并行解码哈希与多核 AVX2 内容搜索吞吐量测试，
+//! 同时自动对照 `python_bench.json` 计算加速比。
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Seek, SeekFrom, Write};
@@ -202,9 +202,9 @@ pub struct RustBenchReport {
     pub comparison_vs_python: Vec<MetricComparison>,
 }
 
-/// Generate the exact 100,000 synthetic inventory entries matching `run_baseline.py::make_synthetic_entries`.
+/// 生成与 `run_baseline.py::make_synthetic_entries` 完全一致的 100,000 条合成文件清单条目。
 pub fn make_synthetic_entries(n: usize) -> Vec<InventoryEntry> {
-    let base_ts: i64 = 1_788_249_600; // 2026-09-01T08:00:00Z
+    let base_ts: i64 = 1_788_249_600; // 基准时间戳 2026-09-01T08:00:00Z
     let mut entries = Vec::with_capacity(n);
     for i in 0..n {
         let deleted = i.is_multiple_of(10);
@@ -237,7 +237,7 @@ pub fn make_synthetic_entries(n: usize) -> Vec<InventoryEntry> {
     entries
 }
 
-/// 1. Benchmark 100,000 inventory entries gzip (`compresslevel=1`) write and read.
+/// 1. 基准测试：100,000 条清单条目的 Gzip（`compresslevel=1`）写入与读取性能。
 pub fn bench_inventory_gzip(entries: &[InventoryEntry]) -> CoreResult<InventoryGzipBench> {
     let tmp = tempfile::tempdir()?;
     let gz_path = tmp.path().join("inventory-bench.jsonl.gz");
@@ -267,7 +267,7 @@ pub fn bench_inventory_gzip(entries: &[InventoryEntry]) -> CoreResult<InventoryG
     })
 }
 
-/// 2. Benchmark 400,000 MACB timeline build/sort, filter_options, and multi-condition filtering.
+/// 2. 基准测试：400,000 条 MACB 时间线的构建排序、`filter_options` 提取与多条件筛选性能。
 pub fn bench_timeline_400k(entries: Vec<InventoryEntry>) -> CoreResult<Timeline400kBench> {
     let entry_count = entries.len();
     let t = Instant::now();
@@ -327,20 +327,20 @@ pub fn bench_timeline_400k(entries: Vec<InventoryEntry>) -> CoreResult<Timeline4
     })
 }
 
-/// 3. Benchmark 500,000-cluster FAT32 non-sparse mixed mapping & all-zero fast path.
+/// 3. 基准测试：500,000 簇 FAT32 的非稀疏混合映射与全零快路径性能。
 pub fn bench_fat_500k_clusters() -> CoreResult<Fat500kBench> {
     let clusters: usize = 500_000;
     let sector: usize = 512;
     let per_cluster: u8 = 1;
     let reserved: u16 = 32;
     let copies: u8 = 1;
-    let fat_sectors: usize = ((clusters + 2) * 4).div_ceil(sector); // 3907
+    let fat_sectors: usize = ((clusters + 2) * 4).div_ceil(sector); // 3907 个扇区
     let total_sectors: usize = (reserved as usize) + (copies as usize) * fat_sectors + clusters;
 
     let mut boot = [0u8; 512];
     boot[0..3].copy_from_slice(&[0xeb, 0x58, 0x90]);
     boot[3..11].copy_from_slice(b"BENCHFAT");
-    // struct.pack_into('<HBHBHH', boot, 11, sector, per_cluster, reserved, copies, 0, 0)
+    // 按小端序写入 FAT32 引导扇区 BPB 字段（对应 struct.pack_into('<HBHBHH', ...)）
     boot[11..13].copy_from_slice(&(sector as u16).to_le_bytes());
     boot[13] = per_cluster;
     boot[14..16].copy_from_slice(&reserved.to_le_bytes());
@@ -350,7 +350,7 @@ pub fn bench_fat_500k_clusters() -> CoreResult<Fat500kBench> {
     boot[32..36].copy_from_slice(&(total_sectors as u32).to_le_bytes());
     boot[36..40].copy_from_slice(&(fat_sectors as u32).to_le_bytes());
     boot[40..42].copy_from_slice(&0u16.to_le_bytes());
-    boot[44..48].copy_from_slice(&2u32.to_le_bytes()); // root cluster = 2
+    boot[44..48].copy_from_slice(&2u32.to_le_bytes()); // 根目录起始簇号 = 2
     boot[510..512].copy_from_slice(&[0x55, 0xaa]);
     let fsstat = "File System Type: FAT32\n";
 
@@ -391,7 +391,7 @@ pub fn bench_fat_500k_clusters() -> CoreResult<Fat500kBench> {
     let regions_mixed = map_fat_regions(&img, 0, fsstat, &mut [], None)?;
     let non_sparse_ms = elapsed_ms(t);
 
-    // Rewrite FAT table for all-zero fast path
+    // 重写 FAT 表以测试全零快路径
     let mut fat_zero = vec![0u8; fat_sectors * sector];
     fat_zero[0..4].copy_from_slice(&0x0fff_fff8u32.to_le_bytes());
     fat_zero[4..8].copy_from_slice(&0x0fff_ffffu32.to_le_bytes());
@@ -434,7 +434,7 @@ pub fn bench_fat_500k_clusters() -> CoreResult<Fat500kBench> {
     })
 }
 
-/// 4. Benchmark 200 consecutive audit-chain appends and 201-record full verification.
+/// 4. 基准测试：连续 200 次审计链追加写入与 201 条记录完整校验性能。
 pub fn bench_audit_200() -> CoreResult<Audit200Bench> {
     let tmp = tempfile::tempdir()?;
     let mut case = Case::create(
@@ -480,7 +480,7 @@ pub fn bench_audit_200() -> CoreResult<Audit200Bench> {
     })
 }
 
-/// 5. Benchmark the full end-to-end `evidence/demo.dd` forensic workflow matching `run_baseline.py::run_golden_demo_case`.
+/// 5. 基准测试：对齐 `run_baseline.py::run_golden_demo_case` 的 `evidence/demo.dd` 端到端取证全流程。
 pub fn bench_golden_demo_case() -> CoreResult<GoldenDemoBench> {
     let paths = AppPaths::discover();
     let mut image = paths.evidence_dir.join("demo.dd");
@@ -670,18 +670,18 @@ fn write_ewf_section_desc(buf: &mut Vec<u8>, name: &str, next_offset: u64, secti
     buf.extend_from_slice(&desc);
 }
 
-/// 6A. Benchmark 64 MiB multi-segment EWF1 (4 segments, 2,048 chunks of 32 KiB) multi-core parallel decode + SHA-256.
+/// 6A. 基准测试：64 MiB 多分段 EWF1（4 个分段，2,048 个 32 KiB 块）多核并行解码与 SHA-256 计算性能。
 pub fn bench_ewf1_64mib_parallel() -> CoreResult<EwfParallelBench> {
-    let logical_bytes: usize = 64 * 1024 * 1024; // 67,108,864 bytes
+    let logical_bytes: usize = 64 * 1024 * 1024; // 67,108,864 字节
     let bytes_per_sector: u32 = 512;
     let sectors_per_chunk: u32 = 64;
-    let chunk_size: usize = (bytes_per_sector * sectors_per_chunk) as usize; // 32 KiB
-    let total_chunks: usize = logical_bytes / chunk_size; // 2048
-    let chunks_per_segment: usize = 512; // 4 segments (.E01-.E04)
+    let chunk_size: usize = (bytes_per_sector * sectors_per_chunk) as usize; // 每块 32 KiB
+    let total_chunks: usize = logical_bytes / chunk_size; // 共 2048 块
+    let chunks_per_segment: usize = 512; // 4 个分段（.E01-.E04）
     let num_segments: usize = total_chunks / chunks_per_segment;
 
-    // Prepare 16 distinct 32 KiB chunk templates (8 compressed, 8 uncompressed) and tile across 2048 chunks
-    // so building the 64 MiB EWF1 image is fast while exercising genuine zlib decompression & Adler-32 on every chunk.
+    // 预构造 16 种不同的 32 KiB 块模板（8 个压缩块、8 个未压缩块）并循环平铺至 2048 个块，
+    // 既能快速构建 64 MiB EWF1 镜像，又能确保每个块都经过真实的 zlib 解压与 Adler-32 校验。
     let mut plain_templates: Vec<Vec<u8>> = Vec::with_capacity(16);
     let mut encoded_templates: Vec<(Vec<u8>, bool)> = Vec::with_capacity(16);
     for t_idx in 0..16usize {
@@ -812,14 +812,14 @@ pub fn bench_ewf1_64mib_parallel() -> CoreResult<EwfParallelBench> {
     })
 }
 
-/// 6B. Benchmark multi-core AVX2 SIMD exact byte content search throughput over 256 MiB (32 x 8 MiB streams).
+/// 6B. 基准测试：在 256 MiB 数据（32 × 8 MiB 流）上的多核 AVX2 SIMD 精确字节内容搜索吞吐量。
 pub fn bench_avx2_content_search() -> CoreResult<Avx2SearchBench> {
-    let stream_bytes: usize = 8 * 1024 * 1024; // 8 MiB per stream
-    let num_streams: usize = 32; // 256 MiB total
+    let stream_bytes: usize = 8 * 1024 * 1024; // 每条流 8 MiB
+    let num_streams: usize = 32; // 总计 256 MiB
     let total_bytes: u64 = (stream_bytes * num_streams) as u64;
     let needle = b"TraceDesk-AVX2-Forensic-Marker";
 
-    // Build an 8 MiB buffer with 8 markers (32 streams * 8 = 256 total hits).
+    // 构造 8 MiB 缓冲区并写入 8 处标记（32 条流 × 8 = 总计 256 处命中）。
     let mut template = vec![b'A'; stream_bytes];
     for (i, b) in template.iter_mut().enumerate().step_by(64) {
         *b = b'0' + ((i / 64) % 10) as u8;
@@ -1072,7 +1072,7 @@ fn build_comparisons(
     rows
 }
 
-/// Execute the `bench [--json-out <path>]` subcommand.
+/// 执行 `bench [--json-out <path>]` 子命令。
 pub fn run_bench_command(json_out: Option<&Path>) -> CoreResult<RustBenchReport> {
     println!("[1/6] 正在执行真实 evidence/demo.dd 全流程闭环基准...");
     let golden = bench_golden_demo_case()?;
