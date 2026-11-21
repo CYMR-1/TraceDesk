@@ -1,0 +1,6 @@
+[package]
+name = "tracedesk-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tracedesk-engines",
+    "crates/tracedesk-core",
+    "crates/tracedesk-mcp",
+    "crates/tracedesk-cli",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"

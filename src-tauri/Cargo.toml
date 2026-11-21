@@ -1,0 +1,10 @@
+[package]
+name = "tracedesk-desktop"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "tracedesk_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
