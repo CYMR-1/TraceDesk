@@ -1247,75 +1247,71 @@ impl AppState {
         }
     }
 
-    /// Execute an MCP tool callback against `target_folder` (`AuditOrigin::Mcp`), smoothly
-    /// coordinating `case.lock` if `target_folder` is currently open in the desktop UI!
-    pub fn with_mcp_case<T, F>(
-        &self,
-        target_folder: &Path,
-        actor: Option<&str>,
-        work: F,
-    ) -> Result<T, String>
+    /// Coordinate a delegated `tracedesk_mcp::McpServer` call with the active desktop [`Case`].
+    ///
+    /// If any path in `target_folders` matches the case currently open in the desktop UI,
+    /// this temporarily closes the desktop `Case` (releasing `case.lock` and any image handles),
+    /// runs `work()` while holding `case_lock` to prevent concurrent UI mutation, and then
+    /// reopens the desktop `Case` in [`AuditOrigin::Manual`] mode and refreshes [`ViewCache`].
+    pub fn coordinate_mcp_call<T, F>(&self, target_folders: &[PathBuf], work: F) -> T
     where
-        F: FnOnce(&mut Case) -> Result<T, String>,
+        F: FnOnce() -> T,
     {
-        let resolved_target = tracedesk_core::resolve_clean(target_folder);
-        let mut case_guard = self
-            .case_lock
-            .lock()
-            .map_err(|_| "内部状态锁异常".to_string())?;
-
-        let matches_open_case = case_guard
-            .as_ref()
-            .is_some_and(|c| tracedesk_core::resolve_clean(c.folder()) == resolved_target);
-
-        if matches_open_case {
-            let prev_dir_loc = case_guard
-                .as_ref()
-                .and_then(|c| c.directory_location().cloned());
-            // Temporarily close the desktop Case to release case.lock & SourceGuard.
-            if let Some(mut open_case) = case_guard.take() {
-                open_case.close();
-            }
-
-            let mut mcp_case = Case::open(&resolved_target, actor, AuditOrigin::Mcp)
-                .map_err(|e| e.to_string())?;
-            let result = work(&mut mcp_case);
-            mcp_case.close();
-            drop(mcp_case);
-
-            // Re-open the desktop Case in Manual mode and refresh ViewCache.
-            if let Ok(mut reopened) = Case::open(&resolved_target, None, AuditOrigin::Manual) {
-                if reopened.browsing_directories()
-                    && let Some(loc) = prev_dir_loc
-                {
-                    let _ = reopened.browse_directory(
-                        loc.offset,
-                        loc.inode.as_deref(),
-                        &loc.path,
-                        None,
-                    );
-                }
-                if let Ok(mut view) = self.view.write() {
-                    view.sync_from_case(&reopened, true);
-                }
-                *case_guard = Some(reopened);
-            }
-            result
-        } else {
-            // Desktop holds a different case (or no case); open target directly without dropping desktop case.
-            drop(case_guard);
-            let mut mcp_case = Case::open(&resolved_target, actor, AuditOrigin::Mcp)
-                .map_err(|e| match e {
-                    tracedesk_core::CoreError::Locked(_) => format!(
-                        "案件目录 {} 当前已被 TraceDesk 桌面端或其他进程锁定。请先在桌面端关闭该案件或切换至其他案件后再重试。",
-                        resolved_target.display()
-                    ),
-                    other => other.to_string(),
-                })?;
-            let res = work(&mut mcp_case);
-            mcp_case.close();
-            res
+        if target_folders.is_empty() {
+            return work();
         }
+
+        let resolved_targets: Vec<PathBuf> = target_folders
+            .iter()
+            .map(|p| tracedesk_core::resolve_clean(p))
+            .collect();
+
+        let Ok(mut case_guard) = self.case_lock.lock() else {
+            return work();
+        };
+
+        let matched_open_dir = case_guard.as_ref().and_then(|c| {
+            let open_dir = tracedesk_core::resolve_clean(c.folder());
+            resolved_targets
+                .iter()
+                .any(|t| same_case_path(t, &open_dir))
+                .then_some(open_dir)
+        });
+
+        let Some(open_dir) = matched_open_dir else {
+            drop(case_guard);
+            return work();
+        };
+
+        let prev_dir_loc = case_guard
+            .as_ref()
+            .and_then(|c| c.directory_location().cloned());
+
+        // Release desktop case.lock so tracedesk_mcp::CaseService can acquire it cleanly.
+        if let Some(mut open_case) = case_guard.take() {
+            open_case.close();
+        }
+
+        let result = work();
+
+        // Re-open the desktop Case in Manual mode and refresh ViewCache.
+        if let Ok(mut reopened) = Case::open(&open_dir, None, AuditOrigin::Manual) {
+            if reopened.browsing_directories()
+                && let Some(loc) = prev_dir_loc
+            {
+                let _ = reopened.browse_directory(
+                    loc.offset,
+                    loc.inode.as_deref(),
+                    &loc.path,
+                    None,
+                );
+            }
+            if let Ok(mut view) = self.view.write() {
+                view.sync_from_case(&reopened, true);
+            }
+            *case_guard = Some(reopened);
+        }
+        result
     }
 
     /// Build [`McpStatus`] for the given optional port override.
@@ -1430,4 +1426,16 @@ fn discover_mcp_binary(app_paths: &AppPaths) -> String {
 
 pub fn build_deleted_source_note(entry: &InventoryEntry) -> String {
     deleted_source_note(entry).to_string()
+}
+
+fn same_case_path(a: &Path, b: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        a.to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
 }

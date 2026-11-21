@@ -4145,9 +4145,9 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.10.9",
  "tempfile",
- "thiserror",
+ "thiserror 2.0.21",
  "tracedesk-core",
  "tracedesk-engines",
  "zip",
@@ -4188,6 +4188,7 @@ dependencies = [
  "tempfile",
  "tracedesk-core",
  "tracedesk-engines",
+ "tracedesk-mcp",
  "uuid",
 ]
 
@@ -4217,7 +4218,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror",
+ "thiserror 2.0.21",
  "tracedesk-core",
  "tracedesk-engines",
  "uuid",
