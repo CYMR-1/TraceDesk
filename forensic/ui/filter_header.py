@@ -185,7 +185,7 @@ class FilterHeaderView(QHeaderView):
             text_rect = QRect(rect.left() + 8, rect.top(), max(0, rect.width() - 26), rect.height())
             elided = painter.fontMetrics().elidedText(label, Qt.TextElideMode.ElideRight, text_rect.width())
             painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, elided)
-            # 右侧绘制下拉筛选指示图标（激活时实心普鲁士蓝，悬停时普鲁士蓝，默认静默灰蓝）。
+            # 右侧绘制下拉筛选指示图标（激活时实心晴空蓝，悬停时晴空蓝，默认静默灰蓝）。
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             cx = float(rect.right() - 11)
             cy = float(rect.center().y()) + 0.5

@@ -11,7 +11,7 @@
 | `forensic/mcp/` | MCP 服务端业务编排、FastMCP 工具定义与本地 HTTP 托管 |
 | `forensic/features/` | 启用清单、11 个可装配功能模块、按钮和页面 |
 | `forensic/engines/` | TSK 只读适配、分段 EWF、`pytsk3`/`pyewf` 随机读取与 FAT 空间分析 |
-| `forensic/ui/` | PySide6 控制器、Archival Slate & Prussian Ink 主题、委托、窗口、文件树与预览 |
+| `forensic/ui/` | PySide6 控制器、明净瓷白与晴空蓝浅色主题、委托、窗口、文件树与预览 |
 | `forensic/paths.py`、`forensic/assets/` | 统一资源定位、应用徽标与控件矢量图标 |
 | `scripts/`、`tests/` | 开发辅助命令与对应职责的回归测试 |
 | `docs/` | 维护指南、设计与验收说明和验证记录 |
@@ -34,7 +34,7 @@ python -m venv .venv
 
 当前工程已经包含官方 Windows TSK 程序和两份演示镜像，TSK 无需通过 pip 安装。若 TSK 文件丢失，运行 `powershell -File scripts/install_tsk.ps1`，或将环境变量 `TSK_BIN` 指向完整 TSK `bin` 目录。需要保留 DLL 与 licenses，不要只复制四个 exe。
 
-界面统一使用 PySide6 原生控件，采用 **Archival Slate & Prussian Ink** 视觉规范：顶部为深岩青命令带（`#15202E`），下方依次为带 3 px 语义状态指示条的案件保管栏、模块导航标签带（右侧嵌入镜像操作按钮）、日光冷灰/纯白工作区与底部只读遥测状态栏；主色为普鲁士蓝（`#1B4D89`），列表和文件树通过统一渲染委托呈现语义胶囊徽章（现存/已删除/重分配/人工/MCP/MACB 事件）、普鲁士蓝选中导轨和本地高 DPI 矢量图标。文件浏览采用左侧数据源与完整文件树、右上文件列表、右下文本/图片/十六进制预览布局。Qt 6 自动处理高 DPI 和逻辑像素缩放；界面文本按本机可用字体优先选用 `Segoe UI Variable Text` / `Segoe UI` 与 `Microsoft YaHei UI` / `Microsoft YaHei` 混排，字节数、inode、偏移、哈希、十六进制、JSON 与 `fsstat` 统一使用 `Cascadia Mono` / `Cascadia Code` / `Consolas` 等宽字体。树、列表与内容支持滚动，区域之间可以拖动分隔条调整大小。所有 Python 第三方依赖只安装到本项目 `.venv`，使用清华镜像：
+界面统一使用 PySide6 原生控件，采用 **明净瓷白与晴空蓝（Daylight Porcelain & Cerulean Sky）** 浅色视觉规范：顶部为明净瓷白命令带（`#FFFFFF`），下方依次为带 3 px 语义状态指示条的浅冰色案件保管栏（`#F7FAFD`）、薄雾浅蓝模块导航标签带（`#EFF4F9`，右侧嵌入镜像操作按钮）、纯白证据工作区与浅瓷色底栏；主色为晴空蓝（`#2674C4`），列表和文件树通过统一渲染委托呈现柔和浅底语义胶囊徽章（现存/已删除/重分配/人工/MCP/MACB 事件）、晴空蓝选中导轨和本地高 DPI 矢量图标。文件浏览采用左侧数据源与完整文件树、右上文件列表、右下文本/图片/十六进制预览布局。Qt 6 自动处理高 DPI 和逻辑像素缩放；界面文本按本机可用字体优先选用 `Segoe UI Variable Text` / `Segoe UI` 与 `Microsoft YaHei UI` / `Microsoft YaHei` 混排，字节数、inode、偏移、哈希、十六进制、JSON 与 `fsstat` 统一使用 `Cascadia Mono` / `Cascadia Code` / `Consolas` 等宽字体。树、列表与内容支持滚动，区域之间可以拖动分隔条调整大小。所有 Python 第三方依赖只安装到本项目 `.venv`，使用清华镜像：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
@@ -77,7 +77,7 @@ python -m venv .venv
 - 架构、界面规范、评分对应、限制与 AI 参与说明见 [设计与验收说明.md](docs/设计与验收说明.md)。
 - 面向对象结构：`ApplicationLauncher` 管理入口和异常报告，`App` 协调操作，`FeatureRegistry` 按需装配功能模块，`WorkbenchView` / `FileBrowserView` 管理布局和文件树，`DesktopAppearance` / `theme` / `ForensicItemDelegate` / `HexItemDelegate` 管理视觉规范与自定义渲染，`TaskRunner` 管理后台任务，`FilePreview` / `PreviewReader` 分离预览显示与读取，`Case`、`TSK`、`VolumeReader` 负责核心取证业务与只读解析，`CaseService` / `LocalHttpMcpManager` 负责 MCP 编排与本地托管。
 - 主要入口：桌面入口 `main.py`、MCP 入口 `mcp_server.py`、控制器 `forensic/ui/controller.py`、窗口布局 `forensic/ui/workspace.py`、主题与委托 `forensic/ui/theme.py` / `appearance.py` / `delegates.py`、目录树 `forensic/ui/browser.py`、核心案件逻辑 `forensic/core/case.py`、TSK 与 EWF/随机读取适配 `forensic/engines/tsk.py` / `ewf.py` / `random_read.py`；完整模块清单见 [目录结构与维护指南](docs/目录结构.md)。
-- 标题栏、任务栏和工作台左上角使用深普鲁士蓝圆角底、冷蓝磁道圆弧与纯白放大镜准星的“精密取证盘片与准星”徽标（顶部命令带直接由 SVG 按屏幕缩放倍率光栅化），资源位于 `forensic/assets/`。修改 `tracedesk.svg` 后，可运行 `.\.venv\Scripts\python.exe scripts/make_icon.py` 重建 256 px PNG 和 16–256 px 多尺寸 ICO；重启程序生效。
+- 标题栏、任务栏和工作台左上角使用浅冰晴空蓝渐变圆角底、晴空蓝磁道圆弧与纯白镜片准星的“精密取证盘片与准星”徽标（顶部命令带直接由 SVG 按屏幕缩放倍率光栅化），资源位于 `forensic/assets/`。修改 `tracedesk.svg` 后，可运行 `.\.venv\Scripts\python.exe scripts/make_icon.py` 重建 256 px PNG 和 16–256 px 多尺寸 ICO；重启程序生效。
 - `.\.venv\Scripts\python.exe scripts/package.py` 生成 `dist/学号_姓名_ForensicTool.zip`，提交前将文件名中的姓名和学号替换为本人信息。包内不含本地运行案件、私人证据和 `.venv`，解压后可重新运行演示脚本。
 
 ## 大容量镜像

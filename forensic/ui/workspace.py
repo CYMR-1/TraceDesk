@@ -17,11 +17,11 @@ from .tabs import TabbedView
 from .views import ReadOnlyTextPanel
 
 _ACTION_ICONS = {
-    'help': ('help', '#C6D4E3'),
-    'mcp': ('mcp', '#C6D4E3'),
-    'new_case': ('case_new', theme.HEADER_TEXT),
-    'open_case': ('case_open', theme.HEADER_TEXT),
-    'report': ('report', theme.HEADER_TEXT),
+    'help': ('help', theme.HEADER_MUTED),
+    'mcp': ('mcp', theme.HEADER_MUTED),
+    'new_case': ('case_new', theme.HEADER_ICON),
+    'open_case': ('case_open', theme.HEADER_ICON),
+    'report': ('report', theme.HEADER_ICON),
     'export_bundle': ('bundle', '#FFFFFF'),
     'load': ('import_disk', '#FFFFFF'),
     'verify': ('verify', theme.TEXT_SECONDARY),
@@ -46,7 +46,7 @@ class WorkbenchView(QObject):
         layout.setContentsMargins(WINDOW_MARGIN, WINDOW_MARGIN, WINDOW_MARGIN, WINDOW_MARGIN)
         layout.setSpacing(0)
 
-        # 顶部深岩青命令带（48px）
+        # 顶部明净瓷白命令带（48px）
         self.header_bar = QFrame()
         self.header_bar.setObjectName('workbenchHeader')
         self.header_bar.setFixedHeight(HEADER_HEIGHT)

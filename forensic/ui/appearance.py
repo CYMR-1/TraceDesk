@@ -1,4 +1,4 @@
-"""Qt 桌面外观：Archival Slate & Prussian Ink 配色、调色板、模块化 QSS 与原生高 DPI。"""
+"""Qt 桌面外观：明净瓷白与晴空蓝（Daylight Porcelain & Cerulean Sky）浅色调色板、模块化 QSS 与原生高 DPI。"""
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
@@ -27,7 +27,7 @@ def build_stylesheet() -> str:
             color: {t.TEXT_PRIMARY};
         }}
         QLabel[role="section"] {{
-            color: #1E2B3A;
+            color: {t.TEXT_PRIMARY};
             font-size: 13px;
             font-weight: 600;
         }}
@@ -65,7 +65,7 @@ def build_stylesheet() -> str:
             color: {t.ACCENT_SOFT_TEXT};
         }}
         QLabel#breadcrumb {{
-            color: #4A596A;
+            color: {t.TEXT_SECONDARY};
             font-size: 11.5px;
             padding: 1px 0;
         }}
@@ -74,7 +74,7 @@ def build_stylesheet() -> str:
         f'''
         QLabel#caseSummary {{
             background: {t.CHROME_BG};
-            color: #2B3948;
+            color: {t.TEXT_SECONDARY};
             border: none;
             border-bottom: 1px solid {t.BORDER_DEFAULT};
             border-left: 3px solid {t.BORDER_STRONG};
@@ -84,7 +84,7 @@ def build_stylesheet() -> str:
         QFrame#caseCustodyBar {{
             background: {t.CHROME_BG};
             border: none;
-            border-bottom: 1px solid {t.BORDER_DEFAULT};
+            border-bottom: 1px solid {t.BORDER_PANE};
             border-left: 3px solid {t.BORDER_STRONG};
             min-height: 36px;
         }}
@@ -108,7 +108,7 @@ def build_stylesheet() -> str:
             border: none;
             border-radius: 0;
             padding: 7px 14px;
-            color: #2B3948;
+            color: {t.TEXT_SECONDARY};
             font-size: 12px;
         }}
         QFrame#caseCustodyBar[custodyState="idle"] QLabel#caseSummary {{
@@ -184,12 +184,12 @@ def build_stylesheet() -> str:
             border: none;
         }}
         QLabel#previewEmptyTitle {{
-            color: #4A596A;
+            color: {t.TEXT_SECONDARY};
             font-size: 13px;
             font-weight: 500;
         }}
         QLabel#previewEmptyHint {{
-            color: #7A8899;
+            color: {t.TEXT_MUTED};
             font-size: 11.5px;
         }}
         QFrame#workbenchFooter {{
@@ -240,7 +240,7 @@ def build_stylesheet() -> str:
         f'''
         QFrame[role="card"] {{
             background: {t.SURFACE_SUBTLE};
-            border: 1px solid #D5DCE4;
+            border: 1px solid {t.BORDER_DEFAULT};
             border-radius: 8px;
         }}
         QFrame[bannerState="warning"] {{
@@ -352,12 +352,12 @@ def build_stylesheet() -> str:
             border-color: {t.ACCENT_PRESSED};
         }}
         QPushButton[role="accent"]:focus, QPushButton[accent="true"]:focus {{
-            border-color: #0B2545;
+            border-color: {t.ACCENT_PRESSED};
         }}
         QPushButton[role="accent"]:disabled, QPushButton[accent="true"]:disabled {{
-            background: #D7E1EC;
-            color: #8A9BB0;
-            border-color: #D7E1EC;
+            background: {t.HEADER_PRIMARY_DISABLED_BG};
+            color: {t.HEADER_PRIMARY_DISABLED_FG};
+            border-color: {t.HEADER_PRIMARY_DISABLED_BORDER};
         }}
         QPushButton[role="soft"], QPushButton[role="violet"] {{
             background: {t.ACCENT_SOFT_BG};
@@ -366,11 +366,11 @@ def build_stylesheet() -> str:
             font-weight: 500;
         }}
         QPushButton[role="soft"]:hover, QPushButton[role="violet"]:hover {{
-            background: #DCEAF8;
-            border-color: #9BBEE3;
+            background: #DFEEFD;
+            border-color: #9BC4EE;
         }}
         QPushButton[role="soft"]:pressed, QPushButton[role="violet"]:pressed {{
-            background: #CEE2F5;
+            background: #CFE5FC;
             border-color: {t.ACCENT};
         }}
         QPushButton[role="soft"]:disabled, QPushButton[role="violet"]:disabled {{
@@ -499,10 +499,10 @@ def build_stylesheet() -> str:
             border-color: {t.ACCENT_PRESSED};
         }}
         QPushButton#exportOk:focus {{
-            border-color: #0B2545;
+            border-color: {t.ACCENT_PRESSED};
         }}
         ''',
-        # 6. Signature Dark Command Ribbon (#workbenchHeader) — scoped strictly & after generic buttons
+        # 6. Light Porcelain Command Ribbon (#workbenchHeader) — scoped strictly & after generic buttons
         f'''
         QFrame#workbenchHeader {{
             background: {t.HEADER_BG};
@@ -545,23 +545,25 @@ def build_stylesheet() -> str:
         QFrame#workbenchHeader QPushButton[role="violet"]:hover,
         QFrame#workbenchHeader QPushButton[role="soft"]:hover {{
             background: {t.HEADER_BTN_HOVER};
-            border-color: #466080;
+            border-color: {t.HEADER_BTN_HOVER_BORDER};
+            color: {t.ACCENT_SOFT_TEXT};
         }}
         QFrame#workbenchHeader QPushButton:pressed,
         QFrame#workbenchHeader QPushButton[role="violet"]:pressed,
         QFrame#workbenchHeader QPushButton[role="soft"]:pressed {{
             background: {t.HEADER_BTN_PRESSED};
-            border-color: #324761;
+            border-color: {t.ACCENT};
+            color: {t.SURFACE_SELECTED_TEXT};
         }}
         QFrame#workbenchHeader QPushButton:focus {{
-            border-color: #6BA9E8;
+            border-color: {t.BORDER_FOCUS};
         }}
         QFrame#workbenchHeader QPushButton:disabled,
         QFrame#workbenchHeader QPushButton[role="violet"]:disabled,
         QFrame#workbenchHeader QPushButton[role="soft"]:disabled {{
-            background: #1A2736;
-            color: #5E738A;
-            border-color: #26364A;
+            background: {t.SURFACE_DISABLED};
+            color: {t.TEXT_DISABLED};
+            border-color: {t.BORDER_SUBTLE};
         }}
         QFrame#workbenchHeader QPushButton[role="pager"],
         QFrame#workbenchHeader QPushButton[role="ghost"] {{
@@ -578,17 +580,17 @@ def build_stylesheet() -> str:
         QFrame#workbenchHeader QPushButton[role="ghost"]:hover {{
             background: {t.HEADER_GHOST_HOVER};
             color: {t.HEADER_TEXT};
-            border-color: #2E425A;
+            border-color: {t.HEADER_GHOST_HOVER_BORDER};
         }}
         QFrame#workbenchHeader QPushButton[role="pager"]:pressed,
         QFrame#workbenchHeader QPushButton[role="ghost"]:pressed {{
             background: {t.HEADER_BTN_PRESSED};
-            color: {t.HEADER_TEXT};
+            color: {t.SURFACE_SELECTED_TEXT};
         }}
         QFrame#workbenchHeader QPushButton[actionKey="export_bundle"] {{
             background: {t.HEADER_PRIMARY_BG};
             color: #FFFFFF;
-            border: 1px solid #3574BA;
+            border: 1px solid {t.HEADER_PRIMARY_BORDER};
             border-radius: 5px;
             padding: 4px 12px;
             min-height: 18px;
@@ -596,16 +598,18 @@ def build_stylesheet() -> str:
         }}
         QFrame#workbenchHeader QPushButton[actionKey="export_bundle"]:hover {{
             background: {t.HEADER_PRIMARY_HOVER};
-            border-color: #4A89CF;
+            border-color: {t.HEADER_PRIMARY_HOVER};
+            color: #FFFFFF;
         }}
         QFrame#workbenchHeader QPushButton[actionKey="export_bundle"]:pressed {{
             background: {t.HEADER_PRIMARY_PRESSED};
-            border-color: #1D518C;
+            border-color: {t.HEADER_PRIMARY_PRESSED};
+            color: #FFFFFF;
         }}
         QFrame#workbenchHeader QPushButton[actionKey="export_bundle"]:disabled {{
-            background: #1E3550;
-            color: #6E88A6;
-            border-color: #284466;
+            background: {t.HEADER_PRIMARY_DISABLED_BG};
+            color: {t.HEADER_PRIMARY_DISABLED_FG};
+            border-color: {t.HEADER_PRIMARY_DISABLED_BORDER};
         }}
         ''',
         # 7. Inputs: QLineEdit, QComboBox, QSpinBox, EncodingChoice
@@ -761,7 +765,7 @@ def build_stylesheet() -> str:
         }}
         QTabBar#moduleTabs::tab {{
             background: transparent;
-            color: #4A596A;
+            color: {t.TEXT_SECONDARY};
             padding: 0 14px;
             min-height: 35px;
             border: none;
@@ -771,12 +775,12 @@ def build_stylesheet() -> str:
             font-weight: 500;
         }}
         QTabBar#moduleTabs::tab:hover:!selected {{
-            background: #DDE4EC;
+            background: {t.SURFACE_HOVER};
             color: {t.TEXT_PRIMARY};
         }}
         QTabBar#moduleTabs::tab:selected {{
             background: transparent;
-            color: {t.HEADER_BG};
+            color: {t.ACCENT_SOFT_TEXT};
             border: none;
             border-bottom: 2.5px solid {t.ACCENT};
             font-weight: 600;
@@ -797,7 +801,7 @@ def build_stylesheet() -> str:
             font-weight: 500;
         }}
         QTabBar#previewTabs::tab:hover:!selected {{
-            background: #ECF1F7;
+            background: {t.SURFACE_HOVER};
             color: {t.TEXT_PRIMARY};
         }}
         QTabBar#previewTabs::tab:selected {{
@@ -968,7 +972,7 @@ def build_stylesheet() -> str:
         QProgressBar {{
             border: none;
             border-radius: 2px;
-            background: #D5DCE4;
+            background: #DDE7F2;
             max-height: 5px;
         }}
         QProgressBar::chunk {{
@@ -986,21 +990,21 @@ def build_stylesheet() -> str:
             margin: 0;
         }}
         QScrollBar::handle:vertical {{
-            background: #C4CEDB;
+            background: #CBD7E5;
             min-height: 28px;
             border: 2px solid transparent;
             border-radius: 5px;
             background-clip: padding;
         }}
         QScrollBar::handle:horizontal {{
-            background: #C4CEDB;
+            background: #CBD7E5;
             min-width: 28px;
             border: 2px solid transparent;
             border-radius: 5px;
             background-clip: padding;
         }}
         QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
-            background: #99A8BA;
+            background: #9DB2C9;
         }}
         QScrollBar::handle:vertical:pressed, QScrollBar::handle:horizontal:pressed {{
             background: {t.ACCENT};
@@ -1013,11 +1017,11 @@ def build_stylesheet() -> str:
             background: none;
         }}
         QToolTip {{
-            background: {t.HEADER_BG};
-            color: {t.HEADER_TEXT};
-            border: 1px solid {t.HEADER_BTN_BORDER};
-            border-radius: 4px;
-            padding: 5px 8px;
+            background: {t.SURFACE_BG};
+            color: {t.TEXT_PRIMARY};
+            border: 1px solid {t.BORDER_DEFAULT};
+            border-radius: 5px;
+            padding: 5px 9px;
             font-size: 12px;
         }}
         QMenu {{
@@ -1093,8 +1097,8 @@ class DesktopAppearance:
             QPalette.ColorRole.ButtonText: theme.TEXT_PRIMARY,
             QPalette.ColorRole.Highlight: theme.SURFACE_SELECTED,
             QPalette.ColorRole.HighlightedText: theme.SURFACE_SELECTED_TEXT,
-            QPalette.ColorRole.ToolTipBase: theme.HEADER_BG,
-            QPalette.ColorRole.ToolTipText: theme.HEADER_TEXT,
+            QPalette.ColorRole.ToolTipBase: theme.SURFACE_BG,
+            QPalette.ColorRole.ToolTipText: theme.TEXT_PRIMARY,
             QPalette.ColorRole.Link: theme.ACCENT,
             QPalette.ColorRole.LinkVisited: theme.SYSTEM_FG,
             QPalette.ColorRole.PlaceholderText: theme.TEXT_MUTED,

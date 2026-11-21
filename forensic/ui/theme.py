@@ -1,109 +1,116 @@
-"""Archival Slate & Prussian Ink 设计令牌、安全字体构造与 HTML 档案样式。"""
+"""明净瓷白与晴空蓝（Daylight Porcelain & Cerulean Sky）浅色设计令牌、安全字体构造与 HTML 档案样式。"""
 from typing import NamedTuple
 
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication
 
 # ---------------------------------------------------------------------------
-# 1. Core Palette Tokens — Command Ribbon (Dark Slate-Navy Top Bar)
+# 1. Core Palette Tokens — Light Command Ribbon (Crisp Porcelain Top Bar)
 # ---------------------------------------------------------------------------
-HEADER_BG = '#15202E'
-HEADER_BORDER = '#0E1722'
-HEADER_DIVIDER = '#2A3B50'
-HEADER_TEXT = '#F3F6FA'
-HEADER_MUTED = '#91A4B8'
-HEADER_BTN_BG = '#1F2F42'
-HEADER_BTN_BORDER = '#324761'
-HEADER_BTN_HOVER = '#293D55'
-HEADER_BTN_PRESSED = '#1A2738'
-HEADER_GHOST_HOVER = '#223347'
-HEADER_PRIMARY_BG = '#2563A8'
-HEADER_PRIMARY_HOVER = '#2E72BE'
-HEADER_PRIMARY_PRESSED = '#1D518C'
+HEADER_BG = '#FFFFFF'
+HEADER_BORDER = '#DFE7F0'
+HEADER_DIVIDER = '#E2EAF2'
+HEADER_TEXT = '#1E293B'
+HEADER_ICON = '#3B5570'
+HEADER_MUTED = '#5E7288'
+HEADER_BTN_BG = '#F7FAFD'
+HEADER_BTN_BORDER = '#D4DFEB'
+HEADER_BTN_HOVER = '#EDF5FD'
+HEADER_BTN_HOVER_BORDER = '#AEC8E4'
+HEADER_BTN_PRESSED = '#E1EFFC'
+HEADER_GHOST_HOVER = '#F1F6FB'
+HEADER_GHOST_HOVER_BORDER = '#DDE7F2'
+HEADER_PRIMARY_BG = '#2674C4'
+HEADER_PRIMARY_BORDER = '#2067B0'
+HEADER_PRIMARY_HOVER = '#1F66B0'
+HEADER_PRIMARY_PRESSED = '#185494'
+HEADER_PRIMARY_DISABLED_BG = '#D6E6F8'
+HEADER_PRIMARY_DISABLED_FG = '#7FA5CF'
+HEADER_PRIMARY_DISABLED_BORDER = '#C7DCF4'
 
 # ---------------------------------------------------------------------------
-# 2. Core Palette Tokens — Daylight Optical Surfaces
+# 2. Core Palette Tokens — Daylight Porcelain Surfaces
 # ---------------------------------------------------------------------------
-CANVAS_BG = '#E8EDF3'
-CHROME_BG = '#F3F5F8'
-CHROME_SUBTLE = '#EBEEF3'
+CANVAS_BG = '#EFF4F9'
+CHROME_BG = '#F7FAFD'
+CHROME_SUBTLE = '#F2F6FB'
 SURFACE_BG = '#FFFFFF'
-SURFACE_SUBTLE = '#F8FAFC'
-SURFACE_TINT = '#FAFBFD'
-SURFACE_HOVER = '#EDF3FA'
-SURFACE_SELECTED = '#DFECF9'
-SURFACE_SELECTED_INACTIVE = '#E6EEF8'
-SURFACE_SELECTED_TEXT = '#10345E'
-SURFACE_DISABLED = '#F3F5F8'
-IMAGE_BACKDROP = '#EEF2F6'
+SURFACE_SUBTLE = '#FAFCFE'
+SURFACE_TINT = '#FCFDFE'
+SURFACE_HOVER = '#EEF5FD'
+SURFACE_SELECTED = '#E3F0FD'
+SURFACE_SELECTED_INACTIVE = '#EBF3FC'
+SURFACE_SELECTED_TEXT = '#144880'
+SURFACE_DISABLED = '#F4F7FA'
+IMAGE_BACKDROP = '#F2F6FA'
 
 # ---------------------------------------------------------------------------
 # 3. Core Palette Tokens — Borders & Structural Hairlines
 # ---------------------------------------------------------------------------
-BORDER_SUBTLE = '#E3E8EF'
-BORDER_HAIRLINE = '#E2E7EE'
-BORDER_PANE = '#DCE2EA'
-BORDER_DEFAULT = '#CFD7E2'
-BORDER_STRONG = '#A7B4C4'
-BORDER_FOCUS = '#1B4D89'
-BORDER_SOFT_RULE = '#EDF0F5'
+BORDER_SUBTLE = '#E6ECF3'
+BORDER_HAIRLINE = '#E4EBF2'
+BORDER_PANE = '#DFE7F0'
+BORDER_DEFAULT = '#D3DDE8'
+BORDER_STRONG = '#AEBFD2'
+BORDER_FOCUS = '#2674C4'
+BORDER_SOFT_RULE = '#EFF3F8'
 
 # ---------------------------------------------------------------------------
 # 4. Core Palette Tokens — Text Hierarchy & Technical Readouts
 # ---------------------------------------------------------------------------
-TEXT_PRIMARY = '#161E29'
-TEXT_SECONDARY = '#3D4C5E'
-TEXT_MUTED = '#637385'
-TEXT_DISABLED = '#99A5B3'
-HEX_OFFSET_FG = '#365578'
-HEX_NULL_FG = '#A2AEBC'
-HEX_NULL_SELECTED_FG = '#6B87A8'
-HEX_CHAR_FG = '#2E3B4A'
-HEX_DOT_FG = '#ABB6C4'
+TEXT_PRIMARY = '#1E293B'
+TEXT_SECONDARY = '#45586E'
+TEXT_MUTED = '#60748A'
+TEXT_DISABLED = '#99AABF'
+HEX_OFFSET_FG = '#356391'
+HEX_NULL_FG = '#A8B5C4'
+HEX_NULL_SELECTED_FG = '#6B8FB8'
+HEX_CHAR_FG = '#334559'
+HEX_DOT_FG = '#B2BECA'
 
 # ---------------------------------------------------------------------------
-# 5. Core Palette Tokens — Primary Accent (Prussian Ink)
+# 5. Core Palette Tokens — Primary Accent (Cerulean Sky)
 # ---------------------------------------------------------------------------
-ACCENT = '#1B4D89'
-ACCENT_HOVER = '#153F72'
-ACCENT_PRESSED = '#10325B'
-ACCENT_SOFT_BG = '#EBF2FA'
-ACCENT_SOFT_BORDER = '#C0D6EE'
-ACCENT_SOFT_TEXT = '#154175'
-ACCENT_FILTER_BG = '#E5EFFA'
-HEADER_HOVER_BG = '#E9EFF6'
+ACCENT = '#2674C4'
+ACCENT_HOVER = '#1E63AC'
+ACCENT_PRESSED = '#175291'
+ACCENT_SOFT_BG = '#ECF5FF'
+ACCENT_SOFT_BORDER = '#BDD9F7'
+ACCENT_SOFT_TEXT = '#1B5A9D'
+ACCENT_FILTER_BG = '#E5F1FE'
+HEADER_HOVER_BG = '#EBF3FB'
 
 # Header cell tokens (shared with FilterHeaderView)
 HEADER_CELL_BG = CHROME_BG
 HEADER_CELL_HOVER_BG = HEADER_HOVER_BG
 HEADER_CELL_ACTIVE_BG = ACCENT_FILTER_BG
-HEADER_CELL_FG = '#4A596A'
+HEADER_CELL_FG = '#4C6075'
 HEADER_CELL_BORDER = BORDER_DEFAULT
 HEADER_CELL_DIVIDER = BORDER_HAIRLINE
 
 # ---------------------------------------------------------------------------
 # 6. Forensic Semantic Status Tokens
 # ---------------------------------------------------------------------------
-OK_FG = '#165E37'
-OK_BG = '#ECF7F1'
-OK_BORDER = '#BCE2CD'
+OK_FG = '#157347'
+OK_BG = '#EAF8F0'
+OK_BORDER = '#B6E6CB'
 
-DANGER_FG = '#B42318'
-DANGER_BG = '#FDF1F0'
-DANGER_BORDER = '#F4C5C1'
+DANGER_FG = '#B92D22'
+DANGER_BG = '#FEF0EF'
+DANGER_BORDER = '#F6C6C2'
 DELETED = DANGER_FG
 
-WARN_FG = '#8E4F0A'
-WARN_BG = '#FEF6E8'
-WARN_BORDER = '#ECD19F'
+WARN_FG = '#94540A'
+WARN_BG = '#FFF7E6'
+WARN_BORDER = '#F0D59C'
 
-SYSTEM_FG = '#52369B'
-SYSTEM_BG = '#F3EFFB'
-SYSTEM_BORDER = '#D6C9EE'
+SYSTEM_FG = '#5B40A8'
+SYSTEM_BG = '#F4F0FD'
+SYSTEM_BORDER = '#D8CBF5'
 
-NEUTRAL_FG = '#425263'
-NEUTRAL_BG = '#EEF1F5'
-NEUTRAL_BORDER = '#D4DCE5'
+NEUTRAL_FG = '#485A6E'
+NEUTRAL_BG = '#F1F5F9'
+NEUTRAL_BORDER = '#D6E0EB'
 
 
 class PillStyle(NamedTuple):
@@ -308,7 +315,7 @@ body {{
 h2 {{
     font-size: 15px;
     font-weight: 700;
-    color: {HEADER_BG};
+    color: {TEXT_PRIMARY};
     margin-top: 0px;
     margin-bottom: 3px;
 }}
@@ -342,20 +349,20 @@ h3 {{
 table {{
     border-collapse: collapse;
     width: 100%;
-    border: 1px solid #DDE3EC;
+    border: 1px solid {BORDER_PANE};
     margin-top: 0px;
     margin-bottom: 8px;
 }}
 td {{
     background-color: {SURFACE_BG};
     color: {TEXT_PRIMARY};
-    border: 1px solid #E5EAF1;
+    border: 1px solid {BORDER_SUBTLE};
     padding: 6px 10px;
     vertical-align: top;
 }}
 td.key {{
     width: 168px;
-    background-color: #F4F6F9;
+    background-color: {CHROME_BG};
     color: {TEXT_SECONDARY};
     font-weight: 600;
 }}
@@ -366,7 +373,7 @@ td.val {{
 .mono, code {{
     font-family: "Cascadia Mono", "Consolas", monospace;
     font-size: 12px;
-    color: #1E2E40;
+    color: #243952;
 }}
 .muted {{
     color: {TEXT_MUTED};
@@ -406,7 +413,7 @@ body {{
     margin: 0px;
 }}
 h1, h2 {{
-    color: {HEADER_BG};
+    color: {TEXT_PRIMARY};
     font-weight: 700;
     margin-top: 4px;
     margin-bottom: 8px;
@@ -432,19 +439,19 @@ li {{
     line-height: 155%;
 }}
 strong, b {{
-    color: {HEADER_BG};
+    color: {TEXT_PRIMARY};
     font-weight: 600;
 }}
 code {{
     font-family: "Cascadia Mono", "Consolas", monospace;
     font-size: 12px;
-    background-color: #F1F4F8;
+    background-color: {ACCENT_SOFT_BG};
     color: {ACCENT_SOFT_TEXT};
 }}
 pre {{
     font-family: "Cascadia Mono", "Consolas", monospace;
     font-size: 12px;
-    background-color: #F4F6F9;
+    background-color: {CHROME_BG};
     color: {TEXT_PRIMARY};
     border: 1px solid {BORDER_PANE};
     padding: 8px 10px;

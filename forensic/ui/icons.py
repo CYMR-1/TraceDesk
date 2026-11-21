@@ -9,12 +9,12 @@ _OUTLINE_CACHE: dict[tuple[int, str], QIcon] = {}
 _UI_ICON_CACHE: dict[tuple[int, str, str, int, str | None], QIcon] = {}
 
 _OUTLINE_PALETTE = {
-    'folder': ('#9E6919', '#FBF1DC'),
-    'disk': ('#1B4D89', '#E6F0FA'),
-    'file': ('#3B556E', '#EEF3F8'),
-    'image': ('#9A3B5B', '#FAECF1'),
-    'table': ('#1D6942', '#EAF6EF'),
-    'system': ('#52369B', '#F2EEFA'),
+    'folder': ('#B4781E', '#FEF5E2'),
+    'disk': ('#2674C4', '#EAF4FF'),
+    'file': ('#4A6682', '#F2F6FA'),
+    'image': ('#B4466B', '#FDF0F5'),
+    'table': ('#1F7A4D', '#ECF9F2'),
+    'system': ('#6447B3', '#F4F0FD'),
 }
 
 

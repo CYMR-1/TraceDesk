@@ -27,7 +27,7 @@ def _draw_item_background(style: QStyle, opt: QStyleOptionViewItem, painter: QPa
 
 
 class ForensicItemDelegate(QStyledItemDelegate):
-    """统一的取证表格/文件树渲染委托：语义胶囊徽章、等宽数字列、静默占位与普鲁士蓝选中导轨。"""
+    """统一的取证表格/文件树渲染委托：语义胶囊徽章、等宽数字列、静默占位与晴空蓝选中导轨。"""
 
     def __init__(
         self,
@@ -109,7 +109,7 @@ class ForensicItemDelegate(QStyledItemDelegate):
                 opt.palette.setColor(QPalette.ColorRole.Text, muted_color)
                 opt.palette.setColor(QPalette.ColorRole.WindowText, muted_color)
             elif col in self._subtle_columns:
-                subtle_color = QColor('#47586B')
+                subtle_color = QColor(theme.TEXT_SECONDARY)
                 opt.palette.setColor(QPalette.ColorRole.Text, subtle_color)
                 opt.palette.setColor(QPalette.ColorRole.WindowText, subtle_color)
 
@@ -182,7 +182,7 @@ class HexItemDelegate(QStyledItemDelegate):
             if is_selected:
                 bg = QColor(theme.SURFACE_SELECTED)
             elif is_hovered:
-                bg = QColor('#EBF1F8')
+                bg = QColor(theme.SURFACE_HOVER)
             else:
                 bg = QColor(theme.CHROME_BG)
             painter.fillRect(rect, bg)
@@ -226,11 +226,11 @@ class HexItemDelegate(QStyledItemDelegate):
             # 含中文、印度系文字或其它非 ASCII 字符（除不可打印占位符 '·' 外）时，完全交由 Qt 原生整形绘制。
             if any(ord(ch) > 127 and ch != '·' for ch in text):
                 super().paint(painter, opt, index)
-                painter.fillRect(QRect(rect.left(), rect.top(), 1, rect.height()), QColor('#E8EDF3'))
+                painter.fillRect(QRect(rect.left(), rect.top(), 1, rect.height()), QColor(theme.BORDER_SUBTLE))
                 return
 
             _draw_item_background(style, opt, painter)
-            painter.fillRect(QRect(rect.left(), rect.top(), 1, rect.height()), QColor('#E8EDF3'))
+            painter.fillRect(QRect(rect.left(), rect.top(), 1, rect.height()), QColor(theme.BORDER_SUBTLE))
             if not text:
                 return
             painter.save()
