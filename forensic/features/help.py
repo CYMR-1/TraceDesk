@@ -1,6 +1,13 @@
 """工作台内的分主题操作说明。"""
-from PySide6.QtWidgets import QComboBox, QDialog, QHBoxLayout, QLabel, QPushButton, QTextBrowser, QVBoxLayout
+from html import escape
+import re
 
+from PySide6.QtWidgets import (
+    QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QTextBrowser, QVBoxLayout,
+)
+
+from ..ui import theme
+from ..ui.metrics import CONTROL_GAP
 from .api import Action, Feature
 
 
@@ -51,35 +58,132 @@ GUIDE_PAGES = (
 )
 
 
+_INLINE_TOKEN = re.compile(r'`([^`]+)`|\*\*([^*]+)\*\*')
+
+
+def _format_inline(text: str) -> str:
+    parts = []
+    cursor = 0
+    for match in _INLINE_TOKEN.finditer(text):
+        if match.start() > cursor:
+            parts.append(escape(text[cursor:match.start()]))
+        code_text, bold_text = match.groups()
+        if code_text is not None:
+            parts.append(f'<code>&nbsp;{escape(code_text)}&nbsp;</code>')
+        else:
+            parts.append(f'<strong>{escape(bold_text)}</strong>')
+        cursor = match.end()
+    if cursor < len(text):
+        parts.append(escape(text[cursor:]))
+    return ''.join(parts)
+
+
+def _guide_html(title: str, markdown_text: str) -> str:
+    """将内置分步操作说明转换为语义 HTML，使 theme.GUIDE_CSS 完整生效。"""
+    blocks = [f'<h2>{escape(title)}</h2>']
+    list_tag = None
+    in_code = False
+    code_lines = []
+
+    def close_list():
+        nonlocal list_tag
+        if list_tag is not None:
+            blocks.append(f'</{list_tag}>')
+            list_tag = None
+
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.rstrip()
+        if line.startswith('```'):
+            if in_code:
+                blocks.append(f'<pre>{escape(chr(10).join(code_lines))}</pre>')
+                code_lines = []
+                in_code = False
+            else:
+                close_list()
+                in_code = True
+            continue
+        if in_code:
+            code_lines.append(line)
+            continue
+        stripped = line.strip()
+        if not stripped:
+            close_list()
+            continue
+        ordered = re.match(r'^(\d+)\.\s+(.*)$', stripped)
+        if ordered:
+            if list_tag != 'ol':
+                close_list()
+                blocks.append('<ol>')
+                list_tag = 'ol'
+            blocks.append(f'<li>{_format_inline(ordered.group(2))}</li>')
+            continue
+        if stripped.startswith('- '):
+            if list_tag != 'ul':
+                close_list()
+                blocks.append('<ul>')
+                list_tag = 'ul'
+            blocks.append(f'<li>{_format_inline(stripped[2:])}</li>')
+            continue
+        close_list()
+        blocks.append(f'<p>{_format_inline(stripped)}</p>')
+
+    if in_code and code_lines:
+        blocks.append(f'<pre>{escape(chr(10).join(code_lines))}</pre>')
+    close_list()
+    return '\n'.join(blocks)
+
+
 class GuideDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.setWindowTitle('操作说明 · TraceDesk')
-        self.resize(720, 500)
+        self.resize(780, 540)
         layout = QVBoxLayout(self)
-        navigation = QHBoxLayout()
-        topics = QComboBox()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        header_bar = QFrame(self)
+        header_bar.setObjectName('dialogHeaderBar')
+        navigation = QHBoxLayout(header_bar)
+        navigation.setContentsMargins(16, 10, 16, 10)
+        navigation.setSpacing(10)
+        topics = QComboBox(header_bar)
         topics.addItems([title for title, _ in GUIDE_PAGES])
-        label = QLabel('操作主题')
+        label = QLabel('操作主题', header_bar)
+        label.setProperty('role', 'section')
         label.setBuddy(topics)
         navigation.addWidget(label)
         navigation.addWidget(topics, 1)
-        layout.addLayout(navigation)
-        body = QTextBrowser()
-        layout.addWidget(body)
-        controls = QHBoxLayout()
-        position = QLabel()
+        layout.addWidget(header_bar)
+
+        body = QTextBrowser(self)
+        body.setProperty('flush', True)
+        body.setOpenExternalLinks(False)
+        body.document().setDocumentMargin(22)
+        body.document().setDefaultStyleSheet(theme.GUIDE_CSS)
+        layout.addWidget(body, 1)
+
+        footer_bar = QFrame(self)
+        footer_bar.setObjectName('dialogFooterBar')
+        controls = QHBoxLayout(footer_bar)
+        controls.setContentsMargins(16, 10, 16, 10)
+        controls.setSpacing(CONTROL_GAP)
+        position = QLabel(footer_bar)
+        position.setProperty('role', 'muted')
         controls.addWidget(position)
-        controls.addStretch()
-        back = QPushButton('上一步')
-        forward = QPushButton('下一步')
-        close = QPushButton('关闭')
+        controls.addStretch(1)
+        back = QPushButton('上一步', footer_bar)
+        forward = QPushButton('下一步', footer_bar)
+        forward.setProperty('role', 'soft')
+        close = QPushButton('关闭', footer_bar)
         for button in (back, forward, close):
+            button.setAutoDefault(False)
             controls.addWidget(button)
-        layout.addLayout(controls)
+        layout.addWidget(footer_bar)
 
         def show_step(index):
-            body.setMarkdown(GUIDE_PAGES[index][1])
+            title, content = GUIDE_PAGES[index]
+            body.setHtml(_guide_html(title, content))
             body.verticalScrollBar().setValue(0)
             position.setText(f'第 {index + 1} / {len(GUIDE_PAGES)} 页')
             back.setEnabled(index > 0)

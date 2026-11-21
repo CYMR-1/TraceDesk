@@ -2,11 +2,22 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout,
-    QInputDialog, QLineEdit, QWidget,
+    QInputDialog, QLineEdit, QVBoxLayout, QWidget,
 )
+
+from . import theme
+from .metrics import CONTROL_GAP, DIALOG_MARGIN
 
 
 RAW_IMAGE_FILTER = 'RAW 或 EWF 首段 (*.dd *.raw *.img *.ima *.bin *.dsk *.image *.flp *.vfd *.E01 *.e01)'
+
+_SOURCE_PLACEHOLDERS = {
+    'evidence_id': '例如：EVID-01',
+    'source': '例如：移交单位或扣押清单编号',
+    'acquired': '例如：2026-01-12 10:30 UTC+8',
+    'tool': '例如：FTK Imager 4.7 / ddrescue',
+    'expected_sha256': '64 位十六进制 SHA-256 摘要（可选）',
+}
 
 
 def cancel_on_left(dialog):
@@ -23,7 +34,8 @@ def cancel_on_left(dialog):
     footer = QWidget(dialog)
     footer.setObjectName('dialogFooter')
     row = QHBoxLayout(footer)
-    row.setContentsMargins(0, 0, 0, 0)
+    row.setContentsMargins(0, 8, 0, 0)
+    row.setSpacing(CONTROL_GAP)
     box.removeButton(cancel)
     cancel.setText('取消')
     cancel.setAutoDefault(False)
@@ -31,6 +43,13 @@ def cancel_on_left(dialog):
     row.addWidget(cancel)
     row.addStretch(1)
     box.setOrientation(Qt.Orientation.Horizontal)
+    for button in box.buttons():
+        if box.buttonRole(button) in (
+            QDialogButtonBox.ButtonRole.AcceptRole,
+            QDialogButtonBox.ButtonRole.YesRole,
+        ):
+            button.setProperty('role', 'accent')
+            theme.repolish(button)
     row.addWidget(box)
     if isinstance(layout, QGridLayout):
         layout.addWidget(footer, layout.rowCount(), 0, 1, layout.columnCount())
@@ -48,6 +67,7 @@ class OpenFileDialog(QFileDialog):
         self.setNameFilter(file_filter)
         self.setLabelText(QFileDialog.DialogLabel.Accept, '打开')
         self.setLabelText(QFileDialog.DialogLabel.Reject, '取消')
+        self.resize(760, 480)
         cancel_on_left(self)
 
 
@@ -69,6 +89,10 @@ class NoteDialog(QInputDialog):
         self.setOkButtonText('保存')
         self.setCancelButtonText('取消')
         self.resize(540, 300)
+        layout = self.layout()
+        if layout is not None:
+            layout.setContentsMargins(DIALOG_MARGIN, 16, DIALOG_MARGIN, 16)
+            layout.setSpacing(10)
         cancel_on_left(self)
 
 
@@ -86,17 +110,31 @@ def edit_evidence_source(parent, field_labels, provenance):
     dialog = QDialog(parent)
     dialog.setWindowTitle('登记证据来源')
     dialog.setMinimumWidth(580)
-    form = QFormLayout(dialog)
-    form.setContentsMargins(16, 14, 16, 14)
-    form.setSpacing(10)
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(DIALOG_MARGIN, 14, DIALOG_MARGIN, 14)
+    layout.setSpacing(6)
+    form = QFormLayout()
+    form.setHorizontalSpacing(14)
+    form.setVerticalSpacing(8)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     fields = {}
     for key, label in field_labels.items():
-        fields[key] = QLineEdit((provenance or {}).get(key, ''))
-        form.addRow(label, fields[key])
-    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-    form.addRow(buttons)
+        field = QLineEdit((provenance or {}).get(key, ''), dialog)
+        if key in _SOURCE_PLACEHOLDERS:
+            field.setPlaceholderText(_SOURCE_PLACEHOLDERS[key])
+        if key == 'expected_sha256':
+            field.setFont(theme.mono_font(8.5))
+            field.setCursorPosition(0)
+        else:
+            field.setClearButtonEnabled(True)
+        fields[key] = field
+        form.addRow(label, field)
+    layout.addLayout(form, 1)
+    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dialog)
+    layout.addWidget(buttons)
     buttons.accepted.connect(dialog.accept)
     buttons.rejected.connect(dialog.reject)
+    cancel_on_left(dialog)
     dialog.resize(600, 270)
     try:
         if dialog.exec():

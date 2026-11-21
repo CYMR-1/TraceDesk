@@ -4,7 +4,7 @@ import queue
 from time import monotonic
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFrame, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
                                QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem,
@@ -18,8 +18,12 @@ from ..core.review import (build_bundle, format_missing_exports, inspect_bundle_
                            inspect_bundle_searches)
 from ..core.tasks import TaskRunner
 from ..engines.tsk import deleted_source_note
+from ..ui import theme
+from ..ui.delegates import ForensicItemDelegate
 from ..ui.dialogs import edit_evidence_source
 from ..ui.filter_header import FilterHeaderView
+from ..ui.icons import ui_icon
+from ..ui.metrics import CONTROL_GAP, DIALOG_MARGIN, ROW_HEIGHT_TABLE
 from ..ui.preview import FilePreview
 from ..ui.views import ExportResultDialog
 from .api import Action, Feature, Panel
@@ -44,48 +48,93 @@ class ReviewPanel(QWidget):
         self._poll_timer.timeout.connect(self._poll_search)
 
         layout = QVBoxLayout(self)
-        tools = QHBoxLayout()
-        self.query = QLineEdit()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        top_bar = QFrame(self)
+        top_bar.setObjectName('panelTopBar')
+        tools = QHBoxLayout(top_bar)
+        tools.setContentsMargins(14, 8, 14, 8)
+        tools.setSpacing(CONTROL_GAP)
+        self.query = QLineEdit(top_bar)
         self.query.setPlaceholderText('输入文字或十六进制字节；搜索文件内容')
-        self.encoding = QComboBox()
+        self.query.setClearButtonEnabled(True)
+        self.query.addAction(ui_icon('search', theme.TEXT_MUTED, 14), QLineEdit.ActionPosition.LeadingPosition)
+        self.encoding = QComboBox(top_bar)
         self.encoding.addItems(['UTF-8', 'UTF-16LE', 'GBK', 'HEX'])
-        self.scope = QComboBox()
+        self.encoding.setMinimumWidth(94)
+        self.scope = QComboBox(top_bar)
         self.scope.addItems(['全部文件', '文件浏览中选中的文件'])
+        self.scope.setMinimumWidth(148)
         tools.addWidget(self.query, 1)
         tools.addWidget(self.encoding)
         tools.addWidget(self.scope)
-        self.search_button = QPushButton('搜索')
+        self.search_button = QPushButton('搜索', top_bar)
+        self.search_button.setProperty('role', 'accent')
         self.search_button.clicked.connect(self.toggle_search)
         tools.addWidget(self.search_button)
-        self.exclude_button = QPushButton('排除所选项')
+
+        divider = QFrame(top_bar)
+        divider.setObjectName('toolbarDivider')
+        tools.addWidget(divider)
+
+        self.exclude_button = QPushButton('排除所选项', top_bar)
         self.exclude_button.setToolTip('在本次搜索中排除勾选（或当前选中）的命中')
         self.exclude_button.clicked.connect(self.exclude_selected)
         tools.addWidget(self.exclude_button)
-        self.save_button = QPushButton('保存为取证发现')
+        self.save_button = QPushButton('保存为取证发现', top_bar)
+        self.save_button.setProperty('role', 'soft')
         self.save_button.setToolTip('将勾选（或当前选中）的命中保存为取证发现')
         self.save_button.clicked.connect(self.bookmark)
         tools.addWidget(self.save_button)
-        layout.addLayout(tools)
+        layout.addWidget(top_bar)
         self.query.returnPressed.connect(self.start)
-        self.status = QLabel()
-        self.status.setWordWrap(True)
-        layout.addWidget(self.status)
 
-        self.table = QTreeWidget()
+        sub_bar = QFrame(self)
+        sub_bar.setObjectName('panelSubBar')
+        sub_layout = QHBoxLayout(sub_bar)
+        sub_layout.setContentsMargins(14, 6, 14, 6)
+        sub_layout.setSpacing(CONTROL_GAP)
+        self.status = QLabel(sub_bar)
+        self.status.setWordWrap(True)
+        self.status.setProperty('role', 'muted')
+        self.status.setFont(theme.ui_font(8.5))
+        sub_layout.addWidget(self.status, 1)
+        layout.addWidget(sub_bar)
+
+        self.table = QTreeWidget(self)
+        self.table.setProperty('flush', True)
         self.table.setRootIsDecorated(False)
+        self.table.setAlternatingRowColors(True)
         self.table.setUniformRowHeights(True)
         self.header = FilterHeaderView(self.table, checkable_column=0, check_label='全选', filter_columns=(3,))
         self.table.setHeader(self.header)
         self.table.setHeaderLabels(['', '序号', '文件内字节偏移', '分区偏移', 'inode', '镜像内路径', '前文 HEX', '后文 HEX'])
+        self.table.headerItem().setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
         self.table.headerItem().setToolTip(0, '全选 / 取消全选')
         self.table.headerItem().setToolTip(3, '单击下拉筛选分区偏移')
+        self.table.setItemDelegate(
+            ForensicItemDelegate(
+                self.table,
+                mono_columns={1, 2, 3, 4, 6, 7},
+                subtle_columns={6, 7},
+                accent_column=0,
+                row_height=ROW_HEIGHT_TABLE,
+            )
+        )
         self.header.toggled.connect(self._set_all_checked)
         self.header.filter_changed.connect(self._apply_offset_filter)
-        for column, width in ((0, 68), (1, 64), (3, 110), (5, 320)):
+        for column, width in ((0, 68), (1, 64), (2, 118), (3, 110), (4, 88), (5, 320), (6, 168), (7, 168)):
             self.table.setColumnWidth(column, width)
         self.table.itemDoubleClicked.connect(self.preview)
         self.table.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.table, 1)
+
+    def _set_search_button(self, text, role, enabled=True):
+        self.search_button.setText(text)
+        self.search_button.setProperty('role', role)
+        theme.repolish(self.search_button)
+        self.search_button.setEnabled(enabled)
 
     @property
     def searching(self):
@@ -161,8 +210,7 @@ class ReviewPanel(QWidget):
         if self.case is not case or not self.status.text():
             if self.case is not case:
                 self.shutdown()
-                self.search_button.setText('搜索')
-                self.search_button.setEnabled(True)
+                self._set_search_button('搜索', 'accent', True)
             self._reset_results()
             self.record = self.name = self._active = None
             self.status.setText('搜索当前清单中的普通文件及删除记录，不含未分配空间。双击命中定位原始字节。')
@@ -205,8 +253,7 @@ class ReviewPanel(QWidget):
             image_sha256=case.data['evidence']['sha256'],
             verification=case.source_note() or '搜索进行中（实时命中）',
         )
-        self.search_button.setText('取消搜索')
-        self.search_button.setEnabled(True)
+        self._set_search_button('取消搜索', 'warning', True)
         self.status.setText('正在后台搜索 · 命中将实时显示，可直接勾选、双击预览、排除或保存为取证发现。')
 
         def on_progress(stage, done, total):
@@ -229,8 +276,7 @@ class ReviewPanel(QWidget):
         if self.control:
             self.control.cancel()
             if self.searching:
-                self.search_button.setText('正在取消…')
-                self.search_button.setEnabled(False)
+                self._set_search_button('正在取消…', 'warning', False)
 
     def _append_hits(self, batch):
         if not batch:
@@ -252,6 +298,7 @@ class ReviewPanel(QWidget):
             seq = existing_rows + len(items) + 1
             item = QTreeWidgetItem(['', str(seq), str(pos), str(offset), str(entry['inode']),
                                     entry['path'], before, after])
+            item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(0, Qt.CheckState.Unchecked)
             item.setData(0, Qt.ItemDataRole.UserRole, index)
@@ -320,8 +367,7 @@ class ReviewPanel(QWidget):
 
     def finished(self, result):
         self.control = None
-        self.search_button.setText('搜索')
-        self.search_button.setEnabled(True)
+        self._set_search_button('搜索', 'accent', True)
         if isinstance(result, str):
             self.status.setText('搜索失败：' + result)
             return
@@ -350,9 +396,21 @@ class ReviewPanel(QWidget):
         dialog.setWindowTitle(f"{entry['path']} · 命中字节 0x{pos:X}")
         dialog.resize(860, 550)
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel(f"文件内偏移 {pos}（0x{pos:X}） · {meta['encoding']} · {meta['needle'][:96]}"))
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        header_bar = QFrame(dialog)
+        header_bar.setObjectName('dialogHeaderBar')
+        header_layout = QHBoxLayout(header_bar)
+        header_layout.setContentsMargins(14, 10, 14, 10)
+        header_layout.setSpacing(CONTROL_GAP)
+        meta_label = QLabel(f"文件内偏移 {pos}（0x{pos:X}） · {meta['encoding']} · {meta['needle'][:96]}", header_bar)
+        meta_label.setFont(theme.mono_font(9.5))
+        meta_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        meta_label.setWordWrap(True)
+        header_layout.addWidget(meta_label, 1)
+        layout.addWidget(header_bar)
         view = FilePreview(dialog)
-        layout.addWidget(view)
+        layout.addWidget(view, 1)
         validate = self.case.check_source if self.case.data['evidence'].get('large_image') else None
         view.open_file(self.case.image(), entry, validate=validate)
         view.formats.setCurrentIndex(1)
@@ -523,22 +581,33 @@ class BundleExportDialog(QDialog):
         self.setWindowTitle('导出复核包 · 选择纳入材料')
         self.resize(900, 620)
 
-        layout = QVBoxLayout(self)
-        layout.setSpacing(10)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        banner = QFrame()
+        body = QWidget(self)
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(DIALOG_MARGIN, 16, DIALOG_MARGIN, 14)
+        layout.setSpacing(12)
+
+        banner = QFrame(body)
         banner.setObjectName('bundleExportBanner')
         banner_layout = QVBoxLayout(banner)
-        banner_layout.setContentsMargins(12, 10, 12, 10)
-        banner_layout.setSpacing(6)
-        self.banner_label = QLabel()
+        banner_layout.setContentsMargins(14, 10, 14, 10)
+        banner_layout.setSpacing(8)
+
+        banner_row = QHBoxLayout()
+        banner_row.setContentsMargins(0, 0, 0, 0)
+        banner_row.setSpacing(10)
+        banner_icon = QLabel(banner)
+        banner_icon.setFixedSize(18, 18)
+        self.banner_label = QLabel(banner)
         self.banner_label.setWordWrap(True)
         has_missing = bool(self.missing_rows or self.missing_searches)
         if has_missing:
-            banner.setStyleSheet(
-                'QFrame#bundleExportBanner { background: #f8f4ea; border: 1px solid #eadcc0; border-radius: 6px; }'
-            )
-            self.banner_label.setStyleSheet('color: #6e5218; background: transparent; font-weight: 600;')
+            banner.setProperty('bannerState', 'warning')
+            banner_icon.setPixmap(ui_icon('warning', theme.WARN_FG, 18).pixmap(18, 18))
+            self.banner_label.setFont(theme.ui_font(9.5, QFont.Weight.DemiBold))
             parts = []
             if self.missing_rows:
                 parts.append(f'{len(self.missing_rows)} 条历史导出副本')
@@ -548,38 +617,39 @@ class BundleExportDialog(QDialog):
                 f'检测到 {" 与 ".join(parts)} 在本地目录中缺失（可能已被手动清理或被安全软件隔离）。'
                 '缺失项已标红且不可勾选；您可以自由勾选现存材料继续生成复核包，未纳入项会如实记入 manifest.json：'
             )
-            banner_layout.addWidget(self.banner_label)
-            self.missing_text = QPlainTextEdit()
+            banner_row.addWidget(banner_icon, 0, Qt.AlignmentFlag.AlignTop)
+            banner_row.addWidget(self.banner_label, 1)
+            banner_layout.addLayout(banner_row)
+            self.missing_text = QPlainTextEdit(banner)
             self.missing_text.setReadOnly(True)
+            self.missing_text.setProperty('surface', 'code')
+            self.missing_text.setFont(theme.mono_font(9.0))
             self.missing_text.setPlainText(format_missing_exports(self.missing_rows, self.missing_searches))
             self.missing_text.setMaximumHeight(112)
-            self.missing_text.setStyleSheet(
-                'QPlainTextEdit { background: #fffcf5; color: #6e5218; border: 1px solid #eadcc0; '
-                'border-radius: 5px; padding: 4px 6px; font-size: 12px; }'
-            )
             banner_layout.addWidget(self.missing_text)
         else:
-            banner.setStyleSheet(
-                'QFrame#bundleExportBanner { background: #eaf6f0; border: 1px solid #c8e6d7; border-radius: 6px; }'
-            )
-            self.banner_label.setStyleSheet('color: #086b55; background: transparent;')
+            banner.setProperty('bannerState', 'ok')
+            banner_icon.setPixmap(ui_icon('check_shield', theme.OK_FG, 18).pixmap(18, 18))
             self.banner_label.setText(
                 f'全部历史导出副本（{len(self.available_rows)} 条）与内容搜索记录（{len(self.available_searches)} 条）均完整存在。'
                 '默认全部勾选，您可自由取消不需要打入复核包的条目。'
             )
-            banner_layout.addWidget(self.banner_label)
+            banner_row.addWidget(banner_icon, 0, Qt.AlignmentFlag.AlignVCenter)
+            banner_row.addWidget(self.banner_label, 1)
+            banner_layout.addLayout(banner_row)
             self.missing_text = None
+        theme.repolish(banner)
         layout.addWidget(banner)
 
-        self.tabs = QTabWidget()
+        self.tabs = QTabWidget(body)
 
         # Tab 1: 导出副本
         exports_tab = QWidget()
         exports_layout = QVBoxLayout(exports_tab)
-        exports_layout.setContentsMargins(8, 8, 8, 8)
-        exports_layout.setSpacing(8)
+        exports_layout.setContentsMargins(10, 10, 10, 10)
+        exports_layout.setSpacing(CONTROL_GAP)
         toolbar = QHBoxLayout()
-        toolbar.setSpacing(8)
+        toolbar.setSpacing(CONTROL_GAP)
         self.select_all_button = QPushButton('全选可用副本')
         self.select_all_button.setProperty('role', 'soft')
         self.select_all_button.clicked.connect(lambda: self._set_all_checked(self.table, True))
@@ -612,10 +682,10 @@ class BundleExportDialog(QDialog):
         if self.search_rows:
             searches_tab = QWidget()
             searches_layout = QVBoxLayout(searches_tab)
-            searches_layout.setContentsMargins(8, 8, 8, 8)
-            searches_layout.setSpacing(8)
+            searches_layout.setContentsMargins(10, 10, 10, 10)
+            searches_layout.setSpacing(CONTROL_GAP)
             s_toolbar = QHBoxLayout()
-            s_toolbar.setSpacing(8)
+            s_toolbar.setSpacing(CONTROL_GAP)
             s_toolbar.addWidget(self.select_all_searches_button)
             s_toolbar.addWidget(self.select_none_searches_button)
             s_toolbar.addWidget(self.toggle_missing_searches_button)
@@ -628,23 +698,32 @@ class BundleExportDialog(QDialog):
             )
 
         layout.addWidget(self.tabs, 1)
+        outer.addWidget(body, 1)
 
-        footer = QHBoxLayout()
-        self.summary_label = QLabel()
+        footer_bar = QFrame(self)
+        footer_bar.setObjectName('dialogFooterBar')
+        footer = QHBoxLayout(footer_bar)
+        footer.setContentsMargins(DIALOG_MARGIN, 10, DIALOG_MARGIN, 10)
+        footer.setSpacing(CONTROL_GAP)
+        self.summary_label = QLabel(footer_bar)
         self.summary_label.setProperty('role', 'muted')
         footer.addWidget(self.summary_label, 1)
-        self.copy_missing_button = QPushButton('复制缺失清单')
+        self.copy_missing_button = QPushButton('复制缺失清单', footer_bar)
+        self.copy_missing_button.setIcon(ui_icon('copy', theme.TEXT_SECONDARY, 14))
+        self.copy_missing_button.setAutoDefault(False)
         self.copy_missing_button.clicked.connect(self._copy_missing)
         self.copy_missing_button.setVisible(has_missing)
         footer.addWidget(self.copy_missing_button)
-        cancel_btn = QPushButton('取消')
+        cancel_btn = QPushButton('取消', footer_bar)
+        cancel_btn.setAutoDefault(False)
         cancel_btn.clicked.connect(self.reject)
-        self.confirm_button = QPushButton('生成复核包')
+        self.confirm_button = QPushButton('生成复核包', footer_bar)
         self.confirm_button.setProperty('role', 'accent')
+        self.confirm_button.setDefault(True)
         self.confirm_button.clicked.connect(self.accept)
         footer.addWidget(cancel_btn)
         footer.addWidget(self.confirm_button)
-        layout.addLayout(footer)
+        outer.addWidget(footer_bar)
         self._update_summary()
 
     @staticmethod
@@ -658,16 +737,10 @@ class BundleExportDialog(QDialog):
         if row['exists']:
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(0, Qt.CheckState.Checked)
-            item.setForeground(status_col, QBrush(QColor('#086b55')))
-            item.setBackground(status_col, QBrush(QColor('#eaf6f0')))
         else:
             item.setFlags((item.flags() | Qt.ItemFlag.ItemIsUserCheckable) & ~Qt.ItemFlag.ItemIsEnabled)
             item.setCheckState(0, Qt.CheckState.Unchecked)
-            item.setForeground(status_col, QBrush(QColor('#b64262')))
-            item.setBackground(status_col, QBrush(QColor('#fdf0f3')))
-            font = item.font(status_col)
-            font.setBold(True)
-            item.setFont(status_col, font)
+            item.setToolTip(status_col, row['missing_reason'])
             item.setToolTip(tip_col, row['missing_reason'])
 
     def _build_exports_table(self):
@@ -678,6 +751,16 @@ class BundleExportDialog(QDialog):
         table.setHeaderLabels(['', '序号', '副本状态', '本地副本路径', '镜像内路径', '字节数', '导出时间（UTC+8）'])
         table.headerItem().setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
         table.headerItem().setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
+        table.setItemDelegate(
+            ForensicItemDelegate(
+                table,
+                pill_columns={2},
+                mono_columns={1, 3, 5, 6},
+                subtle_columns={6},
+                accent_column=0,
+                row_height=ROW_HEIGHT_TABLE,
+            )
+        )
         for row in self.rows:
             item = QTreeWidgetItem([
                 '',
@@ -697,12 +780,14 @@ class BundleExportDialog(QDialog):
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Interactive)
         table.setColumnWidth(0, 38)
-        table.setColumnWidth(1, 56)
-        table.setColumnWidth(2, 76)
+        table.setColumnWidth(1, 52)
+        table.setColumnWidth(2, 82)
         table.setColumnWidth(3, 210)
+        table.setColumnWidth(5, 108)
+        table.setColumnWidth(6, 168)
         table.itemChanged.connect(lambda *_: self._update_summary())
         return table
 
@@ -714,6 +799,16 @@ class BundleExportDialog(QDialog):
         table.setHeaderLabels(['', '序号', '文件状态', '本地记录路径', '搜索内容', '编码', '命中数', '搜索时间（UTC+8）'])
         table.headerItem().setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
         table.headerItem().setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
+        table.setItemDelegate(
+            ForensicItemDelegate(
+                table,
+                pill_columns={2},
+                mono_columns={1, 3, 5, 6, 7},
+                subtle_columns={7},
+                accent_column=0,
+                row_height=ROW_HEIGHT_TABLE,
+            )
+        )
         for row in self.search_rows:
             item = QTreeWidgetItem([
                 '',
@@ -734,13 +829,16 @@ class BundleExportDialog(QDialog):
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
         table.setColumnWidth(0, 38)
-        table.setColumnWidth(1, 56)
-        table.setColumnWidth(2, 76)
-        table.setColumnWidth(3, 250)
+        table.setColumnWidth(1, 50)
+        table.setColumnWidth(2, 80)
+        table.setColumnWidth(3, 200)
+        table.setColumnWidth(5, 72)
+        table.setColumnWidth(6, 58)
+        table.setColumnWidth(7, 162)
         table.itemChanged.connect(lambda *_: self._update_summary())
         return table
 
