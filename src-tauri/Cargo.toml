@@ -18,6 +18,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tracedesk-core = { path = "../crates/tracedesk-core" }
 tracedesk-engines = { path = "../crates/tracedesk-engines" }
+tracedesk-mcp = { path = "../crates/tracedesk-mcp" }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

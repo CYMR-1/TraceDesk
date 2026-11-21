@@ -45,19 +45,10 @@ fn demo_image_path() -> PathBuf {
     p
 }
 
-fn send_http_request(port: u16, host_header: &str, body: &str) -> (u16, String) {
+fn send_raw_http(port: u16, raw_req: &str) -> (u16, String) {
     let mut stream =
         TcpStream::connect(("127.0.0.1", port)).expect("connect to local MCP HTTP server");
-    let req = format!(
-        "POST /mcp HTTP/1.1\r\n\
-         Host: {host_header}\r\n\
-         Content-Type: application/json\r\n\
-         Content-Length: {}\r\n\
-         Connection: close\r\n\r\n\
-         {body}",
-        body.len()
-    );
-    stream.write_all(req.as_bytes()).expect("write request");
+    stream.write_all(raw_req.as_bytes()).expect("write request");
     stream.flush().expect("flush request");
 
     let mut resp = String::new();
@@ -73,6 +64,19 @@ fn send_http_request(port: u16, host_header: &str, body: &str) -> (u16, String) 
         .map(|(_, b)| b.to_string())
         .unwrap_or_default();
     (code, body_part)
+}
+
+fn send_http_request(port: u16, host_header: &str, body: &str) -> (u16, String) {
+    let req = format!(
+        "POST /mcp HTTP/1.1\r\n\
+         Host: {host_header}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n\
+         {body}",
+        body.len()
+    );
+    send_raw_http(port, &req)
 }
 
 #[test]
@@ -408,16 +412,112 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     assert!(st_started.running);
     assert_eq!(st_started.url, format!("http://127.0.0.1:{port}/mcp"));
 
-    // 1. DNS rebinding guard must reject foreign Host header with 403
-    let (code_403, _) = send_http_request(
-        port,
-        "evil.example.com:8765",
-        &json!({"jsonrpc":"2.0","id":1,"method":"ping"}).to_string(),
-    );
-    assert_eq!(code_403, 403);
-
-    // 2. initialize & tools/list & resources/list
     let host = format!("127.0.0.1:{port}");
+    let ping_body = json!({"jsonrpc":"2.0","id":1,"method":"ping"}).to_string();
+
+    // 1. DNS rebinding & HTTP hardening checks
+    // 1a. Missing Host header -> 421 Misdirected Request
+    let (code_no_host, _) = send_raw_http(
+        port,
+        &format!(
+            "POST /mcp HTTP/1.1\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {ping_body}",
+            ping_body.len()
+        ),
+    );
+    assert_eq!(code_no_host, 421);
+
+    // 1b. Foreign Host header -> 421 Misdirected Request
+    let (code_bad_host, _) = send_http_request(port, "evil.example.com:8765", &ping_body);
+    assert_eq!(code_bad_host, 421);
+
+    // 1c. Foreign Origin header -> 403 Forbidden
+    let (code_bad_origin, _) = send_raw_http(
+        port,
+        &format!(
+            "POST /mcp HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             Origin: https://evil.example.com\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {ping_body}",
+            ping_body.len()
+        ),
+    );
+    assert_eq!(code_bad_origin, 403);
+
+    // 1d. Root path POST / must return 404 (never fall back to /mcp), while POST /mcp/ returns 200
+    let (code_root, _) = send_raw_http(
+        port,
+        &format!(
+            "POST / HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {ping_body}",
+            ping_body.len()
+        ),
+    );
+    assert_eq!(code_root, 404);
+
+    let (code_slash, _) = send_raw_http(
+        port,
+        &format!(
+            "POST /mcp/ HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {ping_body}",
+            ping_body.len()
+        ),
+    );
+    assert_eq!(code_slash, 200);
+
+    // 1e. Malformed Content-Length -> 400 Bad Request; >16 MiB -> 413 Payload Too Large
+    let (code_bad_cl, _) = send_raw_http(
+        port,
+        &format!(
+            "POST /mcp HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: not-a-number\r\n\
+             Connection: close\r\n\r\n"
+        ),
+    );
+    assert_eq!(code_bad_cl, 400);
+
+    let (code_huge_cl, _) = send_raw_http(
+        port,
+        &format!(
+            "POST /mcp HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: 999999999\r\n\
+             Connection: close\r\n\r\n"
+        ),
+    );
+    assert_eq!(code_huge_cl, 413);
+
+    // 1f. Chunked request exceeding 16 MiB -> 413 Payload Too Large
+    let (code_huge_chunk, _) = send_raw_http(
+        port,
+        &format!(
+            "POST /mcp HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             Transfer-Encoding: chunked\r\n\
+             Connection: close\r\n\r\n\
+             1000001\r\n"
+        ),
+    );
+    assert_eq!(code_huge_chunk, 413);
+
+    // 2. initialize & tools/list (must expose full JSON Schema with properties/required/additionalProperties=false)
     let (code_init, body_init) = send_http_request(
         port,
         &host,
@@ -435,9 +535,19 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     );
     assert_eq!(code_tools, 200);
     let tools_val: Value = serde_json::from_str(&body_tools).expect("parse tools");
-    assert_eq!(tools_val["result"]["tools"].as_array().unwrap().len(), 19);
+    let tools_arr = tools_val["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools_arr.len(), 19);
+    let record_tool = tools_arr
+        .iter()
+        .find(|t| t["name"] == "tracedesk_record_finding")
+        .expect("tracedesk_record_finding present");
+    assert_eq!(record_tool["inputSchema"]["additionalProperties"], false);
+    assert!(record_tool["inputSchema"]["properties"]["case_dir"].is_object());
+    assert!(record_tool["inputSchema"]["properties"]["path"].is_object());
+    assert!(record_tool["inputSchema"]["properties"]["note"].is_object());
 
-    // 3. Call tracedesk_record_finding via HTTP MCP WHILE the desktop holds case.lock!
+    // 3. Call tracedesk_record_finding via FastMCP nested `{"params": ...}` + response_format="json"
+    //    WHILE the desktop holds case.lock!
     let (code_call, body_call) = send_http_request(
         port,
         &host,
@@ -448,10 +558,13 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
             "params": {
                 "name": "tracedesk_record_finding",
                 "arguments": {
-                    "case_dir": snap.case_dir,
-                    "path": "DOCS/CASE.TXT",
-                    "note": "来自本地 HTTP MCP 协同写入的取证发现",
-                    "actor": "ai-assistant"
+                    "params": {
+                        "case_dir": snap.case_dir,
+                        "path": "DOCS/CASE.TXT",
+                        "note": "来自本地 HTTP MCP 协同写入的取证发现",
+                        "actor": "ai-assistant",
+                        "response_format": "json"
+                    }
                 }
             }
         })
@@ -460,6 +573,47 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     assert_eq!(code_call, 200);
     let call_val: Value = serde_json::from_str(&body_call).expect("parse tool call");
     assert_eq!(call_val["result"]["isError"], false);
+    let payload_text = call_val["result"]["content"][0]["text"]
+        .as_str()
+        .expect("json text");
+    let payload_json: Value = serde_json::from_str(payload_text).expect("valid JSON output");
+    assert_eq!(payload_json["origin"], "mcp");
+    assert_eq!(payload_json["actor"], "ai-assistant");
+    assert_eq!(payload_json["note"], "来自本地 HTTP MCP 协同写入的取证发现");
+
+    // 3b. Valid Transfer-Encoding: chunked request calling tracedesk_list_files with contract params
+    let chunk_json = json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedesk_list_files",
+            "arguments": {
+                "case_dir": snap.case_dir,
+                "status": "all",
+                "response_format": "json"
+            }
+        }
+    })
+    .to_string();
+    let chunked_req = format!(
+        "POST /mcp HTTP/1.1\r\n\
+         Host: {host}\r\n\
+         Content-Type: application/json\r\n\
+         Transfer-Encoding: chunked\r\n\
+         Connection: close\r\n\r\n\
+         {:x}\r\n{chunk_json}\r\n0\r\n\r\n",
+        chunk_json.len()
+    );
+    let (code_chunk, body_chunk) = send_raw_http(port, &chunked_req);
+    assert_eq!(code_chunk, 200);
+    let chunk_val: Value = serde_json::from_str(&body_chunk).expect("parse chunked tool call");
+    assert_eq!(chunk_val["result"]["isError"], false);
+    let list_text = chunk_val["result"]["content"][0]["text"]
+        .as_str()
+        .expect("list json text");
+    let list_json: Value = serde_json::from_str(list_text).expect("valid list JSON");
+    assert!(list_json["total"].as_u64().unwrap_or(0) >= 13);
 
     // 4. Desktop audit log must immediately see the MCP record with origin="mcp" & valid chain!
     let audit = cmd_list_audit_log(&state, "", Some("MCP"), None, None, None, "seq", true)
