@@ -16,6 +16,7 @@ use flate2::write::GzEncoder;
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use tracedesk_engines::{
     CaseFileLock, EngineError, FileStamp, InventoryEntry, MediaReader, PartitionInfo,
     SegmentDigest, SourceGuard, TskCli, ewf, map_fat_regions, sha256_file,
@@ -27,7 +28,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::findings::{AuditOrigin, AuditRecord};
 use crate::formatting::{
     can_export, canonical_json_value, case_folder_name, create_unique_case_folder,
-    entry_name, export_filename, now, sha256_hex, windows_filename,
+    entry_name, export_filename, hex_lower, now, sha256_hex, windows_filename,
 };
 use crate::paths::{is_within, resolve_clean, strip_verbatim_prefix};
 use crate::reporting::render_report;
@@ -356,6 +357,8 @@ struct DirCacheKey {
 struct AuditCache {
     file_len: u64,
     mtime_ns: Option<i128>,
+    file_hasher: Sha256,
+    file_sha256: String,
     count: u64,
     head: String,
 }
@@ -853,7 +856,12 @@ impl Case {
     /// internal O(1)-append cache.
     pub fn check_audit(&mut self) -> CoreResult<Vec<AuditRecord>> {
         let records = verify_audit_chain_at(&self.folder)?;
-        let meta = fs::metadata(self.folder.join("audit.jsonl"))?;
+        let audit_path = self.folder.join("audit.jsonl");
+        let raw_bytes = fs::read(&audit_path)?;
+        let meta = fs::metadata(&audit_path)?;
+        let mut file_hasher = Sha256::new();
+        file_hasher.update(&raw_bytes);
+        let file_sha256 = hex_lower(&file_hasher.clone().finalize());
         let head = records
             .last()
             .map(|r| r.hash.clone())
@@ -861,16 +869,18 @@ impl Case {
         self.audit_cache = Some(AuditCache {
             file_len: meta.len(),
             mtime_ns: meta.modified().ok().and_then(system_time_to_ns),
+            file_hasher,
+            file_sha256,
             count: records.len() as u64,
             head,
         });
         Ok(records)
     }
 
-    /// Check whether the on-disk `audit.jsonl` (`len`, `mtime`) and `audit.head` still match our
-    /// in-memory cache; returns `Some((count, head))` on fast-path hit, or `None` requiring a full
-    /// chain re-verification.
-    fn audit_fast_check(&self) -> Option<(u64, String)> {
+    /// Check whether the on-disk `audit.jsonl` (`len`, `mtime`, raw SHA-256) and `audit.head` still
+    /// match our in-memory cache; returns `Some((count, head, file_hasher))` on fast-path hit, or
+    /// `None` requiring a full chain re-verification.
+    fn audit_fast_check(&self) -> Option<(u64, String, Sha256)> {
         let cache = self.audit_cache.as_ref()?;
         let audit_path = self.folder.join("audit.jsonl");
         let meta = fs::metadata(&audit_path).ok()?;
@@ -895,12 +905,17 @@ impl Case {
                 return None;
             }
         }
-        Some((cache.count, cache.head.clone()))
+        let disk_bytes = fs::read(&audit_path).ok()?;
+        if sha256_hex(&disk_bytes) != cache.file_sha256 {
+            return None;
+        }
+        Some((cache.count, cache.head.clone(), cache.file_hasher.clone()))
     }
 
     /// Append a new entry to `audit.jsonl` (fsync'd) and update `audit.head` (exact 64 ASCII bytes,
-    /// NO trailing newline). Uses the `len`/`mtime`/`head` cache to avoid O(N²) disk re-reads on
-    /// bursts while automatically falling back to full chain verification on any external change.
+    /// NO trailing newline). Uses the `len`/`mtime`/`sha256`/`head` cache to avoid O(N²) JSON
+    /// re-parsing on bursts while automatically falling back to full chain verification on any
+    /// external change (including in-place same-length same-timestamp edits).
     pub fn log(
         &mut self,
         action: &str,
@@ -909,7 +924,7 @@ impl Case {
         details: Map<String, Value>,
     ) -> CoreResult<AuditRecord> {
         self.ensure_open()?;
-        let (count, previous) = match self.audit_fast_check() {
+        let (count, previous, mut next_hasher) = match self.audit_fast_check() {
             Some(hit) => hit,
             None => {
                 self.audit_cache = None;
@@ -918,7 +933,12 @@ impl Case {
                     .last()
                     .map(|r| r.hash.clone())
                     .unwrap_or_else(|| GENESIS_HASH.to_string());
-                (records.len() as u64, prev)
+                let hasher = self
+                    .audit_cache
+                    .as_ref()
+                    .map(|c| c.file_hasher.clone())
+                    .unwrap_or_default();
+                (records.len() as u64, prev, hasher)
             }
         };
 
@@ -961,10 +981,16 @@ impl Case {
         // CRITICAL: exact 64 ASCII hex bytes, NO trailing newline (`scripts/verify_bundle.py:41`).
         fs::write(self.folder.join("audit.head"), hash.as_bytes())?;
 
+        next_hasher.update(signed_line.as_bytes());
+        next_hasher.update(b"\n");
+        let file_sha256 = hex_lower(&next_hasher.clone().finalize());
+
         if let Ok(meta) = fs::metadata(&audit_path) {
             self.audit_cache = Some(AuditCache {
                 file_len: meta.len(),
                 mtime_ns: meta.modified().ok().and_then(system_time_to_ns),
+                file_hasher: next_hasher,
+                file_sha256,
                 count: seq,
                 head: hash.clone(),
             });

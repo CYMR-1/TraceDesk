@@ -188,12 +188,25 @@ fn audit_head_no_newline_tamper_detection_and_legacy_origin() {
     let err = case.log("FILE_FILTER", "*", "成功", Map::new()).unwrap_err();
     assert!(matches!(err, CoreError::AuditTampered(_)));
 
-    // Restore head, tamper `audit.jsonl` body -> detected!
+    // Restore head, tamper `audit.jsonl` body with EQUAL byte length AND preserved mtime,
+    // then call `case.log()` -> MUST detect tampering and return `AuditTampered`!
     fs::write(&head_path, &raw_head).expect("restore head");
     let audit_path = case.folder().join("audit.jsonl");
-    let content = fs::read_to_string(&audit_path).expect("read audit.jsonl");
-    let tampered = content.replace("*.txt", "*.doc_tampered");
-    fs::write(&audit_path, tampered).expect("write tampered");
+    let orig_content = fs::read_to_string(&audit_path).expect("read audit.jsonl");
+    let orig_mtime = fs::metadata(&audit_path).unwrap().modified().unwrap();
+    let same_len_tampered = orig_content.replace("*.txt", "*.doc");
+    assert_eq!(same_len_tampered.len(), orig_content.len());
+    {
+        let f = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&audit_path)
+            .unwrap();
+        (&f).write_all(same_len_tampered.as_bytes()).unwrap();
+        f.set_modified(orig_mtime).unwrap();
+    }
+    let err_same_len_log = case.log("FILE_FILTER", "*", "成功", Map::new()).unwrap_err();
+    assert!(matches!(err_same_len_log, CoreError::AuditTampered(_)));
     let err2 = case.check_audit().unwrap_err();
     assert!(matches!(err2, CoreError::AuditTampered(_)));
 
@@ -550,6 +563,23 @@ fn content_search_patterns_sliding_context_and_timeline_aliases() {
     assert_eq!(hits[2].file_byte, 22);
     assert_eq!(hits[0].before.split(' ').count(), 12);
     assert_eq!(hits[0].after.split(' ').count(), 12);
+
+    // Short-read stream (25 of 50 recorded bytes) with a hit in the trailing 12 bytes (19..23):
+    // flushing the tail buffer with `push_chunk(&[], ...)` must preserve the hit!
+    let finder = memchr::memmem::Finder::new(b"NOTE");
+    let mut short_matcher =
+        tracedesk_core::StreamMatcher::new(&finder, 4, 50, 0, 0, 50, None);
+    let mut short_stream = vec![b'.'; 19];
+    short_stream.extend_from_slice(b"NOTE!");
+    short_stream.push(b'!'); // 25 bytes total; "NOTE" is at 19..23 (only 2 bytes after!)
+    assert_eq!(short_stream.len(), 25);
+    short_matcher.push_chunk(&short_stream, None).unwrap();
+    // Before EOF flush, hit at 19..23 is held waiting for 12-byte after context.
+    short_matcher.push_chunk(&[], None).unwrap();
+    let short_hits = short_matcher.into_hits();
+    assert_eq!(short_hits.len(), 1);
+    assert_eq!(short_hits[0].file_byte, 19);
+    assert_eq!(short_hits[0].after, "21 21");
 
     // Timeline event aliases M/A/C/B.
     assert_eq!(normalize_event_filter("M").unwrap(), "M 内容修改");

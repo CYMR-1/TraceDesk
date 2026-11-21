@@ -801,28 +801,30 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
     }
 
     // 6. Verify every export listed in `manifest.json` matches its member SHA-256 and uncompressed size.
-    if let Some(exports) = manifest.get("exports").and_then(Value::as_array) {
-        for item in exports {
-            let member = item
-                .get("member")
-                .and_then(Value::as_str)
-                .ok_or_else(|| CoreError::IntegrityFailed("导出记录缺少 member 字段".to_string()))?;
-            let expected_sha = item
-                .get("sha256")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let expected_size = item
-                .get("size")
-                .and_then(Value::as_u64)
-                .unwrap_or(u64::MAX);
-            let zip_size = archive.by_name(member)?.size();
-            if checks.get(member).map(String::as_str) != Some(expected_sha)
-                || zip_size != expected_size
-            {
-                return Err(CoreError::IntegrityFailed(format!(
-                    "导出记录不匹配：{member}"
-                )));
-            }
+    let exports = manifest
+        .get("exports")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CoreError::IntegrityFailed("manifest.json 缺少 exports 列表".to_string()))?;
+    for item in exports {
+        let member = item
+            .get("member")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CoreError::IntegrityFailed("导出记录缺少 member 字段".to_string()))?;
+        let expected_sha = item
+            .get("sha256")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let expected_size = item
+            .get("size")
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::MAX);
+        let zip_size = archive.by_name(member)?.size();
+        if checks.get(member).map(String::as_str) != Some(expected_sha)
+            || zip_size != expected_size
+        {
+            return Err(CoreError::IntegrityFailed(format!(
+                "导出记录不匹配：{member}"
+            )));
         }
     }
 
