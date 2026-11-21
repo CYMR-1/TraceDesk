@@ -447,7 +447,9 @@ impl CaseService {
                 .and_then(|mut g| g.cases_mut().get(&folder).cloned())
                 .filter(|v| v.key == expected_key);
             if let Some(view) = cached {
-                let res = f(&folder, &view);
+                let res = self
+                    .verified_audit_records(&folder)
+                    .and_then(|_| f(&folder, &view));
                 lease.unlock();
                 return res;
             }

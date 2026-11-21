@@ -891,6 +891,16 @@ dependencies = [
 [[package]]
 name = "tracedesk-mcp"
 version = "0.1.0"
+dependencies = [
+ "lru",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracedesk-core",
+ "tracedesk-engines",
+ "uuid",
+]
 
 [[package]]
 name = "typenum"
