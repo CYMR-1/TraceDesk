@@ -1,28 +1,28 @@
 # TraceDesk 电子数据取证工作台
 
-依据课程取证软件开发要求实现的中文桌面教学原型。PySide6（Qt 6）提供桌面界面，Python 标准库负责案件、SHA-256、审计和报告，The Sleuth Kit 4.15.0 负责 RAW 和分段 EWF 镜像解析与文件读取。取证操作在本地执行，不上传证据。
+依据课程取证软件开发要求实现的中文桌面教学原型。PySide6（Qt 6）提供本地桌面工作台，Python 标准库负责案件隔离、SHA-256、审计哈希链、Markdown 报告与复核包，The Sleuth Kit 4.15.0 与 `pytsk3` / `libewf-python` 负责 RAW 和分段 EWF 镜像的只读解析、大文件随机读取及内容检索，内置标准 MCP 服务端 `tracedesk_mcp` 供外部 AI 客户端接入。所有取证操作均在本地执行，不上传证据。
 
 ## 目录导航
 
 | 位置 | 用途 |
 | --- | --- |
 | `main.py`、`mcp_server.py`、`启动取证工作台.bat` | 桌面工作台与 MCP 服务端启动入口 |
-| `forensic/core/` | 案件、哈希、审计、导出、报告和后台任务 |
+| `forensic/core/` | 案件、哈希、审计、搜索、导出、报告、复核包和后台任务 |
 | `forensic/mcp/` | MCP 服务端业务编排、FastMCP 工具定义与本地 HTTP 托管 |
-| `forensic/features/` | 启用清单、功能命令、按钮和页面 |
-| `forensic/engines/` | TSK 适配与 FAT 文件系统分析 |
-| `forensic/ui/` | PySide6 控制器、窗口、文件树和内容预览 |
-| `forensic/paths.py`、`forensic/assets/` | 统一资源定位与应用图标 |
+| `forensic/features/` | 启用清单、11 个可装配功能模块、按钮和页面 |
+| `forensic/engines/` | TSK 只读适配、分段 EWF、`pytsk3`/`pyewf` 随机读取与 FAT 空间分析 |
+| `forensic/ui/` | PySide6 控制器、Archival Slate & Prussian Ink 主题、委托、窗口、文件树与预览 |
+| `forensic/paths.py`、`forensic/assets/` | 统一资源定位、应用徽标与控件矢量图标 |
 | `scripts/`、`tests/` | 开发辅助命令与对应职责的回归测试 |
-| `docs/` | 维护指南、设计说明、界面资料和验证记录 |
+| `docs/` | 维护指南、设计与验收说明和验证记录 |
 | `evidence/`、`cases/`、`tools/` | 源证据输入、案件输出、官方第三方工具 |
-| `logs/`、`dist/`、`.test-work/`、`.venv/` | 本地运行、构建、测试和环境目录 |
+| `logs/`、`dist/`、`.venv/` | 本地运行日志、打包输出和项目虚拟环境 |
 
 完整文件树与“改功能该去哪里”见 [目录结构与维护指南](docs/目录结构.md)；其他资料见 [文档导航](docs/README.md)。
 
 ## 启动
 
-Windows 已安装 Python 3.10+ 时，双击 **启动取证工作台.bat**。脚本会切换到项目目录，首次运行创建本目录 `.venv`，缺少界面或镜像读取依赖时通过清华镜像安装 `requirements.txt` 中的依赖，再通过 `.venv\Scripts\python.exe main.py` 启动界面。首次安装依赖需要联网；依赖已安装后直接启动，不重复联网安装。保留终端窗口，运行失败时暂停以便查看错误。也可在本目录手动执行：
+Windows 已安装 Python 3.10+ 时，双击 **启动取证工作台.bat**。脚本会切换到项目目录，首次运行创建本目录 `.venv`，缺少界面、镜像读取或 MCP 依赖（`PySide6`、`pytsk3`、`pyewf`、`mcp`）时通过清华镜像安装 `requirements.txt` 中的依赖，再通过 `.venv\Scripts\python.exe main.py` 启动界面。首次安装依赖需要联网；依赖已安装后直接启动，不重复联网安装。保留终端窗口，运行失败时暂停以便查看错误。也可在本目录手动执行：
 
 ```powershell
 python -m venv .venv
@@ -34,7 +34,7 @@ python -m venv .venv
 
 当前工程已经包含官方 Windows TSK 程序和两份演示镜像，TSK 无需通过 pip 安装。若 TSK 文件丢失，运行 `powershell -File scripts/install_tsk.ps1`，或将环境变量 `TSK_BIN` 指向完整 TSK `bin` 目录。需要保留 DLL 与 licenses，不要只复制四个 exe。
 
-界面统一使用 PySide6 原生控件，采用白色主体、浅灰背景、翠绿主操作和多彩文件图标。布局为左侧完整文件树、右上文件列表、右下整行内容预览。Qt 6 自动处理高 DPI 和逻辑像素缩放；中文优先使用微软雅黑，文本和十六进制预览使用等宽字体。树、列表与内容支持滚动，区域之间可以拖动分隔条调整大小。所有 Python 第三方依赖只安装到本项目 `.venv`，使用清华镜像：
+界面统一使用 PySide6 原生控件，采用 **Archival Slate & Prussian Ink** 视觉规范：顶部为深岩青命令带（`#15202E`），下方依次为带 3 px 语义状态指示条的案件保管栏、模块导航标签带（右侧嵌入镜像操作按钮）、日光冷灰/纯白工作区与底部只读遥测状态栏；主色为普鲁士蓝（`#1B4D89`），列表和文件树通过统一渲染委托呈现语义胶囊徽章（现存/已删除/重分配/人工/MCP/MACB 事件）、普鲁士蓝选中导轨和本地高 DPI 矢量图标。文件浏览采用左侧数据源与完整文件树、右上文件列表、右下文本/图片/十六进制预览布局。Qt 6 自动处理高 DPI 和逻辑像素缩放；界面文本按本机可用字体优先选用 `Segoe UI Variable Text` / `Segoe UI` 与 `Microsoft YaHei UI` / `Microsoft YaHei` 混排，字节数、inode、偏移、哈希、十六进制、JSON 与 `fsstat` 统一使用 `Cascadia Mono` / `Cascadia Code` / `Consolas` 等宽字体。树、列表与内容支持滚动，区域之间可以拖动分隔条调整大小。所有 Python 第三方依赖只安装到本项目 `.venv`，使用清华镜像：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
@@ -50,7 +50,7 @@ python -m venv .venv
 4. 展开 DOCS 查看 CASE.TXT；可按 `.txt` 后缀或路径关键词筛选。界面和新生成的报告使用东八区（UTC+8），FAT 等无时区元数据按 UTC 解释，真实分析需预先核对源设备时区；未记录的时间不会显示成 1970 年。
 5. 点击“校验完整性”，再选择现存或已删除的文件导出。副本以原文件名保存到案件的 `exports` 目录。遇到重名时，新副本保存在独立子目录中，仍使用原文件名。导出前后均校验原镜像，并记录副本哈希。
 6. 右键树或列表中的普通文件可记录取证发现、计算 SHA-256 或与本地副本比对。进入“取证发现”查看按路径、分区和 inode 汇总的记录，可通过表头下拉框按状态/分区偏移筛选并支持“一键导出”对应镜像文件与汇总清单，生成报告时自动纳入。
-7. 在“MAC 时间线”“审计日志”和“取证发现”中，双击记录在下方打开详情，再单击其他记录切换内容。审计详情分栏列出操作参数、结果和前后关联的哈希值。点击“生成 Markdown 报告”，可在案件 `reports` 中查看 `.md` 文件。
+7. 在“MACB 时间线”“审计日志”和“取证发现”中，双击记录在下方打开详情，再单击其他记录切换内容。审计详情分栏列出操作来源（人工/MCP）、操作参数、结果和前后关联的哈希值。点击“生成 Markdown 报告”，可在案件 `reports` 中查看 `.md` 文件。
 8. 重启后通过“打开案件”选择该案件 `case.json`；旧案件尚未覆盖全部分区时自动补齐扫描。
 
 加载后左侧保留所有已识别分区及各自的目录、文件、删除记录和系统区域。无法读取的分区仍显示节点，点击可查看原因，不影响其他分区。点击镜像查看所有分区条目，点击分区只查看该分区，点击目录更新右上列表，双击列表中的目录进入。“全部展开/全部折叠”控制树的层级；后缀、路径和状态筛选只作用于当前范围，不裁剪左侧完整树。切换目录或点击“重置”清除筛选。
@@ -72,14 +72,13 @@ python -m venv .venv
 ## 实现与验证
 
 - 七项基本功能均实现；自动化测试真实调用 TSK，不用模拟解析器替代。
-- 扩展：审计哈希链及尾部锚点、MAC/B 时间线、路径关键词筛选、导出副本 SHA-256、导出前后原镜像校验。
-- `.\.venv\Scripts\python.exe -m unittest discover -s tests -v` 运行测试；实际记录见 `docs/validation/test-results.txt`。
-- 设计、评分对应、限制与 AI 参与说明见 [设计与验收说明.md](docs/设计与验收说明.md)。
-- 面向对象结构：`ApplicationLauncher` 管理入口和异常报告，`App` 协调操作，`WorkbenchView` / `FileBrowserView` 管理布局和文件树，`DesktopAppearance` 管理 DPI 与主题，`TaskRunner` 管理后台任务，`FilePreview` / `PreviewReader` 分离预览显示与读取，`Case` 和 `TSK` 保留原有取证业务接口。案件格式和取证流程保持不变。
-- 代码入口 `main.py`；控制器 `forensic/ui/controller.py`；窗口布局 `forensic/ui/workspace.py`；目录树和文件视图 `forensic/ui/browser.py`；对话框 `forensic/ui/views.py`；外观 `forensic/ui/appearance.py`；后台任务 `forensic/core/tasks.py`；案件逻辑 `forensic/core/case.py`；TSK 适配 `forensic/engines/tsk.py`。
-- 标题栏、任务栏和工作台左上角使用翠绿底、紫色镜框的“证据文件＋放大镜”图标，资源位于 `forensic/assets`。修改 SVG 后，可运行 `.\.venv\Scripts\python.exe scripts/make_icon.py` 重建 PNG 和多尺寸 ICO；重启程序生效。
-- 本次界面改版说明与真实窗口截图见 [实施与验证](docs/ui/实施与验证.md)。
-- `.\.venv\Scripts\python.exe scripts/package.py` 生成 `dist/学号_姓名_ForensicTool.zip`，提交前将文件名中的姓名和学号替换为本人信息。包内不含本地运行案件，解压后可重新运行演示脚本。
+- 扩展：审计哈希链及尾部锚点（区分人工/MCP 来源）、MACB 时间线、分段 EWF 与大容量镜像按需浏览、路径关键词与表头下拉筛选、多进程内容搜索与流式复核、导出副本 SHA-256、导出前后原镜像校验、可独立核验复核包与标准 MCP 服务端。
+- `.\.venv\Scripts\python.exe -m unittest discover -s tests -v` 运行回归测试（共 15 个测试模块、119 个测试用例）；历史记录见 [test-results.txt](docs/validation/test-results.txt)，大容量与 EWF 实测见 [1TiB 镜像性能实测](docs/validation/1TiB镜像性能实测.md) 和 [EWF 加载与复核实测](docs/validation/EWF加载与复核实测.md)。
+- 架构、界面规范、评分对应、限制与 AI 参与说明见 [设计与验收说明.md](docs/设计与验收说明.md)。
+- 面向对象结构：`ApplicationLauncher` 管理入口和异常报告，`App` 协调操作，`FeatureRegistry` 按需装配功能模块，`WorkbenchView` / `FileBrowserView` 管理布局和文件树，`DesktopAppearance` / `theme` / `ForensicItemDelegate` / `HexItemDelegate` 管理视觉规范与自定义渲染，`TaskRunner` 管理后台任务，`FilePreview` / `PreviewReader` 分离预览显示与读取，`Case`、`TSK`、`VolumeReader` 负责核心取证业务与只读解析，`CaseService` / `LocalHttpMcpManager` 负责 MCP 编排与本地托管。
+- 主要入口：桌面入口 `main.py`、MCP 入口 `mcp_server.py`、控制器 `forensic/ui/controller.py`、窗口布局 `forensic/ui/workspace.py`、主题与委托 `forensic/ui/theme.py` / `appearance.py` / `delegates.py`、目录树 `forensic/ui/browser.py`、核心案件逻辑 `forensic/core/case.py`、TSK 与 EWF/随机读取适配 `forensic/engines/tsk.py` / `ewf.py` / `random_read.py`；完整模块清单见 [目录结构与维护指南](docs/目录结构.md)。
+- 标题栏、任务栏和工作台左上角使用深普鲁士蓝圆角底、冷蓝磁道圆弧与纯白放大镜准星的“精密取证盘片与准星”徽标（顶部命令带直接由 SVG 按屏幕缩放倍率光栅化），资源位于 `forensic/assets/`。修改 `tracedesk.svg` 后，可运行 `.\.venv\Scripts\python.exe scripts/make_icon.py` 重建 256 px PNG 和 16–256 px 多尺寸 ICO；重启程序生效。
+- `.\.venv\Scripts\python.exe scripts/package.py` 生成 `dist/学号_姓名_ForensicTool.zip`，提交前将文件名中的姓名和学号替换为本人信息。包内不含本地运行案件、私人证据和 `.venv`，解压后可重新运行演示脚本。
 
 ## 大容量镜像
 
@@ -151,6 +150,6 @@ https://github.com/sleuthkit/sleuthkit/releases/download/sleuthkit-4.15.0/sleuth
 
 发行包的许可证及第三方组件许可证完整保留于 `tools/sleuthkit-4.15.0-win32/licenses/`，分发时必须一并保留。TSK 未作二进制修改；通过独立进程调用。
 
-桌面界面使用 Qt for Python 官方 PySide6（Qt 6）及其随包依赖，MCP 服务端使用官方 Python SDK（`mcp`），均由 `requirements.txt` 安装到项目 `.venv`。官方文档与许可入口：[Qt for Python](https://doc.qt.io/qtforpython-6/)、[Commercial Use](https://doc.qt.io/qtforpython-6/commercial/index.html)。上游提供 LGPLv3/GPLv3 和商业许可选项，具体组件适用许可及第三方声明以安装包所附文件为准。本工程通过 Python 导入使用，未修改 PySide6 或 Qt 二进制文件；源码工程包不包含 `.venv`，运行前需安装依赖，若另行分发运行库应一并保留其许可证和声明。
+桌面界面使用 Qt for Python 官方 `PySide6`（Qt 6）及其随包依赖，大容量文件随机读取与 EWF 逻辑介质解码使用 `pytsk3` 和 `libewf-python`，MCP 服务端使用官方 Python SDK（`mcp`），以上依赖均由 `requirements.txt` 安装到项目 `.venv`。官方文档与许可入口：[Qt for Python](https://doc.qt.io/qtforpython-6/)、[Commercial Use](https://doc.qt.io/qtforpython-6/commercial/index.html)。各组件具体适用许可及第三方声明以安装包所附文件为准。本工程仅通过 Python 导入使用，未修改 PySide6、Qt、pytsk3、libewf 或 mcp 二进制文件；源码工程包不包含 `.venv`，运行前需安装依赖，若另行分发运行库应一并保留其许可证和声明。
 
 AI 使用说明：Codex 主要用于辅助代码实现与调试、界面调整、测试及技术文档整理。个人学习心得、姓名学号和对项目的理解由本人据实补充。
