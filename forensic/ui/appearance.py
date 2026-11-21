@@ -654,13 +654,53 @@ def build_stylesheet() -> str:
             selection-color: {t.SURFACE_SELECTED_TEXT};
             outline: none;
         }}
-        QSpinBox::up-button, QSpinBox::down-button {{
-            width: 18px;
+        QSpinBox {{
+            padding-right: 22px;
+        }}
+        QSpinBox::up-button {{
+            subcontrol-origin: border;
+            subcontrol-position: top right;
+            width: 20px;
+            margin-top: 1px;
+            margin-right: 1px;
             border: none;
-            background: transparent;
+            border-left: 1px solid {t.BORDER_SUBTLE};
+            border-bottom: 1px solid {t.BORDER_SUBTLE};
+            border-top-right-radius: 4px;
+            background: {t.SURFACE_SUBTLE};
+        }}
+        QSpinBox::down-button {{
+            subcontrol-origin: border;
+            subcontrol-position: bottom right;
+            width: 20px;
+            margin-bottom: 1px;
+            margin-right: 1px;
+            border: none;
+            border-left: 1px solid {t.BORDER_SUBTLE};
+            border-bottom-right-radius: 4px;
+            background: {t.SURFACE_SUBTLE};
         }}
         QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
             background: {t.SURFACE_HOVER};
+            border-left-color: {t.BORDER_DEFAULT};
+        }}
+        QSpinBox::up-button:pressed, QSpinBox::down-button:pressed {{
+            background: {t.SURFACE_SELECTED};
+            border-left-color: {t.ACCENT};
+        }}
+        QSpinBox::up-button:disabled, QSpinBox::down-button:disabled {{
+            background: {t.SURFACE_DISABLED};
+            border-left-color: {t.BORDER_SUBTLE};
+        }}
+        QSpinBox::up-arrow {{
+            image: url("{_asset_url('chevron-up.svg')}");
+            width: 9px;
+            height: 9px;
+        }}
+        QSpinBox::down-arrow {{
+            image: url("{_asset_url('chevron-down.svg')}");
+            width: 9px;
+            height: 9px;
         }}
         QWidget#previewEncoding {{
             background: transparent;
