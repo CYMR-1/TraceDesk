@@ -5,6 +5,7 @@ cases/*
 !cases/.gitkeep
 dist/
 
+*.docx
 .venv/
 logs/
 
