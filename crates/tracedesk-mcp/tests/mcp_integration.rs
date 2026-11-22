@@ -86,17 +86,17 @@ fn create_multi_partition_test_image(dest_path: &Path) {
         let byte_off = (offset as usize) * 512;
         image[byte_off..byte_off + data.len()].copy_from_slice(&data);
 
-        // Write MBR partition entry at 446 + idx * 16.
+        // 在偏移 446 + idx * 16 处写入 MBR 分区表项。
         let entry_off = 446 + idx * 16;
         image[entry_off] = 0;
         image[entry_off + 1..entry_off + 4].copy_from_slice(&[0, 2, 0]);
-        image[entry_off + 4] = 0x06; // FAT16
+        image[entry_off + 4] = 0x06; // FAT16 分区类型
         image[entry_off + 5..entry_off + 8].copy_from_slice(&[0xFF, 0xFF, 0xFF]);
         image[entry_off + 8..entry_off + 12].copy_from_slice(&offset.to_le_bytes());
         image[entry_off + 12..entry_off + 16].copy_from_slice(&sectors.to_le_bytes());
     }
 
-    // Mark second root directory entry in partition 1 (offset 2048) as deleted (0xE5).
+    // 将第一分区（偏移 2048 扇区）的第二条根目录项标记为已删除（0xE5）。
     let root_dir_offset = ((2048 + 1 + 2 * 64) as usize) * 512;
     image[root_dir_offset + 32] = 0xE5;
 
@@ -152,7 +152,7 @@ fn test_tool_catalog_resources_and_config_generation() {
     let uris: Vec<&str> = resources.iter().map(|r| r.uri.as_str()).collect();
     assert_eq!(uris, vec!["tracedesk://cases", "tracedesk://guide/workflow"]);
 
-    // Verify client config & CLI helpers
+    // 验证客户端接入配置与命令行辅助函数
     let stdio_cfg = build_stdio_config(Some(&cases_dir));
     assert!(stdio_cfg["mcpServers"]["tracedesk"]["command"].is_string());
     let args_arr = stdio_cfg["mcpServers"]["tracedesk"]["args"]
@@ -173,7 +173,7 @@ fn test_tool_catalog_resources_and_config_generation() {
             .contains("--transport streamable-http --host 127.0.0.1 --port 8765 --path /mcp")
     );
 
-    // Verify CLI arg parsing
+    // 验证命令行参数解析
     let parsed_default = parse_cli_args(Vec::<String>::new()).expect("default cli args");
     assert_eq!(parsed_default.transport, TransportMode::Stdio);
     assert_eq!(parsed_default.host, "127.0.0.1");
@@ -213,7 +213,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     let (image_path, manifest) = prepare_demo_image(&tmp.path().join("evidence"));
     let server = create_server(Some(cases_dir.clone()), None);
 
-    // 1. tracedesk_create_case (also verify legacy wrapped {"params": {...}} compatibility)
+    // 1. tracedesk_create_case（同时验证旧版包装格式 {"params": {...}} 的兼容性）
     let created = call_json(
         &server,
         "tracedesk_create_case",
@@ -238,7 +238,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
         Some(DEFAULT_MCP_CLIENT_LABEL)
     );
 
-    // 2. tracedesk_list_cases (JSON & Markdown)
+    // 2. tracedesk_list_cases（JSON 与 Markdown 输出）
     let listed = call_json(&server, "tracedesk_list_cases", json!({}));
     assert_eq!(listed["total"].as_u64(), Some(1));
     assert_eq!(listed["items"][0]["number"].as_str(), Some("MCP-001"));
@@ -246,7 +246,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     assert!(listed_md.contains("# TraceDesk 案件列表"));
     assert!(listed_md.contains("MCP-001"));
 
-    // 3. tracedesk_load_image
+    // 3. tracedesk_load_image（加载镜像）
     let loaded = call_json(
         &server,
         "tracedesk_load_image",
@@ -261,7 +261,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     let image_sha = loaded["sha256"].as_str().expect("sha256").to_string();
     assert_eq!(image_sha.len(), 64);
 
-    // 4. tracedesk_register_source
+    // 4. tracedesk_register_source（登记证据来源）
     let registered = call_json(
         &server,
         "tracedesk_register_source",
@@ -281,7 +281,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
             .contains("一致")
     );
 
-    // 5. tracedesk_verify_integrity
+    // 5. tracedesk_verify_integrity（校验镜像完整性）
     let verified = call_json(
         &server,
         "tracedesk_verify_integrity",
@@ -289,7 +289,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     );
     assert_eq!(verified["ok"].as_bool(), Some(true));
 
-    // 6. tracedesk_get_case_summary (Markdown & JSON)
+    // 6. tracedesk_get_case_summary（Markdown 与 JSON 输出）
     let summary_md = call_text(
         &server,
         "tracedesk_get_case_summary",
@@ -304,7 +304,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     );
     assert_eq!(summary_json["audit_chain_valid"].as_bool(), Some(true));
 
-    // 7. tracedesk_scan_partitions (explicitly test partition scan tool)
+    // 7. tracedesk_scan_partitions（显式验证分区扫描工具）
     let rescanned = call_json(
         &server,
         "tracedesk_scan_partitions",
@@ -312,7 +312,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     );
     assert!(rescanned["inventory_count"].as_u64().unwrap_or(0) > 0);
 
-    // 8. tracedesk_list_files (JSON & Markdown, exercising read-only view cache)
+    // 8. tracedesk_list_files（JSON 与 Markdown 输出，同时覆盖只读视图缓存）
     let files = call_json(
         &server,
         "tracedesk_list_files",
@@ -337,7 +337,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     assert!(files_md.contains("# 文件列表（full_inventory）"));
     assert!(files_md.contains("DOCS/CASE.TXT"));
 
-    // 9. tracedesk_preview_file (JSON & Markdown)
+    // 9. tracedesk_preview_file（JSON 与 Markdown 输出）
     let preview = call_json(
         &server,
         "tracedesk_preview_file",
@@ -374,7 +374,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     assert!(preview_md.contains("## 文本内容"));
     assert!(preview_md.contains("## 十六进制"));
 
-    // 10. tracedesk_search_content (JSON & Markdown)
+    // 10. tracedesk_search_content（JSON 与 Markdown 输出）
     let search_hex = call_json(
         &server,
         "tracedesk_search_content",
@@ -400,7 +400,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     assert!(search_md.contains("# 内容搜索结果"));
     assert!(search_md.contains("DOCS/CASE.TXT"));
 
-    // 11. tracedesk_export_file
+    // 11. tracedesk_export_file（导出单个文件）
     let exported = call_json(
         &server,
         "tracedesk_export_file",
@@ -420,7 +420,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
         assert_eq!(exported["record"]["sha256"].as_str(), Some(expected_sha));
     }
 
-    // 12. tracedesk_examine_file (FILE_COMPARE against exported copy)
+    // 12. tracedesk_examine_file（与导出副本执行 FILE_COMPARE 比对）
     let compared = call_json(
         &server,
         "tracedesk_examine_file",
@@ -434,7 +434,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     assert_eq!(compared["operation"].as_str(), Some("FILE_COMPARE"));
     assert_eq!(compared["result"].as_str(), Some("一致"));
 
-    // 13. tracedesk_record_finding
+    // 13. tracedesk_record_finding（记录取证发现笔记）
     let noted = call_json(
         &server,
         "tracedesk_record_finding",
@@ -453,7 +453,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     );
     assert_eq!(noted["mcp_client"].as_str(), Some(DEFAULT_MCP_CLIENT_LABEL));
 
-    // 14. tracedesk_list_findings (JSON & Markdown)
+    // 14. tracedesk_list_findings（JSON 与 Markdown 输出）
     let findings = call_json(
         &server,
         "tracedesk_list_findings",
@@ -477,7 +477,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     assert!(findings_md.contains("# 取证发现"));
     assert!(findings_md.contains("[MCP · 本地 MCP 客户端]"));
 
-    // 15. tracedesk_export_findings
+    // 15. tracedesk_export_findings（批量导出取证发现）
     let exported_findings = call_json(
         &server,
         "tracedesk_export_findings",
@@ -491,7 +491,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     );
     assert!(summary_path.is_file());
 
-    // 16. tracedesk_query_timeline (JSON & Markdown, twice to exercise TimelineIndex cache)
+    // 16. tracedesk_query_timeline（JSON 与 Markdown 连续查询两次以覆盖 TimelineIndex 缓存）
     let timeline = call_json(
         &server,
         "tracedesk_query_timeline",
@@ -519,8 +519,8 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     );
     assert!(timeline_md.contains("# MACB 时间线（UTC+8）"));
 
-    // Add a manual operation via Case::open(..., AuditOrigin::Manual) to verify strict origin filtering
-    // and automatic cache refresh when disk files change externally!
+    // 通过 Case::open(..., AuditOrigin::Manual) 写入一条人工操作，验证严格的来源筛选
+    // 以及磁盘文件在外部变更时只读缓存自动刷新机制。
     {
         let mut manual_case =
             Case::open(Path::new(&case_dir), None, AuditOrigin::Manual).expect("open manual case");
@@ -530,7 +530,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
         manual_case.close();
     }
 
-    // 17. tracedesk_query_audit_log (mcp vs manual vs markdown)
+    // 17. tracedesk_query_audit_log（校验 mcp / manual 来源筛选与 Markdown 输出）
     let audit_mcp = call_json(
         &server,
         "tracedesk_query_audit_log",
@@ -582,7 +582,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     assert!(audit_md.contains("| MCP · 本地 MCP 客户端 |"));
     assert!(audit_md.contains("| 人工 |"));
 
-    // 18. tracedesk_generate_report
+    // 18. tracedesk_generate_report（生成取证报告）
     let report = call_json(
         &server,
         "tracedesk_generate_report",
@@ -596,7 +596,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     assert!(report_text.contains("| 人工 |"));
     assert!(report_text.contains("| MCP · 本地 MCP 客户端 |"));
 
-    // 19. tracedesk_build_review_bundle & native bundle verification
+    // 19. tracedesk_build_review_bundle 与原生复核包验签
     let bundle = call_json(
         &server,
         "tracedesk_build_review_bundle",
@@ -609,7 +609,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
         verify_bundle(&bundle_path, Some(bundle_sha)).expect("verify_bundle must pass");
     assert!(verified_members >= 6);
 
-    // Warm read-only view cache for list_files and query_timeline BEFORE tampering audit chain
+    // 在篡改审计链前，先预热 list_files 与 query_timeline 的只读视图缓存
     let warmed_files = call_json(
         &server,
         "tracedesk_list_files",
@@ -623,7 +623,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     );
     assert!(warmed_timeline["total"].as_u64().unwrap_or(0) > 0);
 
-    // Tamper with audit.head while case.json & inventory cache stay warm -> list_files & query_timeline must reject
+    // 在 case.json 与清单缓存保持热态时篡改 audit.head -> list_files 与 query_timeline 必须拒绝访问
     let head_file = Path::new(&case_dir).join("audit.head");
     let orig_head = fs::read_to_string(&head_file).expect("read audit.head");
     fs::write(&head_file, "0".repeat(64)).expect("tamper audit.head");
@@ -647,8 +647,8 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     );
     fs::write(&head_file, orig_head).expect("restore audit.head");
 
-    // Tamper with audit.jsonl (forge "origin":"mcp" -> "origin":"manual") and verify detection
-    // across query_audit_log, list_files, and query_timeline even on warm read cache
+    // 篡改 audit.jsonl（伪造 "origin":"mcp" -> "origin":"manual"），验证即便只读缓存处于热态，
+    // query_audit_log、list_files 与 query_timeline 仍能检出篡改
     let audit_file = Path::new(&case_dir).join("audit.jsonl");
     let raw_audit = fs::read_to_string(&audit_file).expect("read audit.jsonl");
     let tampered = raw_audit.replacen("\"origin\":\"mcp\"", "\"origin\":\"manual\"", 1);
@@ -684,7 +684,7 @@ fn test_boundaries_lock_contention_and_force_release() {
     );
     let case_dir = created["case_dir"].as_str().expect("case_dir").to_string();
 
-    // 1. Extra unknown fields must be rejected (extra='forbid')
+    // 1. 必须拒绝未知额外字段（等价于 extra='forbid'）
     let unknown_field_err = call_text(
         &server,
         "tracedesk_get_case_summary",
@@ -695,7 +695,7 @@ fn test_boundaries_lock_contention_and_force_release() {
     );
     assert!(unknown_field_err.starts_with("Error (ValueError):"));
 
-    // 2. Source image inside cases_dir must be rejected
+    // 2. 必须拒绝位于 cases_dir 内部的源镜像文件
     let bad_image = cases_dir.join("inside.dd");
     fs::write(&bad_image, vec![0u8; 512]).expect("write bad_image");
     let err = call_text(
@@ -709,7 +709,7 @@ fn test_boundaries_lock_contention_and_force_release() {
     assert!(err.contains("Error (ValueError)"), "got: {err}");
     assert!(err.contains("案件库目录之外"), "got: {err}");
 
-    // 3. When desktop holds case.lock, MCP tools return actionable error without crashing
+    // 3. 桌面端持有 case.lock 时，MCP 工具应返回可操作的中文提示且不崩溃
     let mut opened =
         Case::open(Path::new(&case_dir), None, AuditOrigin::Manual).expect("open desktop case");
     let lock_err = call_text(
@@ -720,18 +720,18 @@ fn test_boundaries_lock_contention_and_force_release() {
     assert!(lock_err.contains("锁定"), "got: {lock_err}");
     assert!(lock_err.contains("桌面端"), "got: {lock_err}");
 
-    // force_release_case_lock while actively locked by desktop must also report lock contention
+    // 桌面端仍在活跃持锁时调用 force_release_case_lock 也必须报告锁冲突
     let active_release_err = force_release_case_lock(Path::new(&case_dir)).unwrap_err();
     assert!(active_release_err.to_string().contains("锁定"));
 
-    // Release desktop lock -> force_release_case_lock cleans up stale case.lock file
+    // 释放桌面端锁后 -> force_release_case_lock 可安全清理残留的 case.lock 文件
     opened.close();
     drop(opened);
     let released = force_release_case_lock(Path::new(&case_dir)).expect("release stale lock");
     assert!(released);
     assert!(!Path::new(&case_dir).join("case.lock").exists());
 
-    // After MCP call finishes, lock is immediately released so desktop can open the case again
+    // MCP 调用结束后立即释放锁，桌面端可立即重新打开该案件
     let summary = call_json(
         &server,
         "tracedesk_get_case_summary",
@@ -742,7 +742,7 @@ fn test_boundaries_lock_contention_and_force_release() {
         Case::open(Path::new(&case_dir), None, AuditOrigin::Manual).expect("reopen after MCP call");
     drop(reopened);
 
-    // 4. Non-loopback host must be rejected
+    // 4. 必须拒绝非回环监听地址
     let host_err = validate_loopback_host("0.0.0.0").unwrap_err();
     assert!(host_err.to_string().contains("回环"));
 }
@@ -786,7 +786,7 @@ fn test_multi_partition_disambiguation_deleted_files_and_resources() {
         Some(2)
     );
 
-    // Without partition_offset, cross-partition duplicate README.TXT returns disambiguation prompt
+    // 未指定 partition_offset 时，跨分区同名的 README.TXT 应返回消歧提示
     let ambiguous = call_text(
         &server,
         "tracedesk_preview_file",
@@ -799,7 +799,7 @@ fn test_multi_partition_disambiguation_deleted_files_and_resources() {
     assert!(ambiguous.contains("2048"), "got: {ambiguous}");
     assert!(ambiguous.contains("20480"), "got: {ambiguous}");
 
-    // With partition_offset=20480, reads second partition's README.TXT
+    // 指定 partition_offset=20480 时，准确读取第二分区的 README.TXT
     let p2 = call_json(
         &server,
         "tracedesk_preview_file",
@@ -817,7 +817,7 @@ fn test_multi_partition_disambiguation_deleted_files_and_resources() {
             .starts_with("SECOND FS")
     );
 
-    // Filter and preview deleted files in partition 1 (offset 2048)
+    // 筛选并预览第一分区（偏移 2048 扇区）中的已删除文件
     let deleted_list = call_json(
         &server,
         "tracedesk_list_files",
@@ -844,7 +844,7 @@ fn test_multi_partition_disambiguation_deleted_files_and_resources() {
     );
     assert_eq!(del_preview["entry"]["deleted"].as_bool(), Some(true));
 
-    // Read both MCP resources
+    // 读取全部 2 个 MCP 资源
     let guide_res = server
         .read_resource("tracedesk://guide/workflow")
         .expect("read workflow resource");
@@ -873,7 +873,7 @@ fn test_stdio_jsonrpc_and_subprocess_end_to_end() {
         }),
     );
 
-    // 1. In-memory stdio loop test covering all required JSON-RPC 2.0 methods
+    // 1. 内存 stdio 消息循环测试，覆盖所有必需的 JSON-RPC 2.0 方法
     let requests = [
         json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}}),
         json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
@@ -897,13 +897,13 @@ fn test_stdio_jsonrpc_and_subprocess_end_to_end() {
         .lines()
         .map(|l| serde_json::from_str(l).expect("parse response line"))
         .collect();
-    // 8 messages sent, 1 notification -> 7 responses!
+    // 共发送 8 条消息，其中 1 条为通知 -> 应收到 7 条响应
     assert_eq!(lines.len(), 7);
     assert_eq!(
         lines[0]["result"]["serverInfo"]["name"].as_str(),
         Some("tracedesk_mcp")
     );
-    assert_eq!(lines[1]["id"].as_u64(), Some(2)); // ping
+    assert_eq!(lines[1]["id"].as_u64(), Some(2)); // ping 响应
     assert_eq!(
         lines[2]["result"]["tools"].as_array().map(Vec::len),
         Some(19)
@@ -931,7 +931,7 @@ fn test_stdio_jsonrpc_and_subprocess_end_to_end() {
     assert_eq!(call_data["total"].as_u64(), Some(1));
     assert_eq!(call_data["items"][0]["number"].as_str(), Some("MCP-STDIO"));
 
-    // 2. Real subprocess execution of `tracedesk-mcp.exe` over stdio
+    // 2. 启动真实 `tracedesk-mcp.exe` 子进程并通过 stdio 进行端到端通信
     let exe = env!("CARGO_BIN_EXE_tracedesk-mcp");
     let mut child = Command::new(exe)
         .args([
@@ -968,7 +968,7 @@ fn test_stdio_jsonrpc_and_subprocess_end_to_end() {
         .unwrap();
         stdin.flush().unwrap();
     }
-    // Close stdin so child exits cleanly after processing
+    // 关闭子进程 stdin，使其处理完请求后干净退出
     drop(child.stdin.take());
 
     let out = child.wait_with_output().expect("wait child");
@@ -1058,7 +1058,7 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
     assert_eq!(snap.port, port);
     assert_eq!(snap.tools.len(), 19);
 
-    // Second manager trying to bind the same port must fail with port-in-use error
+    // 第二个管理器尝试绑定同一端口时必须返回端口占用错误
     let manager2 = LocalHttpMcpManager::new(Some(cases_dir), None);
     let port_err = manager2.start("127.0.0.1", port, "/mcp").unwrap_err();
     assert!(
@@ -1069,7 +1069,7 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
     let host_hdr = format!("127.0.0.1:{port}");
     let origin_hdr = format!("http://127.0.0.1:{port}");
 
-    // 1. Valid initialize over Streamable HTTP
+    // 1. 通过 Streamable HTTP 发送合法的 initialize 握手请求
     let (code, body) = send_raw_http_request(
         port,
         "POST",
@@ -1094,7 +1094,7 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
         Some("tracedesk_mcp")
     );
 
-    // 2. Notification returns HTTP 202 Accepted
+    // 2. 通知类请求返回 HTTP 202 Accepted
     let (code_notif, _) = send_raw_http_request(
         port,
         "POST",
@@ -1108,7 +1108,7 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
     );
     assert_eq!(code_notif, 202);
 
-    // 3. tools/call over Streamable HTTP
+    // 3. 通过 Streamable HTTP 调用 tools/call
     let (code_call, body_call) = send_raw_http_request(
         port,
         "POST",
@@ -1145,7 +1145,7 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
         created["case_dir"].as_str()
     );
 
-    // 4. DNS Rebinding Attack: malicious Host header -> HTTP 421
+    // 4. DNS Rebinding 攻击拦截：恶意 Host 请求头 -> HTTP 421
     let (code_bad_host, _) = send_raw_http_request(
         port,
         "POST",
@@ -1158,7 +1158,7 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
     );
     assert_eq!(code_bad_host, 421);
 
-    // 5. DNS Rebinding Attack: LAN IP in Host header -> HTTP 421
+    // 5. DNS Rebinding 攻击拦截：局域网 IP 的 Host 请求头 -> HTTP 421
     let (code_lan_host, _) = send_raw_http_request(
         port,
         "POST",
@@ -1171,7 +1171,7 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
     );
     assert_eq!(code_lan_host, 421);
 
-    // 6. Cross-origin CSRF / DNS Rebinding Attack: valid Host but malicious Origin header -> HTTP 403
+    // 6. 跨站 CSRF / DNS Rebinding 攻击拦截：合法 Host 但恶意 Origin 请求头 -> HTTP 403
     let (code_bad_origin, _) = send_raw_http_request(
         port,
         "POST",
@@ -1185,7 +1185,7 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
     );
     assert_eq!(code_bad_origin, 403);
 
-    // 7. Root path "/" must return 404 Not Found (never misrouted to "/mcp")
+    // 7. 根路径 "/" 必须返回 404 Not Found（绝不能被误路由到 "/mcp"）
     let (code_root, _) = send_raw_http_request(
         port,
         "POST",
@@ -1195,7 +1195,7 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
     );
     assert_eq!(code_root, 404);
 
-    // Trailing slash "/mcp/" matches configured "/mcp"
+    // 带尾部斜杠的 "/mcp/" 应匹配已配置的 "/mcp" 端点
     let (code_trailing, _) = send_raw_http_request(
         port,
         "POST",
@@ -1205,7 +1205,7 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
     );
     assert_eq!(code_trailing, 200);
 
-    // 8. Oversized Content-Length (> MAX_HTTP_BODY_BYTES) -> HTTP 413 Payload Too Large
+    // 8. 超长 Content-Length（超过 MAX_HTTP_BODY_BYTES）-> HTTP 413 Payload Too Large
     {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect 413 test");
         stream
@@ -1227,7 +1227,7 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
         );
     }
 
-    // 9. Oversized chunked Transfer-Encoding -> HTTP 413 Payload Too Large
+    // 9. 超长 chunked Transfer-Encoding 请求体 -> HTTP 413 Payload Too Large
     {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect 413 chunked test");
         stream
@@ -1251,7 +1251,7 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
         );
     }
 
-    // 10. Stop server and verify clean shutdown
+    // 10. 停止服务并验证已干净关闭
     manager.stop();
     assert!(!manager.running());
 }
