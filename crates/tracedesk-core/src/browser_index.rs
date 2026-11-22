@@ -1,28 +1,27 @@
-//! Canonical inventory sorting, lazy directory tree indexing (with synthesized virtual
-//! ancestor directories), pagination (100/page), large-directory grouping (>2048 by 256),
-//! and multi-condition filtering (`core-contract.md` §3.5).
+//! 规范清单排序、延迟目录树索引（含合成的虚拟祖先目录）、分页（100 条/页）、
+//! 大目录分桶（超过 2048 项按 256 项分组）与多条件过滤（对应 `core-contract.md` §3.5）。
 
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use tracedesk_engines::{InventoryEntry, entry_name, entry_status};
 
-/// Default page size for paginated file listings.
+/// 分页文件列表的默认每页条数。
 pub const DEFAULT_PAGE_SIZE: usize = 100;
-/// Threshold above which UI switches to paginated & lazy tree rendering.
+/// UI 切换为分页与延迟树渲染的条目数阈值。
 pub const PAGING_THRESHOLD: usize = 1000;
-/// Directory child count threshold above which tree children are grouped into buckets.
+/// 目录子项数量超过该阈值时，树子节点将按桶分组展示。
 pub const TREE_GROUP_THRESHOLD: usize = 2048;
-/// Number of children per bucket when a directory exceeds [`TREE_GROUP_THRESHOLD`].
+/// 当目录子项超过 [`TREE_GROUP_THRESHOLD`] 时，每个分桶包含的子项数量。
 pub const TREE_GROUP_SIZE: usize = 256;
 
-/// Trim leading/trailing slashes from an in-image path.
+/// 去除镜像内路径的首尾斜杠并将反斜杠统一转换为正斜杠。
 #[inline]
 pub fn normalize_scope_path(path: &str) -> String {
     path.replace('\\', "/").trim_matches('/').to_string()
 }
 
-/// Parent directory portion of a slash-separated path (equivalent to Python `path.rpartition('/')[0]`).
+/// 获取斜杠分隔路径的父目录部分（等价于 Python `path.rpartition('/')[0]`）。
 #[inline]
 pub fn parent_dir(trimmed_path: &str) -> &str {
     trimmed_path
@@ -31,7 +30,7 @@ pub fn parent_dir(trimmed_path: &str) -> &str {
         .unwrap_or("")
 }
 
-/// Leaf name portion of a slash-separated path.
+/// 获取斜杠分隔路径的末级名称部分。
 #[inline]
 pub fn leaf_name(trimmed_path: &str) -> &str {
     trimmed_path
@@ -40,9 +39,9 @@ pub fn leaf_name(trimmed_path: &str) -> &str {
         .unwrap_or(trimmed_path)
 }
 
-/// Canonical sort comparator matching `forensic/core/browser_index.py::prepare`
-/// and `core-contract.md` §3.5:
-/// `(offset, path.matches('/').count(), mode.to_ascii_lowercase().starts_with("v/"), !directory, path, deleted)`.
+/// 规范排序比较器，与 `forensic/core/browser_index.py::prepare`
+/// 及 `core-contract.md` §3.5 保持一致：
+/// `(offset, path.matches('/').count(), mode.to_ascii_lowercase().starts_with("v/"), !directory, path, deleted)`。
 pub fn cmp_canonical(a: &InventoryEntry, b: &InventoryEntry) -> std::cmp::Ordering {
     let a_depth = a.path.matches('/').count();
     let b_depth = b.path.matches('/').count();
@@ -66,16 +65,16 @@ pub fn cmp_canonical(a: &InventoryEntry, b: &InventoryEntry) -> std::cmp::Orderi
         ))
 }
 
-/// A single item inside a directory branch of the navigation tree.
+/// 导航树某个目录分支下的单个项目。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeBranchItem {
-    /// Normalized path (trimmed of leading/trailing `/`).
+    /// 归一化路径（已去除首尾 `/`）。
     pub path: String,
-    /// Index into [`BrowserIndex::ordered`], or `None` for synthesized virtual ancestor folders.
+    /// 在 [`BrowserIndex::ordered`] 中的索引；若为合成的虚拟祖先目录则为 `None`。
     pub entry_index: Option<usize>,
 }
 
-/// Serializable node descriptor returned by lazy tree expansion (`get_tree_children`).
+/// 延迟展开目录树（`get_tree_children`）返回的可序列化节点描述。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TreeNodeDto {
@@ -92,7 +91,7 @@ pub struct TreeNodeDto {
     pub inode: String,
 }
 
-/// Response for lazy tree expansion of `(offset, scope_path)` with optional bucket `group_index`.
+/// 针对 `(offset, scope_path)` 及可选分桶索引 `group_index` 的延迟树展开响应。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TreeChildrenPage {
@@ -102,29 +101,29 @@ pub struct TreeChildrenPage {
     pub total_children: usize,
 }
 
-/// Entry status filter mode for file browser and MCP queries.
+/// 文件浏览器与 MCP 查询使用的条目状态筛选模式。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusFilter {
     #[default]
     All,
-    /// Desktop browser "现存文件": non-deleted, non-directory, non-system (`v/` / `V/`).
+    /// 桌面浏览器“现存文件”：未删除、非目录、非系统区域（`v/` / `V/`）。
     ActiveFile,
-    /// MCP "active": `entry_status(entry) == "现存"`.
+    /// MCP 的 `"active"`：`entry_status(entry) == "现存"`。
     ActiveStatus,
-    /// Deleted records (`deleted == true`).
+    /// 已删除记录（`deleted == true`）。
     Deleted,
-    /// System regions and virtual directories (`mode` starts with `v/` or `V/`).
+    /// 系统区域与虚拟目录（`mode` 以 `v/` 或 `V/` 开头）。
     System,
 }
 
-/// Multi-condition query filter for [`BrowserIndex::query_page`].
+/// [`BrowserIndex::query_page`] 使用的多条件查询过滤器。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BrowserFilter {
     pub scope_offset: Option<u64>,
-    /// Exact parent directory scope (matching desktop directory navigation).
+    /// 精确父目录范围（对应桌面端目录导航）。
     pub scope_path: Option<String>,
-    /// Recursive path prefix scope (matching MCP `path_prefix`).
+    /// 递归路径前缀范围（对应 MCP `path_prefix`）。
     pub path_prefix: Option<String>,
     pub suffix: String,
     pub keyword: String,
@@ -132,7 +131,7 @@ pub struct BrowserFilter {
     pub files_only: bool,
 }
 
-/// A single paginated query result referencing entries in [`BrowserIndex::ordered`].
+/// 单页查询结果，引用 [`BrowserIndex::ordered`] 中的条目索引。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserPage {
     pub total: usize,
@@ -142,7 +141,7 @@ pub struct BrowserPage {
     pub entry_ids: Vec<usize>,
 }
 
-/// Located position of an entry within its parent directory scope.
+/// 条目在其父目录范围中的定位坐标。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryLocation {
@@ -152,8 +151,8 @@ pub struct EntryLocation {
     pub index_in_page: usize,
 }
 
-/// Pre-indexed view over a case's inventory supporting fast directory lookup,
-/// lazy tree expansion, large-directory grouping, and paginated multi-condition filtering.
+/// 针对案件清单的预索引视图，支持快速目录查找、
+/// 延迟树展开、大目录分桶以及分页多条件过滤。
 #[derive(Debug, Clone, Default)]
 pub struct BrowserIndex {
     ordered: Vec<InventoryEntry>,
@@ -162,7 +161,7 @@ pub struct BrowserIndex {
 }
 
 impl BrowserIndex {
-    /// Build a [`BrowserIndex`] from an unsorted slice of [`InventoryEntry`] records.
+    /// 从未排序的 [`InventoryEntry`] 记录切片构建 [`BrowserIndex`]。
     pub fn build(entries: &[InventoryEntry]) -> Self {
         let mut ordered = entries.to_vec();
         ordered.sort_by(cmp_canonical);
@@ -212,38 +211,38 @@ impl BrowserIndex {
         }
     }
 
-    /// Canonically ordered entries; indices in this slice serve as stable `entry_id` handles.
+    /// 规范排序后的条目切片；该切片中的下标即稳定的 `entry_id` 句柄。
     pub fn ordered(&self) -> &[InventoryEntry] {
         &self.ordered
     }
 
-    /// Look up an entry by its `entry_id` (index into [`Self::ordered`]).
+    /// 根据 `entry_id`（[`Self::ordered`] 中的下标）查找对应条目。
     pub fn get(&self, entry_id: usize) -> Option<&InventoryEntry> {
         self.ordered.get(entry_id)
     }
 
-    /// Whether the inventory size exceeds [`PAGING_THRESHOLD`].
+    /// 清单条目数是否超过 [`PAGING_THRESHOLD`]。
     pub fn should_paginate(&self) -> bool {
         self.ordered.len() > PAGING_THRESHOLD
     }
 
-    /// Raw branch items under `(offset, scope_path)` (including virtual ancestor folders).
+    /// 获取 `(offset, scope_path)` 下的原始分支条目（含虚拟祖先目录）。
     pub fn branch_items(&self, offset: u64, scope_path: &str) -> &[TreeBranchItem] {
         let key = (offset, normalize_scope_path(scope_path));
         self.branches.get(&key).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    /// Direct concrete child entry IDs under `(offset, scope_path)`.
+    /// 获取 `(offset, scope_path)` 下的直接实际子条目 ID 列表。
     pub fn direct_children(&self, offset: u64, scope_path: &str) -> &[usize] {
         let key = (offset, normalize_scope_path(scope_path));
         self.children.get(&key).map(Vec::as_slice).unwrap_or(&[])
     }
 
-    /// Lazily expand tree children for `(offset, scope_path)`.
+    /// 延迟展开 `(offset, scope_path)` 的目录树子节点。
     ///
-    /// When a directory contains more than [`TREE_GROUP_THRESHOLD`] (2048) children and
-    /// `group_index` is `None`, returns synthetic bucket nodes of [`TREE_GROUP_SIZE`] (256) items each.
-    /// Passing `group_index = Some(g)` returns the concrete nodes in bucket `g`.
+    /// 当目录包含超过 [`TREE_GROUP_THRESHOLD`]（2048）个子项且 `group_index` 为 `None` 时，
+    /// 返回每桶 [`TREE_GROUP_SIZE`]（256）项的合成桶节点；
+    /// 传入 `group_index = Some(g)` 时返回第 `g` 个分桶中的实际节点。
     pub fn tree_children(
         &self,
         offset: u64,
@@ -360,7 +359,7 @@ impl BrowserIndex {
         }
     }
 
-    /// Filter entries according to [`BrowserFilter`] and return the requested 0-based page.
+    /// 按 [`BrowserFilter`] 筛选条目并返回请求的从 0 开始的页数据。
     pub fn query_page(
         &self,
         filter: &BrowserFilter,
@@ -481,7 +480,7 @@ impl BrowserIndex {
         }
     }
 
-    /// Locate an entry's parent directory scope and page coordinates.
+    /// 定位条目所属的父目录范围及分页坐标。
     pub fn locate_entry(&self, entry_id: usize, page_size: usize) -> Option<EntryLocation> {
         let row = self.ordered.get(entry_id)?;
         let scope_path = parent_dir(row.path.trim_matches('/')).to_string();

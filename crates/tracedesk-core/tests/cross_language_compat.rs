@@ -1,5 +1,5 @@
-//! Bidirectional cross-language compatibility integration tests between Rust `tracedesk-core`
-//! and Python `forensic/core` + `scripts/verify_bundle.py`.
+//! Rust `tracedesk-core` 与 Python `forensic/core` + `scripts/verify_bundle.py`
+//! 之间的双向跨语言兼容性集成测试。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -48,14 +48,14 @@ fn open_golden_python_case_and_verify_all_artifacts() {
     let copied = tmp.path().join("demo_case");
     copy_dir_recursive(src, &copied);
 
-    // 1. Open Python-generated golden case with Rust `Case::open`.
+    // 1. 使用 Rust `Case::open` 打开 Python 生成的黄金样本案件。
     let mut case = Case::open(&copied, None, AuditOrigin::Manual).expect("open golden case");
     assert_eq!(case.data().id, "77544962e34c412dbc68605e97a4ef1f");
     assert_eq!(case.data().number, "GOLDEN-2026-001");
     assert_eq!(case.data().examiner, "基线取证员");
     assert_eq!(case.data().target, "demo.dd 黄金兼容性样本");
 
-    // 2. Verify all 27 audit chain records pass SHA-256 verification.
+    // 2. 校验全部 27 条审计链记录均通过 SHA-256 验签。
     let records = case.check_audit().expect("check golden audit chain");
     assert_eq!(records.len(), 27);
     assert_eq!(
@@ -69,7 +69,7 @@ fn open_golden_python_case_and_verify_all_artifacts() {
         "c7c6169cd584a2ea91d0548200395599030d03cfec1a57279292d32b3037cf53"
     );
 
-    // 3. Verify 13 inventory entries and 18 MACB timeline events.
+    // 3. 校验 13 条文件清单记录与 18 条 MACB 时间线事件。
     assert_eq!(case.data().inventory.len(), 13);
     assert!(case.data().inventory.iter().any(|e| e.path == "DOCS/CASE.TXT"));
     assert!(case.data().inventory.iter().any(|e| e.path == "NOTES.TXT"));
@@ -83,7 +83,7 @@ fn open_golden_python_case_and_verify_all_artifacts() {
     let timeline = case.timeline_events();
     assert_eq!(timeline.len(), 18);
 
-    // 4. Verify exports and findings parsing.
+    // 4. 校验导出记录与取证发现解析。
     assert_eq!(case.data().exports.len(), 2);
     assert_eq!(case.data().exports[0].source, "DOCS/CASE.TXT");
     assert_eq!(case.data().exports[0].size, 38);
@@ -91,7 +91,7 @@ fn open_golden_python_case_and_verify_all_artifacts() {
     assert_eq!(case.data().exports[1].size, 56);
     let _findings = group_findings(&records);
 
-    // 5. Verify the Python-generated golden review bundle ZIP using native Rust `verify_bundle`.
+    // 5. 使用原生 Rust `verify_bundle` 核验 Python 生成的黄金样本复核包 ZIP。
     let golden_zip = copied.join("reports").join("report_c49fe3d534c9.zip");
     let verified_count = verify_bundle(
         &golden_zip,
@@ -111,7 +111,7 @@ fn rust_end_to_end_demo_dd_and_dual_verify_bundle() {
 
     let tmp_cases = tempfile::tempdir().expect("temp cases root");
 
-    // 1. Create case
+    // 1. 创建案件
     let mut case = Case::create(
         tmp_cases.path(),
         "RUST-E2E-001",
@@ -123,7 +123,7 @@ fn rust_end_to_end_demo_dd_and_dual_verify_bundle() {
     )
     .expect("create case");
 
-    // 2. Load image
+    // 2. 载入镜像
     case.load_image(&demo_dd, None, None, None)
         .expect("load demo.dd");
     let ev = case.data().evidence.as_ref().expect("evidence loaded");
@@ -135,7 +135,7 @@ fn rust_end_to_end_demo_dd_and_dual_verify_bundle() {
     assert_eq!(ev.partitions.len(), 1);
     assert_eq!(ev.partitions[0].offset, 2048);
 
-    // 3. Register provenance & check source status matches
+    // 3. 登记证据来源并校验交付方摘要一致
     case.register_source(&Provenance {
         evidence_id: "EV-DEMO-001".to_string(),
         source: "教学测试样本".to_string(),
@@ -150,20 +150,20 @@ fn rust_end_to_end_demo_dd_and_dual_verify_bundle() {
         "交付方摘要与本机固定值一致"
     );
 
-    // 4. Scan all partitions
+    // 4. 扫描所有分区
     let inventory = case
         .scan_partitions(None, None, None)
         .expect("scan partitions");
     assert_eq!(inventory.len(), 13);
 
-    // 5. Verify integrity
+    // 5. 校验镜像完整性
     assert!(case.verify_integrity(None, None, None).expect("verify"));
 
-    // 6. Filter files
+    // 6. 筛选文件
     let txt_files = case.filtered("txt", "").expect("filter txt");
     assert_eq!(txt_files.len(), 3);
 
-    // 7. Export CASE.TXT, NOTES.TXT, and duplicate NOTES.TXT (triggers `同名副本-` subfolder)
+    // 7. 导出 CASE.TXT、NOTES.TXT 及重复导出 NOTES.TXT（触发 `同名副本-` 子目录）
     let case_txt = inventory
         .iter()
         .find(|e| e.path == "DOCS/CASE.TXT")
@@ -192,7 +192,7 @@ fn rust_end_to_end_demo_dd_and_dual_verify_bundle() {
             .starts_with("同名副本-")
     );
 
-    // 8. Forensic findings: note + file hash + file compare + export_findings
+    // 8. 取证发现：笔记 + 单文件哈希 + 副本比对 + export_findings
     record_note(&mut case, &case_txt, "确认该文件包含测试案件核心说明。")
         .expect("record note");
     let hash_res = examine(&mut case, &case_txt, None, None).expect("file hash");
@@ -218,7 +218,7 @@ fn rust_end_to_end_demo_dd_and_dual_verify_bundle() {
     assert!(exp_findings.failed.is_empty());
     assert!(exp_findings.summary_path.is_file());
 
-    // 9. Content search: ASCII + Chinese UTF-8 with streaming callback verification
+    // 9. 内容搜索：ASCII 与中文 UTF-8，同时校验流式回调输出
     let cancel = AtomicBool::new(false);
     let mut streamed_ascii: Vec<SearchHit> = Vec::new();
     let ascii_out = search_case(
@@ -262,11 +262,11 @@ fn rust_end_to_end_demo_dd_and_dual_verify_bundle() {
     assert_eq!(zh_out.record.hits[0].path, "NOTES.TXT");
     assert_eq!(streamed_zh, zh_out.record.hits);
 
-    // 10. Timeline
+    // 10. 生成时间线
     let tl = case.timeline().expect("timeline");
     assert_eq!(tl.len(), 18);
 
-    // 11. Generate Markdown report & verify all 10 required sections
+    // 11. 生成 Markdown 报告并校验全部 10 节必需标题
     let report_path = case.report(None).expect("generate report");
     let report_md = fs::read_to_string(&report_path).expect("read report md");
     for heading in [
@@ -289,7 +289,7 @@ fn rust_end_to_end_demo_dd_and_dual_verify_bundle() {
         );
     }
 
-    // 12. Build review bundle ZIP + .zip.sha256
+    // 12. 构建复核包 ZIP 与 .zip.sha256
     let bundle = build_bundle(&mut case, &BuildBundleOptions::default(), None)
         .expect("build review bundle");
     assert!(bundle.bundle_path.is_file());
@@ -303,7 +303,7 @@ fn rust_end_to_end_demo_dd_and_dual_verify_bundle() {
     let zip_name = bundle.bundle_path.file_name().unwrap().to_string_lossy();
     assert_eq!(sha_file_content, format!("{}  {zip_name}\n", bundle.sha256));
 
-    // Verify `audit.head` on disk is exact 64 ASCII bytes with NO trailing newline.
+    // 校验磁盘上的 `audit.head` 严格为 64 字节 ASCII 且不含尾部换行符。
     let head_bytes = fs::read(case.folder().join("audit.head")).expect("read audit.head");
     assert_eq!(head_bytes.len(), 64);
     assert!(!head_bytes.contains(&b'\n'));
@@ -312,13 +312,13 @@ fn rust_end_to_end_demo_dd_and_dual_verify_bundle() {
     let case_dir = case.folder().to_path_buf();
     case.close();
 
-    // 13A. Native Rust `verify_bundle` verification
+    // 13A. 原生 Rust `verify_bundle` 核验
     let rust_verified =
         verify_bundle(&bundle.bundle_path, Some(&bundle.sha256)).expect("Rust verify_bundle");
-    assert_eq!(rust_verified, 12); // report.md + 4 exports + 2 searches + audit.jsonl + audit.head + verify_bundle.py + manifest.json + 复核说明.txt
+    assert_eq!(rust_verified, 12); // report.md + 4 个导出副本 + 2 份搜索记录 + audit.jsonl + audit.head + verify_bundle.py + manifest.json + 复核说明.txt
 
-    // 13B. Optional cross-language verification with embedded standalone `verify_bundle.py`
-    //      when local `.venv\Scripts\python.exe` and the script are present.
+    // 13B. 当本地存在 `.venv\Scripts\python.exe` 与独立脚本 `verify_bundle.py` 时，
+    //      可选执行跨语言核验。
     if let (Some(python_exe), Some(verify_script)) = (
         find_python_executable(&paths.root),
         paths.verify_bundle_script(),
@@ -342,7 +342,7 @@ fn rust_end_to_end_demo_dd_and_dual_verify_bundle() {
         );
     }
 
-    // 13C. Bonus: Re-open our Rust-created case in Rust AND ensure full audit chain passes!
+    // 13C. 附加校验：用 Rust 重新打开由 Rust 创建的案件并确认完整审计链通过校验。
     let mut reopened = Case::open(&case_dir, None, AuditOrigin::Manual).expect("reopen Rust case");
     let final_records = reopened.check_audit().expect("reopen audit check");
     assert!(final_records.len() >= 15);

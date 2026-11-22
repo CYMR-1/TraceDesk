@@ -1,6 +1,6 @@
-//! Verifiable review bundle builder (`reports/report_<12hex>.zip` + `.zip.sha256`)
-//! and native Rust bundle verifier (`verify_bundle`), 100% compatible with
-//! `scripts/verify_bundle.py` (`core-contract.md` §2.5).
+//! 可核验复核包构建器（`reports/report_<12hex>.zip` + `.zip.sha256`）
+//! 与原生 Rust 复核包校验器（`verify_bundle`），与 `scripts/verify_bundle.py`
+//! 保持 100% 兼容（对应 `core-contract.md` §2.5）。
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -21,10 +21,10 @@ use crate::findings::operation_title;
 use crate::formatting::{canonical_json_value, format_commas, hex_lower, sha256_hex};
 use crate::paths::{is_within, resolve_clean, strip_verbatim_prefix};
 
-/// Exact source bytes of the standalone `verify_bundle.py` verifier embedded at compile time.
+/// 编译期嵌入的独立校验脚本 `verify_bundle.py` 原始字节。
 pub const EMBEDDED_VERIFY_BUNDLE_PY: &[u8] = include_bytes!("../resources/verify_bundle.py");
 
-/// Inspected status of a single historical export record prior to bundle creation.
+/// 构建复核包前检查得到的单条历史导出记录状态。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BundleExportRow {
     pub index: usize,
@@ -42,7 +42,7 @@ pub struct BundleExportRow {
     pub missing_reason: String,
 }
 
-/// Inspected status of a single historical content search record (`reports/search_*.json`).
+/// 构建复核包前检查得到的单条历史内容搜索记录状态（`reports/search_*.json`）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BundleSearchRow {
     pub index: usize,
@@ -60,18 +60,18 @@ pub struct BundleSearchRow {
     pub missing_reason: String,
 }
 
-/// Options controlling selective material inclusion when calling [`build_bundle`].
+/// 调用 [`build_bundle`] 时控制按需纳入材料的选项。
 #[derive(Debug, Clone, Default)]
 pub struct BuildBundleOptions {
-    /// 1-based export indices to include; `None` selects all exports.
+    /// 要纳入的从 1 开始的导出记录序号列表；为 `None` 时全选所有导出记录。
     pub selected_export_indices: Option<Vec<usize>>,
-    /// 1-based search record indices to include; `None` selects all searches.
+    /// 要纳入的从 1 开始的搜索记录序号列表；为 `None` 时全选所有搜索记录。
     pub selected_search_indices: Option<Vec<usize>>,
-    /// If `true`, missing selected exports/searches are recorded as omitted instead of failing.
+    /// 若为 `true`，缺失的已选导出/搜索项记为省略而不报错中止。
     pub skip_missing: bool,
 }
 
-/// Result returned by [`build_bundle`].
+/// [`build_bundle`] 的返回结果。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildBundleResult {
     pub bundle_path: PathBuf,
@@ -85,8 +85,7 @@ pub struct BuildBundleResult {
     pub missing_searches: usize,
 }
 
-/// Resolve an export record's local file path inside `<case_dir>/exports/` even if the case
-/// folder was moved to another directory.
+/// 解析导出记录在 `<case_dir>/exports/` 下的本地文件路径，即使案件目录曾被整体移动仍可定位。
 pub fn resolve_export_path(case: &Case, item: &ExportRecord) -> CoreResult<(PathBuf, PathBuf)> {
     let original = Path::new(&item.path);
     let file_name = original
@@ -112,7 +111,7 @@ pub fn resolve_export_path(case: &Case, item: &ExportRecord) -> CoreResult<(Path
     Ok((resolved, relative))
 }
 
-/// Inspect all historical export copies in `case.data().exports` for local existence.
+/// 检查 `case.data().exports` 中所有历史导出副本的本地存在状态。
 pub fn inspect_bundle_exports(case: &Case) -> CoreResult<Vec<BundleExportRow>> {
     let mut rows = Vec::with_capacity(case.data().exports.len());
     for (idx, item) in case.data().exports.iter().enumerate() {
@@ -145,7 +144,7 @@ pub fn inspect_bundle_exports(case: &Case) -> CoreResult<Vec<BundleExportRow>> {
     Ok(rows)
 }
 
-/// Inspect all `CONTENT_SEARCH` records in the case's audit chain for local JSON existence.
+/// 检查案件审计链中所有 `CONTENT_SEARCH` 记录对应的本地 JSON 文件存在状态。
 pub fn inspect_bundle_searches(case: &mut Case) -> CoreResult<Vec<BundleSearchRow>> {
     let records = case.check_audit()?;
     let reports_root = resolve_clean(&case.folder().join("reports"));
@@ -207,7 +206,7 @@ pub fn inspect_bundle_searches(case: &mut Case) -> CoreResult<Vec<BundleSearchRo
     Ok(rows)
 }
 
-/// Format a human-readable Chinese listing of missing export copies and search records.
+/// 将缺失的导出副本与搜索记录格式化为可读的中文清单。
 pub fn format_missing_materials(
     missing_exports: &[BundleExportRow],
     missing_searches: &[BundleSearchRow],
@@ -245,8 +244,8 @@ pub fn format_missing_materials(
     sections.join("\n\n")
 }
 
-/// Build a verifiable ZIP64 review bundle (`reports/report_<12hex>.zip`) plus companion
-/// `.zip.sha256` file and append a `REVIEW_EXPORT` audit record (`core-contract.md` §2.5).
+/// 构建可核验 ZIP64 复核包（`reports/report_<12hex>.zip`）及配套 `.zip.sha256` 摘要文件，
+/// 并追加 `REVIEW_EXPORT` 审计记录（对应 `core-contract.md` §2.5）。
 pub fn build_bundle(
     case: &mut Case,
     options: &BuildBundleOptions,
@@ -522,11 +521,11 @@ pub fn build_bundle(
             included_searches += 1;
         }
 
-        // 4. audit.jsonl (exact raw bytes)
+        // 4. audit.jsonl（原始字节原样写入）
         let audit_bytes = fs::read(case.folder().join("audit.jsonl"))?;
         put_bytes(&mut archive, &mut checksums, "audit.jsonl", &audit_bytes)?;
 
-        // 5. audit.head (EXACT 64 ASCII bytes, NO trailing newline)
+        // 5. audit.head（严格 64 字节 ASCII，不含尾部换行符）
         put_bytes(
             &mut archive,
             &mut checksums,
@@ -534,7 +533,7 @@ pub fn build_bundle(
             audit_head.as_bytes(),
         )?;
 
-        // 6. verify_bundle.py (embedded standalone verifier)
+        // 6. verify_bundle.py（内嵌独立校验脚本）
         put_bytes(
             &mut archive,
             &mut checksums,
@@ -604,7 +603,7 @@ pub fn build_bundle(
             instructions.as_bytes(),
         )?;
 
-        // 9. SHA256SUMS.json (maps every ZIP member except itself -> 64-char hex SHA-256)
+        // 9. SHA256SUMS.json（将除自身外的每个 ZIP 成员映射到 64 位十六进制 SHA-256）
         let sums_json = serde_json::to_string_pretty(&checksums)?;
         archive.start_file("SHA256SUMS.json", zip_options)?;
         archive.write_all(sums_json.as_bytes())?;
@@ -687,10 +686,10 @@ fn sha256_stream<R: Read>(mut reader: R) -> CoreResult<String> {
     Ok(hex_lower(&hasher.finalize()))
 }
 
-/// Native Rust standalone review bundle verifier (`core-contract.md` §2.5),
-/// semantically identical to `scripts/verify_bundle.py::verify_bundle`.
+/// 原生 Rust 独立复核包校验器（对应 `core-contract.md` §2.5），
+/// 与 `scripts/verify_bundle.py::verify_bundle` 语义完全一致。
 ///
-/// Returns the number of verified material entries in `SHA256SUMS.json`.
+/// 返回 `SHA256SUMS.json` 中通过校验的材料成员总数。
 pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResult<usize> {
     if let Some(exp) = expected_sha256
         && !exp.trim().is_empty()
@@ -706,7 +705,7 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
     let file = File::open(zip_path)?;
     let mut archive = ZipArchive::new(file)?;
 
-    // 1. Collect all member names and reject duplicates.
+    // 1. 收集所有成员名称并拒绝重复成员。
     let mut names: Vec<String> = Vec::with_capacity(archive.len());
     let mut name_set: HashSet<String> = HashSet::with_capacity(archive.len());
     for i in 0..archive.len() {
@@ -720,7 +719,7 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
         names.push(name);
     }
 
-    // 2. Parse SHA256SUMS.json and enforce exact set equality.
+    // 2. 解析 SHA256SUMS.json 并强制要求成员集合完全一致。
     let checks: BTreeMap<String, String> = {
         let mut entry = archive.by_name("SHA256SUMS.json").map_err(|_| {
             CoreError::IntegrityFailed("复核包缺少 SHA256SUMS.json".to_string())
@@ -738,7 +737,7 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
         ));
     }
 
-    // 3. Recompute SHA-256 of every listed member.
+    // 3. 重新计算清单中每个成员的 SHA-256。
     for (member_name, expected_digest) in &checks {
         let entry = archive.by_name(member_name)?;
         let actual = sha256_stream(entry)?;
@@ -749,7 +748,7 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
         }
     }
 
-    // 4. Verify the entire SHA-256 audit hash chain inside `audit.jsonl`.
+    // 4. 校验 `audit.jsonl` 内完整的 SHA-256 审计哈希链。
     let previous = {
         let entry = archive.by_name("audit.jsonl")?;
         let reader = BufReader::new(entry);
@@ -779,7 +778,7 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
         prev
     };
 
-    // 5. Verify exact `audit.head` (NO strip, matching `scripts/verify_bundle.py:41`) and `manifest.json`.
+    // 5. 严格校验 `audit.head`（不去除空白，与 `scripts/verify_bundle.py:41` 一致）与 `manifest.json`。
     let audit_head_raw = {
         let mut entry = archive.by_name("audit.head")?;
         let mut s = String::new();
@@ -800,7 +799,7 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
         return Err(CoreError::AuditTampered("审计链尾不匹配".to_string()));
     }
 
-    // 6. Verify every export listed in `manifest.json` matches its member SHA-256 and uncompressed size.
+    // 6. 校验 `manifest.json` 中列出的每条导出记录均与对应成员的 SHA-256 及未压缩大小一致。
     let exports = manifest
         .get("exports")
         .and_then(Value::as_array)

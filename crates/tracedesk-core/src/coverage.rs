@@ -1,5 +1,5 @@
-//! Declared volume coverage assessment and evidence provenance validation
-//! (`core-contract.md` §3.2, matching `forensic/core/coverage.py`).
+//! 卷声明覆盖范围评估与证据来源校验
+//! （对应 `core-contract.md` §3.2，与 `forensic/core/coverage.py` 保持一致）。
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -20,7 +20,7 @@ static MMLS_RANGE_RE: LazyLock<Regex> = LazyLock::new(|| {
 static HEX_SHA256_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[0-9a-fA-F]{64}$").expect("valid sha256 regex"));
 
-/// Ordered 5 provenance metadata fields (`key`, `Chinese label`).
+/// 5 个有序的证据来源元数据字段（`键名`、`中文标签`）。
 pub const SOURCE_FIELDS: [(&str, &str); 5] = [
     ("evidence_id", "证据编号"),
     ("source", "来源 / 交付方"),
@@ -29,7 +29,7 @@ pub const SOURCE_FIELDS: [(&str, &str); 5] = [
     ("expected_sha256", "交付方 SHA-256"),
 ];
 
-/// Evidence provenance fields stored under `evidence.provenance` in `case.json`.
+/// 存储于 `case.json` 中 `evidence.provenance` 下的证据来源字段。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provenance {
     #[serde(default)]
@@ -45,7 +45,7 @@ pub struct Provenance {
 }
 
 impl Provenance {
-    /// Construct from a key/value map (such as `ewf::acquisition_info`).
+    /// 从键值映射构造（如 `ewf::acquisition_info` 的返回值）。
     pub fn from_map(map: &HashMap<String, String>) -> Self {
         Self {
             evidence_id: map.get("evidence_id").cloned().unwrap_or_default(),
@@ -56,7 +56,7 @@ impl Provenance {
         }
     }
 
-    /// Returns `true` when all 5 fields are empty.
+    /// 当全部 5 个字段均为空时返回 `true`。
     pub fn is_empty(&self) -> bool {
         self.evidence_id.is_empty()
             && self.source.is_empty()
@@ -65,7 +65,7 @@ impl Provenance {
             && self.expected_sha256.is_empty()
     }
 
-    /// Trim all fields and validate `expected_sha256` (must be 64 hex chars when non-empty).
+    /// 去除所有字段首尾空白并校验 `expected_sha256`（非空时必须为 64 位十六进制字符）。
     pub fn normalized_and_validated(&self) -> CoreResult<Self> {
         let clean = Self {
             evidence_id: self.evidence_id.trim().to_string(),
@@ -82,7 +82,7 @@ impl Provenance {
         Ok(clean)
     }
 
-    /// Look up one of the 5 standard `SOURCE_FIELDS` keys.
+    /// 按 5 个标准 `SOURCE_FIELDS` 键名查找对应字段值。
     pub fn get_field(&self, key: &str) -> &str {
         match key {
             "evidence_id" => &self.evidence_id,
@@ -95,7 +95,7 @@ impl Provenance {
     }
 }
 
-/// Coverage assessment for a single partition / volume.
+/// 单个分区 / 卷的覆盖范围评估结果。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VolumeCoverage {
     pub offset: u64,
@@ -106,16 +106,16 @@ pub struct VolumeCoverage {
     pub status: String,
 }
 
-/// Image-wide declared coverage report stored under `evidence.coverage`.
+/// 存储于 `evidence.coverage` 的整镜像声明覆盖范围报告。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoverageReport {
     pub bytes: u64,
     pub volumes: Vec<VolumeCoverage>,
 }
 
-/// Assess declared partition & filesystem volume boundaries against actual/logical image size.
+/// 将分区与文件系统卷的声明边界与实际/逻辑镜像大小进行对比评估。
 ///
-/// Mirrors `forensic/core/coverage.py::assess` byte-for-byte.
+/// 逐字节镜像 `forensic/core/coverage.py::assess` 的行为。
 pub fn assess_coverage<F>(
     image: &Path,
     partitions: &[PartitionInfo],
@@ -235,7 +235,7 @@ where
     })
 }
 
-/// Format a [`CoverageReport`] into the standard Chinese summary text.
+/// 将 [`CoverageReport`] 格式化为标准中文摘要文本。
 pub fn coverage_text(result: Option<&CoverageReport>) -> String {
     let Some(report) = result else {
         return "尚未评估；请运行完整性校验".to_string();
@@ -262,7 +262,7 @@ pub fn coverage_text(result: Option<&CoverageReport>) -> String {
     )
 }
 
-/// Compare the local baseline SHA-256 against the provider's expected SHA-256 (`core-contract.md` §3.2).
+/// 将本机基准 SHA-256 与交付方预期 SHA-256 进行比对（对应 `core-contract.md` §3.2）。
 pub fn source_status(evidence: &EvidenceInfo) -> &'static str {
     let expected = evidence
         .provenance

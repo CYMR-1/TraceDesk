@@ -1,15 +1,15 @@
-//! Project resource and runtime directory discovery.
+//! 项目资源与运行时目录发现。
 //!
-//! Works consistently across:
-//! - Development repository (`cargo test`, `cargo run`, workspace crates)
-//! - Compiled release binaries (`target/release/` or `target/debug/`)
-//! - Packaged Tauri desktop bundles (`<exe_dir>/resources/` or `<exe_dir>/`)
+//! 在以下环境中保持一致行为：
+//! - 开发仓库（`cargo test`、`cargo run`、工作区 crate）
+//! - 编译产物目录（`target/release/` 或 `target/debug/`）
+//! - 打包后的 Tauri 桌面安装包（`<exe_dir>/resources/` 或 `<exe_dir>/`）
 
 use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-/// Resolved TraceDesk runtime directories.
+/// 解析后的 TraceDesk 运行时目录集合。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
     pub root: PathBuf,
@@ -20,8 +20,8 @@ pub struct AppPaths {
     pub evidence_dir: PathBuf,
 }
 
-/// Strip Windows verbatim path prefixes (`\\?\` / `\\?\UNC\`) so paths match standard display
-/// and remain compatible with 32-bit Sleuth Kit executables and legacy Python metadata.
+/// 去除 Windows 原义路径前缀（`\\?\` / `\\?\UNC\`），使路径符合标准展示形式，
+/// 并保持与 32 位 Sleuth Kit 可执行程序及旧版 Python 元数据的兼容性。
 pub fn strip_verbatim_prefix(path: &Path) -> PathBuf {
     #[cfg(windows)]
     {
@@ -37,8 +37,7 @@ pub fn strip_verbatim_prefix(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Canonicalize an existing path cleanly (without Windows `\\?\` prefix), or normalize lexically
-/// against the current directory when the path does not yet exist.
+/// 将已存在路径规范化（不含 Windows `\\?\` 前缀）；若路径尚不存在，则基于当前目录做词法归一化。
 pub fn resolve_clean(path: &Path) -> PathBuf {
     if let Ok(canon) = fs::canonicalize(path) {
         return strip_verbatim_prefix(&canon);
@@ -63,9 +62,8 @@ pub fn resolve_clean(path: &Path) -> PathBuf {
     strip_verbatim_prefix(&normalized)
 }
 
-/// Returns `true` if `path` lies inside (or equals) `parent`.
-/// Performs case-insensitive comparison on Windows so drive/casing differences cannot bypass
-/// evidence isolation boundaries.
+/// 若 `path` 位于 `parent` 内部（或与 `parent` 相等）则返回 `true`。
+/// 在 Windows 上执行大小写不敏感比较，防止盘符或大小写差异绕过证据隔离边界。
 pub fn is_within(path: &Path, parent: &Path) -> bool {
     let p = resolve_clean(path);
     let base = resolve_clean(parent);
@@ -143,8 +141,7 @@ fn find_tsk_bin_under(dir: &Path, depth: usize) -> Option<PathBuf> {
 }
 
 impl AppPaths {
-    /// Discover application directories automatically across dev repo, `target/release/`,
-    /// and packaged Tauri installation layouts.
+    /// 在开发仓库、`target/release/` 以及打包后的 Tauri 安装布局中自动发现应用目录。
     pub fn discover() -> Self {
         if let Ok(explicit) = env::var("TRACEDESK_ROOT")
             && !explicit.trim().is_empty()
@@ -152,7 +149,7 @@ impl AppPaths {
             return Self::from_root(resolve_clean(Path::new(explicit.trim())));
         }
 
-        // 1. Check executable ancestors (works for target/debug, target/release, target/*/deps, and Tauri bundles).
+        // 1. 检查可执行文件的祖先目录（兼容 target/debug、target/release、target/*/deps 与 Tauri 安装包）。
         if let Ok(exe) = env::current_exe() {
             let exe = resolve_clean(&exe);
             if let Some(exe_dir) = exe.parent() {
@@ -165,21 +162,21 @@ impl AppPaths {
             }
         }
 
-        // 2. Check current working directory ancestors.
+        // 2. 检查当前工作目录的祖先目录。
         if let Ok(cwd) = env::current_dir()
             && let Some(repo_root) = walk_ancestors_for_root(&resolve_clean(&cwd))
         {
             return Self::from_root(repo_root);
         }
 
-        // 3. Check compile-time CARGO_MANIFEST_DIR (dev/test builds).
+        // 3. 检查编译期 CARGO_MANIFEST_DIR（开发/测试构建）。
         if let Ok(manifest_dir) = env::var("CARGO_MANIFEST_DIR")
             && let Some(repo_root) = walk_ancestors_for_root(&resolve_clean(Path::new(&manifest_dir)))
         {
             return Self::from_root(repo_root);
         }
 
-        // 4. Fallback to executable directory or current working directory.
+        // 4. 回退至可执行文件所在目录或当前工作目录。
         let fallback = env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(resolve_clean))
@@ -188,7 +185,7 @@ impl AppPaths {
         Self::from_root(fallback)
     }
 
-    /// Build [`AppPaths`] from an explicit project root directory, honoring optional env overrides.
+    /// 根据显式指定的项目根目录构建 [`AppPaths`]，并应用可选的环境变量覆盖。
     pub fn from_root(root: PathBuf) -> Self {
         let root = resolve_clean(&root);
         let default_tools = if root.join("tools").is_dir() {
@@ -219,7 +216,7 @@ impl AppPaths {
         paths
     }
 
-    /// Build [`AppPaths`] for a packaged Tauri executable directory.
+    /// 为打包后的 Tauri 可执行文件目录构建 [`AppPaths`]。
     pub fn from_packaged_dir(exe_dir: PathBuf) -> Self {
         let root = resolve_clean(&exe_dir);
         let res = root.join("resources");
@@ -273,7 +270,7 @@ impl AppPaths {
         }
     }
 
-    /// Locate the Sleuth Kit `bin` directory inside `TSK_BIN` or `self.tools_dir`.
+    /// 在 `TSK_BIN` 或 `self.tools_dir` 中定位 Sleuth Kit 的 `bin` 目录。
     pub fn find_tsk_bin(&self) -> Option<PathBuf> {
         if let Ok(env_bin) = env::var("TSK_BIN")
             && !env_bin.trim().is_empty()
@@ -286,7 +283,7 @@ impl AppPaths {
         find_tsk_bin_under(&self.tools_dir, 3)
     }
 
-    /// Locate the standalone `verify_bundle.py` script if present on disk.
+    /// 若磁盘上存在独立的 `verify_bundle.py` 脚本，则定位其路径。
     pub fn verify_bundle_script(&self) -> Option<PathBuf> {
         let candidates = [
             self.root

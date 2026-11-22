@@ -1,6 +1,6 @@
-//! Case lifecycle, isolation, atomic persistence, fast gzip inventory I/O,
-//! cross-process locking, large-image directory browsing, and tamper-evident
-//! SHA-256 audit hash chain (`core-contract.md` §1.2, §1.3, §2.1, §2.2, §3.4).
+//! 案件生命周期、目录隔离、原子持久化、快速 gzip 清单 I/O、
+//! 跨进程文件锁、大镜像目录浏览与防篡改 SHA-256 审计哈希链
+//! （对应 `core-contract.md` §1.2、§1.3、§2.1、§2.2、§3.4）。
 
 use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
@@ -34,10 +34,10 @@ use crate::paths::{is_within, resolve_clean, strip_verbatim_prefix};
 use crate::reporting::render_report;
 use crate::timeline::TimelineIndex;
 
-/// Large-image threshold (1 GiB): images at or above this size enter on-demand directory browsing.
+/// 大镜像阈值（1 GiB）：不小于该大小的镜像将进入按需目录快速浏览模式。
 pub const LARGE_IMAGE_BYTES: u64 = 1u64 << 30;
 
-/// 64-zero genesis hash for the first entry in `audit.jsonl`.
+/// `audit.jsonl` 首条记录使用的 64 个零创世哈希。
 pub const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 const DIR_CACHE_MAX_DIRS: usize = 8;
@@ -51,13 +51,13 @@ static EWF_NUMBERED_EXT_RE: LazyLock<Regex> =
 static FS_TYPE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^File System Type:\s*(\S+)").expect("valid fs type regex"));
 
-/// Tuple layout matching legacy Python `case.json` `source_stamp` rows: `(name, size, mtime_ns, ino)`.
+/// 与旧版 Python `case.json` 中 `source_stamp` 行一致的元组布局：`(name, size, mtime_ns, ino)`。
 pub type SourceStampRow = (String, u64, i64, u64);
 
-/// Callback reporting `(bytes_done, total_bytes)` progress.
+/// 报告 `(bytes_done, total_bytes)` 字节进度的回调函数。
 pub type ByteProgress<'a> = &'a (dyn Fn(u64, u64) + Sync);
 
-/// Callback reporting `(stage_label, done, total)` progress.
+/// 报告 `(stage_label, done, total)` 阶段进度的回调函数。
 pub type StageProgress<'a> = &'a (dyn Fn(&str, u64, u64) + Sync);
 
 fn stamp_to_row(s: &FileStamp) -> SourceStampRow {
@@ -76,7 +76,7 @@ where
     Deserialize::deserialize(deserializer).map(Some)
 }
 
-/// Evidence metadata persisted inside `case.json` (`core-contract.md` §2.1).
+/// 持久化于 `case.json` 内的证据元数据（对应 `core-contract.md` §2.1）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceInfo {
     pub path: String,
@@ -115,7 +115,7 @@ impl EvidenceInfo {
     }
 }
 
-/// Single exported copy record stored in `case.json` `exports` (`core-contract.md` §2.1).
+/// 存储于 `case.json` `exports` 中的单条导出副本记录（对应 `core-contract.md` §2.1）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExportRecord {
     pub path: String,
@@ -145,7 +145,7 @@ pub struct ExportRecord {
     pub start_cluster_allocated: Option<bool>,
 }
 
-/// Per-partition scan summary stored in `case.json` `partition_scans`.
+/// 存储于 `case.json` `partition_scans` 中的单分区扫描摘要。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartitionScan {
     pub offset: u64,
@@ -159,7 +159,7 @@ fn default_verify_method() -> String {
     "复算 RAW SHA-256".to_string()
 }
 
-/// Latest image integrity verification result stored in `case.json` `verification`.
+/// 存储于 `case.json` `verification` 中的最新镜像完整性校验结果。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationInfo {
     pub time: String,
@@ -169,7 +169,7 @@ pub struct VerificationInfo {
     pub method: String,
 }
 
-/// In-memory case metadata model (with full `inventory` materialized).
+/// 内存中的案件元数据模型（含完整物化的 `inventory`）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaseData {
     pub id: String,
@@ -187,7 +187,7 @@ pub struct CaseData {
     pub verification: Option<VerificationInfo>,
 }
 
-/// On-disk representation of `case.json` (either `inventory_file` + `inventory_count`, or `inventory: []`).
+/// `case.json` 的磁盘序列化形态（使用 `inventory_file` + `inventory_count`，或内联 `inventory: []`）。
 #[derive(Serialize)]
 struct CaseJsonDisk<'a> {
     id: &'a str,
@@ -215,9 +215,9 @@ struct CaseJsonDisk<'a> {
     inventory_count: Option<usize>,
 }
 
-/// Zero-allocation canonical serialization wrapper for [`InventoryEntry`]:
-/// fields are declared in strict alphabetical (UTF-8 / Unicode code point) order matching
-/// `canonical_json(&entry)` byte-for-byte without constructing an intermediate `serde_json::Value`.
+/// [`InventoryEntry`] 的零分配规范化序列化包装器：
+/// 字段按严格字母序（UTF-8 / Unicode 码点序）声明，无需构造中间 `serde_json::Value`
+/// 即可与 `canonical_json(&entry)` 逐字节一致。
 #[derive(Serialize)]
 struct CanonicalInventoryEntry<'a> {
     atime: i64,
@@ -262,7 +262,7 @@ impl<'a> From<&'a InventoryEntry> for CanonicalInventoryEntry<'a> {
     }
 }
 
-/// Write an inventory slice to `path` as fast gzip-compressed (`compresslevel=1`) canonical JSONL.
+/// 将清单切片以快速 gzip 压缩（`compresslevel=1`）规范化 JSONL 格式写入 `path`。
 pub fn write_inventory_gz(
     path: &Path,
     entries: &[InventoryEntry],
@@ -292,7 +292,7 @@ pub fn write_inventory_gz(
     write_res
 }
 
-/// Read a gzip-compressed JSONL inventory file from `path`.
+/// 从 `path` 读取 gzip 压缩的 JSONL 清单文件。
 pub fn read_inventory_gz(path: &Path) -> CoreResult<Vec<InventoryEntry>> {
     let file = File::open(path)?;
     let gz = GzDecoder::new(BufReader::with_capacity(256 * 1024, file));
@@ -315,7 +315,7 @@ pub fn read_inventory_gz(path: &Path) -> CoreResult<Vec<InventoryEntry>> {
     Ok(entries)
 }
 
-/// Atomically persist pretty-printed UTF-8 JSON (2-space indent) via `.tmp` + rename.
+/// 通过 `.tmp` 临时文件 + 重命名原子持久化带 2 空格缩进的 UTF-8 美化 JSON。
 pub fn save_json_atomic<T: Serialize>(path: &Path, value: &T) -> CoreResult<()> {
     let tmp = path.with_extension("tmp");
     let raw = serde_json::to_string_pretty(value)?;
@@ -327,18 +327,18 @@ pub fn save_json_atomic<T: Serialize>(path: &Path, value: &T) -> CoreResult<()> 
     Ok(())
 }
 
-/// Result of [`Case::measure_hash`], separated from [`Case::accept_hash`] so UI background workers
-/// can compute long hashes without holding a mutable borrow on `Case` for the entire duration.
+/// [`Case::measure_hash`] 的测量结果，与 [`Case::accept_hash`] 解耦，
+/// 便于 UI 后台线程在不全程持有 `Case` 可变借用的情况下计算耗时哈希。
 #[derive(Debug, Clone)]
 pub struct MeasuredHash {
     pub verification: VerificationInfo,
-    pub sha256_update: Option<(String, String)>, // (sha256, fixed_at)
+    pub sha256_update: Option<(String, String)>, // (sha256, fixed_at) 二元组
     pub segments_update: Option<Vec<SegmentDigest>>,
     pub source_stamp_update: Option<Vec<SourceStampRow>>,
     pub coverage_update: Option<CoverageReport>,
 }
 
-/// Current directory location in large-image quick-browse mode.
+/// 大镜像快速浏览模式下的当前目录定位。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryLocation {
     pub offset: u64,
@@ -369,8 +369,8 @@ fn system_time_to_ns(t: SystemTime) -> Option<i128> {
         .map(|d| d.as_nanos() as i128)
 }
 
-/// Independently verify `<case_dir>/audit.jsonl` and `<case_dir>/audit.head` from disk
-/// without mutating any state (`core-contract.md` §1.2).
+/// 从磁盘独立校验 `<case_dir>/audit.jsonl` 与 `<case_dir>/audit.head`，
+/// 不修改任何状态（对应 `core-contract.md` §1.2）。
 pub fn verify_audit_chain_at(folder: &Path) -> CoreResult<Vec<AuditRecord>> {
     let audit_path = folder.join("audit.jsonl");
     let content = fs::read_to_string(&audit_path)
@@ -423,8 +423,8 @@ pub fn verify_audit_chain_at(folder: &Path) -> CoreResult<Vec<AuditRecord>> {
     Ok(records)
 }
 
-/// Active TraceDesk forensic case holding `case.lock`, optional `SourceGuard`, in-memory
-/// metadata/inventory, directory browse LRU cache, and audit chain state.
+/// 活跃的 TraceDesk 取证案件对象，持有 `case.lock`、可选 `SourceGuard`、
+/// 内存元数据/清单、目录浏览 LRU 缓存以及审计链状态。
 pub struct Case {
     folder: PathBuf,
     actor: String,
@@ -585,7 +585,7 @@ impl Case {
             return Err(CoreError::CorruptCase("案件清单格式错误".to_string()));
         }
 
-        // Resolve inventory from either `inventory_file` (.jsonl.gz) or legacy inline `inventory`.
+        // 从 `inventory_file`（.jsonl.gz）或旧版内联 `inventory` 字段加载清单。
         let inventory_file = match obj.remove("inventory_file") {
             Some(Value::String(name)) => Some(name),
             Some(Value::Null) | None => None,
@@ -617,7 +617,7 @@ impl Case {
                 .map_err(|e| CoreError::CorruptCase(format!("案件清单格式错误：{e}")))?
         };
 
-        // Validate evidence required keys if non-null.
+        // 若 `evidence` 非空，校验其必需字段。
         let evidence: Option<EvidenceInfo> = match obj.get("evidence") {
             None | Some(Value::Null) => None,
             Some(ev_val) => {
@@ -730,7 +730,7 @@ impl Case {
         Ok(case)
     }
 
-    /// Release `SourceGuard` and `case.lock`, marking the case closed.
+    /// 释放 `SourceGuard` 与 `case.lock`，将案件标记为已关闭。
     pub fn close(&mut self) {
         self.source_guard = None;
         self.source_paths.clear();
@@ -783,7 +783,7 @@ impl Case {
         self.directory_location.as_ref()
     }
 
-    /// Path of the loaded forensic image, or error if no image is attached yet.
+    /// 返回已加载取证镜像的路径；尚未关联镜像时返回错误。
     pub fn image_path(&self) -> CoreResult<PathBuf> {
         let ev = self
             .data
@@ -793,7 +793,7 @@ impl Case {
         Ok(PathBuf::from(&ev.path))
     }
 
-    /// True when the case holds a `>= 1 GiB` image that has not yet completed a full partition scan.
+    /// 当案件关联了 `>= 1 GiB` 大镜像且尚未完成全部分区扫描时返回 `true`。
     pub fn browsing_directories(&self) -> bool {
         let large = self
             .data
@@ -808,7 +808,7 @@ impl Case {
         large && no_scans
     }
 
-    /// True when the set of scanned partition offsets does not cover all recognized partitions.
+    /// 当已扫描分区偏移集合未覆盖所有已识别分区时返回 `true`。
     pub fn needs_partition_scan(&self) -> bool {
         let Some(ref ev) = self.data.evidence else {
             return false;
@@ -825,7 +825,7 @@ impl Case {
         expected != scanned
     }
 
-    /// Entries currently visible to the user (either the quick-browsed directory or full inventory).
+    /// 当前对用户可见的条目列表（快速浏览目录内容或完整文件清单）。
     pub fn displayed_entries(&self) -> &[InventoryEntry] {
         if self.browsing_directories() {
             &self.directory_entries
@@ -834,8 +834,8 @@ impl Case {
         }
     }
 
-    /// Persist `case.json` atomically; if `rewrite_inventory` is true and inventory is non-empty,
-    /// writes a fresh `inventory-<uuid32>.jsonl.gz` and removes the previous file after replacement.
+    /// 原子持久化 `case.json`；当 `rewrite_inventory` 为 `true` 且清单非空时，
+    /// 写入新的 `inventory-<uuid32>.jsonl.gz`，替换成功后删除旧清单文件。
     pub fn save(&mut self, rewrite_inventory: bool, cancel: Option<&AtomicBool>) -> CoreResult<()> {
         self.save_internal(rewrite_inventory, cancel)
     }
@@ -909,8 +909,7 @@ impl Case {
         Ok(())
     }
 
-    /// Perform full verification of `audit.jsonl` and `audit.head` from disk, refreshing the
-    /// internal O(1)-append cache.
+    /// 从磁盘对 `audit.jsonl` 与 `audit.head` 执行全量校验，并刷新内部 O(1) 追加缓存。
     pub fn check_audit(&mut self) -> CoreResult<Vec<AuditRecord>> {
         let records = verify_audit_chain_at(&self.folder)?;
         let audit_path = self.folder.join("audit.jsonl");
@@ -934,9 +933,9 @@ impl Case {
         Ok(records)
     }
 
-    /// Check whether the on-disk `audit.jsonl` (`len`, `mtime`, raw SHA-256) and `audit.head` still
-    /// match our in-memory cache; returns `Some((count, head, file_hasher))` on fast-path hit, or
-    /// `None` requiring a full chain re-verification.
+    /// 检查磁盘上的 `audit.jsonl`（`len`、`mtime`、原始 SHA-256）与 `audit.head` 是否仍与
+    /// 内存缓存一致；快速路径命中时返回 `Some((count, head, file_hasher))`，否则返回 `None`
+    /// 以触发全量重新验链。
     fn audit_fast_check(&self) -> Option<(u64, String, Sha256)> {
         let cache = self.audit_cache.as_ref()?;
         let audit_path = self.folder.join("audit.jsonl");
@@ -1101,8 +1100,8 @@ impl Case {
         Ok(stamps_to_rows(&stamps))
     }
 
-    /// Acquire/verify the OS kernel `FILE_SHARE_READ` guard on all source image files and
-    /// confirm file identity/size/mtime have not changed.
+    /// 在所有源镜像文件上获取/校验操作系统内核 `FILE_SHARE_READ` 保护锁，
+    /// 并确认文件身份、大小与修改时间未发生变化。
     pub fn check_source(&mut self) -> CoreResult<()> {
         self.ensure_open()?;
         let image = self.image_path()?;
@@ -1134,7 +1133,7 @@ impl Case {
         Ok(())
     }
 
-    /// Load a RAW or EWF (`.E01`) image into the case (`core-contract.md` §2.1, §3.4).
+    /// 向案件载入 RAW 或 EWF（`.E01`）镜像（对应 `core-contract.md` §2.1、§3.4）。
     pub fn load_image(
         &mut self,
         image: &Path,
@@ -1328,7 +1327,7 @@ impl Case {
         Ok(())
     }
 
-    /// Return the large-image verification status note, or empty string for standard (`< 1 GiB`) images.
+    /// 返回大镜像校验状态说明；常规（`< 1 GiB`）镜像返回空字符串。
     pub fn source_note(&self) -> &'static str {
         let Some(ref ev) = self.data.evidence else {
             return "";
@@ -1347,10 +1346,10 @@ impl Case {
         }
     }
 
-    /// Pre-operation integrity guard (`core-contract.md` §3.4).
+    /// 操作前完整性门禁（对应 `core-contract.md` §3.4）。
     ///
-    /// Small images run full `verify_integrity`; large images verify the held `SourceGuard`
-    /// and require an explicit session verification when reopened after hash fixing.
+    /// 小镜像执行完整 `verify_integrity`；大镜像校验持有的 `SourceGuard`，
+    /// 若在固定摘要后重新打开案件则要求先显式完成本次会话校验。
     pub fn operation_check(
         &mut self,
         tsk: Option<&TskCli>,
@@ -1380,7 +1379,7 @@ impl Case {
         Ok(true)
     }
 
-    /// Register or update the 5 evidence provenance fields (`SOURCE_REGISTER`).
+    /// 登记或更新 5 项证据来源元数据字段（`SOURCE_REGISTER`）。
     pub fn register_source(&mut self, values: &Provenance) -> CoreResult<()> {
         let image = self.image_path()?;
         let image_str = image.to_string_lossy().into_owned();
@@ -1408,7 +1407,7 @@ impl Case {
         Ok(())
     }
 
-    /// Compute the image hash / segment comparison without committing to `case.json` or audit log.
+    /// 计算镜像哈希或分段比对结果，但暂不提交至 `case.json` 与审计日志。
     pub fn measure_hash(
         &mut self,
         tsk: Option<&TskCli>,
@@ -1539,8 +1538,8 @@ impl Case {
         })
     }
 
-    /// Commit a [`MeasuredHash`] to `case.json`, append `HASH_FIXED` or `HASH_VERIFY`,
-    /// and mark the session verified for large images.
+    /// 将 [`MeasuredHash`] 提交至 `case.json`，追加 `HASH_FIXED` 或 `HASH_VERIFY` 审计记录，
+    /// 并对大镜像标记本次会话已完成校验。
     pub fn accept_hash(&mut self, measured: MeasuredHash) -> CoreResult<bool> {
         self.ensure_open()?;
         let is_large = self
@@ -1610,7 +1609,7 @@ impl Case {
         Ok(ok)
     }
 
-    /// Re-verify (or initially fix) the image SHA-256 baseline (`HASH_VERIFY` / `HASH_FIXED`).
+    /// 重新校验（或首次固定）镜像 SHA-256 基线（`HASH_VERIFY` / `HASH_FIXED`）。
     pub fn verify_integrity(
         &mut self,
         tsk: Option<&TskCli>,
@@ -1633,7 +1632,7 @@ impl Case {
         }
     }
 
-    /// Alias for [`Self::verify_integrity`] when explicitly fixing an unhashed large image.
+    /// 显式固定尚未计算摘要的大镜像时使用的 [`Self::verify_integrity`] 别名。
     pub fn fix_hash(
         &mut self,
         tsk: Option<&TskCli>,
@@ -1643,7 +1642,7 @@ impl Case {
         self.verify_integrity(tsk, cancel, progress)
     }
 
-    /// Browse a single directory on-demand in large-image quick-browse mode (LRU cache: <=8 dirs, <=20k entries).
+    /// 在大镜像快速浏览模式下按需浏览单个目录（LRU 缓存上限：<=8 个目录、<=20k 条目）。
     pub fn browse_directory(
         &mut self,
         offset: u64,
@@ -1771,7 +1770,7 @@ impl Case {
         Ok((info, entries))
     }
 
-    /// Scan a single partition offset (`FILE_BROWSE`).
+    /// 扫描单个分区偏移（`FILE_BROWSE`）。
     pub fn scan_partition(
         &mut self,
         offset: u64,
@@ -1835,8 +1834,8 @@ impl Case {
         res
     }
 
-    /// Scan all recognized partitions (`FILE_BROWSE` per partition + `PARTITIONS_SCAN`).
-    /// Failures on individual partitions are recorded without aborting readable partitions.
+    /// 扫描全部已识别分区（逐分区记录 `FILE_BROWSE`，汇总记录 `PARTITIONS_SCAN`）。
+    /// 单个分区读取失败时仅记录错误，不中断其他可读分区的扫描。
     pub fn scan_partitions(
         &mut self,
         tsk: Option<&TskCli>,
@@ -1983,8 +1982,8 @@ impl Case {
         }
     }
 
-    /// Export full `fsstat` output for a partition into `reports/fsstat-<offset>-<12hex>.txt`
-    /// (`FSSTAT_EXPORT`).
+    /// 将指定分区的完整 `fsstat` 输出导出至 `reports/fsstat-<offset>-<12hex>.txt`
+    /// （`FSSTAT_EXPORT`）。
     pub fn export_fsstat(&mut self, offset: u64, tsk: Option<&TskCli>) -> CoreResult<PathBuf> {
         self.ensure_open()?;
         let valid = self
@@ -2033,8 +2032,8 @@ impl Case {
         res
     }
 
-    /// Filter `displayed_entries()` by suffix (auto-prefixed with `.`) and path/name keyword,
-    /// recording a `FILE_FILTER` audit entry (`core-contract.md` §3.5).
+    /// 按扩展名后缀（自动补全前导 `.`）与路径/文件名关键词筛选 `displayed_entries()`，
+    /// 并追加 `FILE_FILTER` 审计记录（对应 `core-contract.md` §3.5）。
     pub fn filtered(&mut self, suffix: &str, keyword: &str) -> CoreResult<Vec<InventoryEntry>> {
         self.ensure_open()?;
         let mut sfx = suffix.trim().to_lowercase();
@@ -2065,8 +2064,8 @@ impl Case {
         Ok(items)
     }
 
-    /// Export a regular or deleted file from the image into `<case_dir>/exports/` with
-    /// atomic no-clobber collision handling (`同名副本-<random>/`) and `FILE_EXPORT` audit.
+    /// 将镜像内的普通文件或已删除文件导出至 `<case_dir>/exports/`，
+    /// 采用无覆盖原子重名处理（`同名副本-<random>/`）并记录 `FILE_EXPORT` 审计日志。
     pub fn export(&mut self, entry: &InventoryEntry, tsk: Option<&TskCli>) -> CoreResult<PathBuf> {
         self.ensure_open()?;
         if !self.displayed_entries().contains(entry) || !can_export(entry) {
@@ -2130,7 +2129,7 @@ impl Case {
                 ));
             }
 
-            // Publish atomically WITHOUT overwriting any existing file at `destination`.
+            // 原子发布至 `destination`，严禁覆盖任何已存在文件。
             match fs::hard_link(&partial, &destination) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -2144,7 +2143,7 @@ impl Case {
                     destination = dup_dest;
                 }
                 Err(_) => {
-                    // Fallback on filesystems without hardlink support (e.g. FAT32).
+                    // 在不支持硬链接的文件系统（如 FAT32）上回退为重命名发布。
                     if destination.exists() {
                         let dup_dir = tempfile::Builder::new()
                             .prefix("同名副本-")
@@ -2230,12 +2229,12 @@ impl Case {
         res
     }
 
-    /// Build the MACB [`TimelineIndex`] from the case's current inventory without logging.
+    /// 基于案件当前清单构建 MACB [`TimelineIndex`]（不写入审计日志）。
     pub fn timeline_events(&self) -> TimelineIndex {
         TimelineIndex::build(self.data.inventory.clone())
     }
 
-    /// Build the MACB [`TimelineIndex`] and record a `TIMELINE` audit entry.
+    /// 构建 MACB [`TimelineIndex`] 并追加 `TIMELINE` 审计记录。
     pub fn timeline(&mut self) -> CoreResult<TimelineIndex> {
         let image_str = self.image_path()?.to_string_lossy().into_owned();
         let events = self.timeline_events();
@@ -2245,8 +2244,8 @@ impl Case {
         Ok(events)
     }
 
-    /// Verify integrity and generate the 10-section Markdown forensic report
-    /// (`reports/report_<12hex>.md`, `REPORT_GENERATE`).
+    /// 校验完整性并生成 10 节 Markdown 取证报告
+    /// （`reports/report_<12hex>.md`，记录 `REPORT_GENERATE`）。
     pub fn report(&mut self, tsk: Option<&TskCli>) -> CoreResult<PathBuf> {
         match self.write_report(tsk) {
             Ok(path) => Ok(path),

@@ -1,5 +1,5 @@
-//! Compact `u64` MACB timeline index with multi-core `rayon` parallel sorting & filtering
-//! (`core-contract.md` §3.6, matching `forensic/core/timeline.py`).
+//! 基于 `rayon` 多核并行排序与过滤的紧凑 `u64` MACB 时间线索引
+//! （对应 `core-contract.md` §3.6，与 `forensic/core/timeline.py` 保持一致）。
 
 use std::collections::BTreeSet;
 
@@ -10,7 +10,7 @@ use tracedesk_engines::{InventoryEntry, entry_status};
 use crate::error::{CoreError, CoreResult};
 use crate::formatting::{display_timestamp, format_unix_east8_stack};
 
-/// Ordered MACB timestamp fields and their Chinese labels.
+/// 有序 MACB 时间戳字段及其对应的中文标签。
 pub const TIMELINE_FIELDS: [(&str, &str); 4] = [
     ("mtime", "M 内容修改"),
     ("atime", "A 访问"),
@@ -18,7 +18,7 @@ pub const TIMELINE_FIELDS: [(&str, &str); 4] = [
     ("crtime", "B 创建"),
 ];
 
-/// Normalize an event filter string accepting either full Chinese labels or `M`/`A`/`C`/`B` aliases.
+/// 规范化事件筛选字符串，支持完整中文标签或 `M`/`A`/`C`/`B` 简写别名。
 pub fn normalize_event_filter(event: &str) -> CoreResult<&'static str> {
     let trimmed = event.trim();
     match trimmed.to_ascii_uppercase().as_str() {
@@ -49,7 +49,7 @@ fn entry_field_timestamp(entry: &InventoryEntry, field_idx: usize) -> i64 {
     }
 }
 
-/// ASCII case-insensitive substring check without heap allocations.
+/// 零堆分配的 ASCII 大小写不敏感子串匹配检查。
 #[inline]
 fn contains_ascii_icase(haystack: &[u8], needle_lower: &[u8]) -> bool {
     if needle_lower.is_empty() {
@@ -77,14 +77,14 @@ fn contains_ascii_icase(haystack: &[u8], needle_lower: &[u8]) -> bool {
     false
 }
 
-/// Single materialized timeline event row, preserving the 1-based global ascending sequence number.
+/// 单条物化的时间线事件行，保留从 1 开始的全局升序序号。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineRow {
-    /// 1-based original ascending position in the unfiltered timeline (`original_index + 1`).
+    /// 未筛选时间线中从 1 开始的原始升序位置（`original_index + 1`）。
     pub number: usize,
-    /// Formatted UTC+8 ISO-8601 timestamp.
+    /// 格式化后的 UTC+8 ISO-8601 时间戳。
     pub time: String,
-    /// Chinese MACB event label (e.g. `"M 内容修改"`).
+    /// 中文 MACB 事件标签（例如 `"M 内容修改"`）。
     pub event: String,
     pub path: String,
     pub inode: String,
@@ -92,7 +92,7 @@ pub struct TimelineRow {
     pub status: String,
 }
 
-/// Distinct available filter options derived from the timeline's underlying entries.
+/// 从时间线底层条目提取的去重可用筛选选项。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineFilterOptions {
     pub events: Vec<String>,
@@ -100,17 +100,17 @@ pub struct TimelineFilterOptions {
     pub offsets: Vec<String>,
 }
 
-/// Filter criteria for [`TimelineIndex::matching`] and [`TimelineIndex::query_page`].
+/// [`TimelineIndex::matching`] 与 [`TimelineIndex::query_page`] 使用的筛选条件。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TimelineFilter {
     pub query: String,
-    /// Full Chinese label or `M`/`A`/`C`/`B` alias.
+    /// 完整中文标签或 `M`/`A`/`C`/`B` 别名。
     pub event: Option<String>,
     pub status: Option<String>,
     pub offset: Option<u64>,
 }
 
-/// Paginated timeline response.
+/// 分页时间线查询响应。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelinePage {
     pub total: usize,
@@ -121,16 +121,16 @@ pub struct TimelinePage {
     pub items: Vec<TimelineRow>,
 }
 
-/// Compact `u64`-encoded MACB timeline index over an inventory snapshot.
+/// 基于清单快照构建的紧凑 `u64` 编码 MACB 时间线索引。
 #[derive(Debug, Clone)]
 pub struct TimelineIndex {
     entries: Vec<InventoryEntry>,
-    /// Compact `entry_idx * 4 + field_idx` indices sorted ascending by Unix timestamp.
+    /// 按 Unix 时间戳升序排列的紧凑索引（`entry_idx * 4 + field_idx`）。
     positions: Vec<u64>,
 }
 
 impl TimelineIndex {
-    /// Build and parallel-sort the compact MACB timeline from `entries` (skipping timestamps `<= 0`).
+    /// 从 `entries` 构建并并行排序紧凑 MACB 时间线（跳过 `<= 0` 的时间戳）。
     pub fn build(entries: Vec<InventoryEntry>) -> Self {
         let mut positions = Vec::with_capacity(entries.len().saturating_mul(3));
         for (idx, entry) in entries.iter().enumerate() {
@@ -148,36 +148,36 @@ impl TimelineIndex {
                 positions.push(base + 3);
             }
         }
-        // Stable multi-core parallel sort ascending by Unix timestamp.
+        // 按 Unix 时间戳执行稳定的多核并行升序排序。
         positions.par_sort_by_key(|&pos| {
             entry_field_timestamp(&entries[(pos / 4) as usize], (pos % 4) as usize)
         });
         Self { entries, positions }
     }
 
-    /// Total number of MACB events in the timeline.
+    /// 时间线中的 MACB 事件总数。
     #[inline]
     pub fn len(&self) -> usize {
         self.positions.len()
     }
 
-    /// Returns `true` if the timeline contains zero events.
+    /// 当时间线不包含任何事件时返回 `true`。
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.positions.is_empty()
     }
 
-    /// Raw compact `positions` slice (`entry_idx * 4 + field_idx`).
+    /// 原始紧凑 `positions` 切片（`entry_idx * 4 + field_idx`）。
     pub fn positions(&self) -> &[u64] {
         &self.positions
     }
 
-    /// Underlying entries slice.
+    /// 底层条目切片。
     pub fn entries(&self) -> &[InventoryEntry] {
         &self.entries
     }
 
-    /// Materialize a single [`TimelineRow`] at 0-based `original_index` (with 1-based `number`).
+    /// 按从 0 开始的 `original_index` 物化单条 [`TimelineRow`]（`number` 从 1 开始）。
     pub fn get(&self, original_index: usize) -> Option<TimelineRow> {
         let pos = *self.positions.get(original_index)?;
         let entry = &self.entries[(pos / 4) as usize];
@@ -194,14 +194,14 @@ impl TimelineIndex {
         })
     }
 
-    /// Materialize all timeline rows in ascending order.
+    /// 按升序物化全部时间线行。
     pub fn to_vec(&self) -> Vec<TimelineRow> {
         (0..self.positions.len())
             .filter_map(|i| self.get(i))
             .collect()
     }
 
-    /// Compute available filter dropdown options (`events`, `statuses`, `offsets`).
+    /// 计算可用的筛选下拉选项（`events`、`statuses`、`offsets`）。
     pub fn filter_options(&self) -> TimelineFilterOptions {
         let mut seen_fields = [false; 4];
         let mut statuses: BTreeSet<&'static str> = BTreeSet::new();
@@ -246,8 +246,7 @@ impl TimelineIndex {
         }
     }
 
-    /// Multi-core parallel filter returning matching 0-based indices into `self.positions`
-    /// in ascending order.
+    /// 多核并行过滤，按升序返回 `self.positions` 中匹配的从 0 开始索引列表。
     pub fn matching(&self, filter: &TimelineFilter) -> CoreResult<Vec<usize>> {
         let event_field_idx: Option<usize> = match filter.event.as_deref() {
             Some(ev) if !ev.trim().is_empty() => {
@@ -270,7 +269,7 @@ impl TimelineIndex {
         let query_lower = query_trimmed.to_lowercase();
         let query_ascii_bytes = query_lower.as_bytes();
 
-        // Fast path: no filter at all -> all indices 0..len.
+        // 快速路径：无任何筛选条件时直接返回 0..len 全部索引。
         if event_field_idx.is_none()
             && status_filter.is_none()
             && offset_filter.is_none()
@@ -318,7 +317,7 @@ impl TimelineIndex {
                             query_ascii_bytes,
                         );
                         if !matched {
-                            // Format partition offset on stack without heap allocation.
+                            // 在栈上格式化分区偏移，避免堆分配。
                             let mut off_buf = [0u8; 20];
                             let off_slice = format_u64_stack(entry.offset, &mut off_buf);
                             if contains_ascii_icase(off_slice, query_ascii_bytes) {
@@ -374,8 +373,7 @@ impl TimelineIndex {
         Ok(hits)
     }
 
-    /// Execute a filtered, optionally reversed, paginated timeline query while preserving
-    /// 1-based global original sequence numbers.
+    /// 执行带筛选、可选倒序的分页时间线查询，并保留从 1 开始的全局原始序号。
     pub fn query_page(
         &self,
         filter: &TimelineFilter,

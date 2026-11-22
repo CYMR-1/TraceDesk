@@ -1,7 +1,6 @@
-//! Multi-core SIMD exact byte search (`UTF-8` / `UTF-16LE` / `GBK` / `HEX`) with hardlink
-//! deduplication, rolling-window inode sorting, 64 MiB / 32 MiB parallel large-file splitting
-//! with sparse-zero skipping, 8-thread `icat` fallback pool, instant `AtomicBool` cancellation,
-//! and strict original-inventory-order streaming hit publication (`core-contract.md` §2.3, §3.8).
+//! 多核 SIMD 精确字节搜索（`UTF-8` / `UTF-16LE` / `GBK` / `HEX`），支持硬链接去重、
+//! 滚动窗口 inode 排序、64 MiB / 32 MiB 大文件并行切分与稀疏零区跳过、8 线程 `icat` 回退池、
+//! 即时 `AtomicBool` 取消以及严格按原始清单顺序流式发布命中结果（对应 `core-contract.md` §2.3、§3.8）。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -24,31 +23,31 @@ use crate::case::{Case, PartitionScan, StageProgress};
 use crate::error::{CoreError, CoreResult};
 use crate::formatting::hex_lower;
 
-/// Streaming callback receiving hit batches in strict original inventory order.
+/// 严格按原始清单顺序接收命中批次的流式回调函数。
 pub type HitCallback<'a> = &'a mut dyn FnMut(&[SearchHit]);
 
 type IcatOutcome = CoreResult<(DedupKey, Vec<RawHit>, Option<String>)>;
 
-/// Context bytes captured before and after each match.
+/// 每条命中前后捕获的上下文字节数。
 pub const CONTEXT_BYTES: usize = 12;
-/// Initial rolling window file budget (fast time-to-first-hit).
+/// 滚动窗口初始文件数预算（加快首次命中返回速度）。
 pub const WIN_INIT_FILES: usize = 2048;
-/// Maximum rolling window file budget.
+/// 滚动窗口最大文件数预算。
 pub const WIN_MAX_FILES: usize = 8192;
-/// Initial rolling window byte budget (128 MiB).
+/// 滚动窗口初始字节预算（128 MiB）。
 pub const WIN_INIT_BYTES: u64 = 128 << 20;
-/// Maximum rolling window byte budget (512 MiB).
+/// 滚动窗口最大字节预算（512 MiB）。
 pub const WIN_MAX_BYTES: u64 = 512 << 20;
-/// Files at or above 64 MiB are split into 32 MiB parallel pieces.
+/// 不小于 64 MiB 的文件将拆分为 32 MiB 分片并行扫描。
 pub const PIECE_SPLIT_MIN: u64 = 64 << 20;
-/// Piece size for parallel large-file scanning (32 MiB).
+/// 大文件并行扫描的分片大小（32 MiB）。
 pub const PIECE_BYTES: u64 = 32 << 20;
-/// Concurrency level for external `icat` fallback subprocess pool.
+/// 外部 `icat` 回退子进程池的并发线程数。
 pub const ICAT_THREADS: usize = 8;
 
 const STREAM_CHUNK_BYTES: usize = 1024 * 1024;
 
-/// Format bytes as lowercase space-separated 2-digit hex (`"43 61 73 65 20"`), `""` if empty.
+/// 将字节格式化为空格分隔的小写两位十六进制字符串（例如 `"43 61 73 65 20"`），空切片返回 `""`。
 pub fn hex_spaced_lower(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
@@ -65,8 +64,8 @@ pub fn hex_spaced_lower(bytes: &[u8]) -> String {
     out
 }
 
-/// Encode a search `query` under `encoding` (`UTF-8`, `UTF-16LE`, `GBK`, `HEX`) and enforce
-/// the `1..=4096` byte length limit (`core-contract.md` §3.8).
+/// 按 `encoding`（`UTF-8`、`UTF-16LE`、`GBK`、`HEX`）编码搜索关键词 `query`，
+/// 并校验 `1..=4096` 字节长度限制（对应 `core-contract.md` §3.8）。
 pub fn parse_pattern(query: &str, encoding: &str) -> CoreResult<Vec<u8>> {
     let bytes = match encoding.trim().to_ascii_uppercase().as_str() {
         "HEX" => decode_hex_pattern(query)?,
@@ -126,7 +125,7 @@ fn hex_nibble(b: u8) -> CoreResult<u8> {
     }
 }
 
-/// Raw match coordinate & hex context within a single file stream.
+/// 单个文件流内的原始命中坐标与十六进制上下文。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawHit {
     pub file_byte: u64,
@@ -134,8 +133,8 @@ pub struct RawHit {
     pub after: String,
 }
 
-/// Streaming AVX2 SIMD (`memchr::memmem`) sliding-window matcher preserving exact 12-byte
-/// `before`/`after` context across chunk boundaries and supporting overlapping hits.
+/// 流式 AVX2 SIMD（`memchr::memmem`）滑动窗口匹配器，跨块边界保留精确的 12 字节
+/// `before`/`after` 上下文，并支持重叠命中。
 pub struct StreamMatcher<'a> {
     finder: &'a memmem::Finder<'a>,
     needle_len: usize,
@@ -177,7 +176,7 @@ impl<'a> StreamMatcher<'a> {
         }
     }
 
-    /// Feed the next contiguous chunk of bytes; returns `Ok(true)` if the hit `limit` was reached.
+    /// 输入下一段连续字节块；若命中数已达上限 `limit` 则返回 `Ok(true)`。
     pub fn push_chunk(&mut self, block: &[u8], cancel: Option<&AtomicBool>) -> CoreResult<bool> {
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return Err(CoreError::Cancelled("已取消内容搜索".to_string()));
@@ -250,7 +249,7 @@ impl<'a> StreamMatcher<'a> {
     }
 }
 
-/// Search an arbitrary `Read` stream of known `size` using AVX2 SIMD `memmem`.
+/// 使用 AVX2 SIMD `memmem` 在已知长度 `size` 的任意 `Read` 流中执行匹配搜索。
 pub fn find_matches_in_reader<R: Read>(
     reader: &mut R,
     size: u64,
@@ -288,7 +287,7 @@ pub fn find_matches_in_reader<R: Read>(
     Ok(matcher.into_hits())
 }
 
-/// Selected single-file target metadata recorded in `reports/search_<32hex>.json`.
+/// 记录在 `reports/search_<32hex>.json` 中的单文件目标元数据。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectedSearchTarget {
     pub path: String,
@@ -296,7 +295,7 @@ pub struct SelectedSearchTarget {
     pub inode: String,
 }
 
-/// Error encountered while reading an individual entry during content search.
+/// 内容搜索期间读取单个文件条目时遇到的错误记录。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchErrorEntry {
     pub path: String,
@@ -305,7 +304,7 @@ pub struct SearchErrorEntry {
     pub error: String,
 }
 
-/// Single content search match serialized into `reports/search_<32hex>.json` (`core-contract.md` §2.3).
+/// 序列化写入 `reports/search_<32hex>.json` 的单条内容搜索命中项（对应 `core-contract.md` §2.3）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchHit {
     pub path: String,
@@ -319,7 +318,7 @@ pub struct SearchHit {
     pub source_note: String,
 }
 
-/// Full content search record persisted to `reports/search_<32hex>.json` (`core-contract.md` §2.3).
+/// 持久化至 `reports/search_<32hex>.json` 的完整内容搜索记录（对应 `core-contract.md` §2.3）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchRecord {
     pub query: String,
@@ -337,7 +336,7 @@ pub struct SearchRecord {
     pub hits: Vec<SearchHit>,
 }
 
-/// Parameters for [`search_case`].
+/// [`search_case`] 的调用参数。
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
     pub query: String,
@@ -346,7 +345,7 @@ pub struct SearchOptions {
     pub selected: Option<InventoryEntry>,
 }
 
-/// Output returned by [`search_case`].
+/// [`search_case`] 的返回结果。
 #[derive(Debug, Clone)]
 pub struct SearchOutput {
     pub record: SearchRecord,
@@ -509,7 +508,7 @@ struct DirectTask {
     key: DedupKey,
     piece_start: u64,
     entry: InventoryEntry,
-    sort_key: (u64, u64, u64), // (offset, inode_num, piece_start)
+    sort_key: (u64, u64, u64), // 排序键：(分区偏移, inode 编号, 分片起始偏移)
     preplanned_intervals: Option<Vec<ByteInterval>>,
 }
 
@@ -518,9 +517,9 @@ enum DirectOutcome {
     NeedsIcat,
 }
 
-/// Execute content search over all exportable entries (or a single `selected` entry),
-/// streaming hits strictly in original inventory order via `on_hit`, persisting
-/// `reports/search_<32hex>.json`, and logging `CONTENT_SEARCH` (`core-contract.md` §2.3, §3.8).
+/// 对所有可导出条目（或指定的单个 `selected` 条目）执行内容搜索，
+/// 通过 `on_hit` 严格按原始清单顺序流式输出命中项，持久化保存
+/// `reports/search_<32hex>.json` 并追加 `CONTENT_SEARCH` 审计日志（对应 `core-contract.md` §2.3、§3.8）。
 pub fn search_case(
     case: &mut Case,
     options: &SearchOptions,
@@ -621,7 +620,7 @@ pub fn search_case(
                 p("搜索文件内容", 0, total as u64);
             }
 
-            // Hardlink reference counts for non-deleted regular files.
+            // 统计未删除常规文件的硬链接引用计数。
             let mut key_counts: HashMap<DedupKey, usize> = HashMap::new();
             for entry in &entries {
                 if entry.size >= nlen && !entry.deleted && entry.mode.starts_with("r/") {
@@ -659,7 +658,7 @@ pub fn search_case(
                     return Err(CoreError::Cancelled("已取消内容搜索".to_string()));
                 }
 
-                // 1. Slice the next rolling window while preserving original inventory order.
+                // 1. 按原始清单顺序切分下一个滚动窗口。
                 let mut win_end = cursor;
                 let mut win_bytes: u64 = 0;
                 let mut win_seen_keys: HashSet<DedupKey> = HashSet::new();
@@ -688,7 +687,7 @@ pub fn search_case(
                     win_end += 1;
                 }
 
-                // 2. Partition window entries into skip / hardlink-reuse / direct / icat-fallback.
+                // 2. 将窗口内条目划分为跳过 / 硬链接复用 / 直接读取 / icat 回退四类任务。
                 let mut entry_keys: HashMap<usize, DedupKey> = HashMap::new();
                 let mut key_entry: HashMap<DedupKey, InventoryEntry> = HashMap::new();
                 let mut key_results: HashMap<DedupKey, (Vec<RawHit>, Option<String>)> =
@@ -775,8 +774,8 @@ pub fn search_case(
                     }
                 }
 
-                // 3. Sort direct tasks by (offset, inode_num, piece_start) for MFT/disk locality
-                //    and execute in parallel across rayon workers sharing `Arc<dyn MediaReader>`.
+                // 3. 按 (offset, inode_num, piece_start) 排序直读任务以提升 MFT/磁盘局部性，
+                //    并在共享 `Arc<dyn MediaReader>` 的 rayon 工作线程中并行执行。
                 direct_tasks.sort_unstable_by_key(|t| t.sort_key);
                 let window_done = AtomicUsize::new(0);
 
@@ -838,7 +837,7 @@ pub fn search_case(
                         )
                         .collect();
 
-                    // Reassemble pieces per DedupKey deterministically ordered by `piece_start`.
+                    // 按每个 DedupKey 的 `piece_start` 确定性顺序重组各分片命中结果。
                     let mut assembled: HashMap<DedupKey, (bool, BTreeMap<u64, Vec<RawHit>>)> =
                         HashMap::new();
                     for item in raw_outcomes {
@@ -872,7 +871,7 @@ pub fn search_case(
                     }
                 }
 
-                // 4. Run all fallback / FAT-deleted entries concurrently on the 8-thread `icat` pool.
+                // 4. 在 8 线程 `icat` 池上并发执行所有回退条目与 FAT 已删除条目。
                 if !icat_tasks.is_empty() {
                     let icat_outcomes: Vec<IcatOutcome> = icat_pool.install(|| {
                             icat_tasks
@@ -898,14 +897,14 @@ pub fn search_case(
                     }
                 }
 
-                // Cache hardlinked keys needed by future windows.
+                // 缓存后续窗口仍需复用的硬链接键结果。
                 for (key, val) in &key_results {
                     if shared_remaining.contains_key(key) {
                         shared_cache.insert(key.clone(), val.clone());
                     }
                 }
 
-                // 5. Publish results strictly in original `entries` order.
+                // 5. 严格按原始 `entries` 顺序发布命中结果。
                 for (idx, entry) in entries.iter().enumerate().take(win_end).skip(cursor) {
                     if cancel.load(Ordering::Relaxed) {
                         return Err(CoreError::Cancelled("已取消内容搜索".to_string()));
