@@ -30,7 +30,7 @@ export async function copyToClipboard(text: string): Promise<boolean> {
       return true;
     }
   } catch {
-    // Fallback below
+    // 降级使用下方兜底方案
   }
   try {
     const textarea = document.createElement('textarea');

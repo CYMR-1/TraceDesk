@@ -1,10 +1,10 @@
 /* ==========================================================================
- * TraceDesk Design System — 明净瓷白与晴空蓝 (Daylight Porcelain & Cerulean Sky)
- * 1:1 Design Tokens aligned with ui-contract.md, theme.py, metrics.py, appearance.py
+ * TraceDesk 设计系统 — 明净瓷白与晴空蓝
+ * 1:1 设计令牌，对齐 ui-contract.md、theme.py、metrics.py 与 appearance.py
  * ========================================================================== */
 
 :root {
-  /* 1. 顶部瓷白命令带 (Light Porcelain Command Ribbon) */
+  /* 1. 顶部瓷白命令带 */
   --header-bg: #FFFFFF;
   --header-border: #DFE7F0;
   --header-divider: #E2EAF2;
@@ -26,7 +26,7 @@
   --header-primary-disabled-fg: #7FA5CF;
   --header-primary-disabled-border: #C7DCF4;
 
-  /* 2. 明净瓷白表面 (Daylight Porcelain Surfaces) */
+  /* 2. 明净瓷白表面 */
   --canvas-bg: #EFF4F9;            /* 标签带 & 主背景底色 */
   --chrome-bg: #F7FAFD;            /* 保管栏 / 左侧树 / 顶部子栏 / 底栏 / HEX偏移槽 */
   --chrome-subtle: #F2F6FB;        /* 侧栏页头与页脚 */
@@ -40,7 +40,7 @@
   --surface-disabled: #F4F7FA;
   --image-backdrop: #F2F6FA;
 
-  /* 3. 边框与细分割线 (Borders & Structural Hairlines) */
+  /* 3. 边框与细分割线 */
   --border-subtle: #E6ECF3;
   --border-hairline: #E4EBF2;
   --border-pane: #DFE7F0;
@@ -49,7 +49,7 @@
   --border-focus: #2674C4;
   --border-soft-rule: #EFF3F8;
 
-  /* 4. 文本层级与十六进制视图 (Text Hierarchy & Hex View) */
+  /* 4. 文本层级与十六进制视图 */
   --text-primary: #1E293B;
   --text-secondary: #45586E;
   --text-muted: #60748A;
@@ -60,7 +60,7 @@
   --hex-char-fg: #334559;
   --hex-dot-fg: #B2BECA;           /* 不可打印占位符 · 弱化色 */
 
-  /* 5. 主色（晴空蓝 Cerulean Sky） */
+  /* 5. 主色（晴空蓝） */
   --accent: #2674C4;
   --accent-hover: #1E63AC;
   --accent-pressed: #175291;
@@ -71,7 +71,7 @@
   --header-hover-bg: #EBF3FB;
   --header-cell-fg: #4C6075;
 
-  /* 6. 语义状态与胶囊徽章 (Forensic Semantic Status & Pills) */
+  /* 6. 语义状态与胶囊徽章 */
   --ok-fg: #157347;
   --ok-bg: #EAF8F0;
   --ok-border: #B6E6CB;
@@ -149,7 +149,7 @@ button {
   color: inherit;
 }
 
-/* Custom crisp porcelain scrollbars */
+/* 自定义明净瓷白风格滚动条 */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -184,7 +184,7 @@ button {
   background: transparent;
 }
 
-/* ---------- Buttons (daylight palette roles) ---------- */
+/* ---------- 按钮（日间浅色系角色样式） ---------- */
 .td-btn {
   display: inline-flex;
   align-items: center;
@@ -357,7 +357,7 @@ button {
   border-color: #C49746;
 }
 
-/* ---------- Inputs & Selects ---------- */
+/* ---------- 输入框与下拉选择器 ---------- */
 .td-input,
 .td-select,
 .td-textarea {
@@ -486,7 +486,7 @@ button {
   color: var(--text-secondary);
 }
 
-/* ---------- Page Badge (Double-click jump) ---------- */
+/* ---------- 页码徽标（支持双击跳页） ---------- */
 .td-page-badge {
   display: inline-flex;
   align-items: center;
@@ -512,7 +512,7 @@ button {
   color: var(--accent-soft-text);
 }
 
-/* ---------- Banners & Status Badges ---------- */
+/* ---------- 提示横幅与状态徽标 ---------- */
 .td-banner {
   display: flex;
   flex-direction: column;
@@ -576,7 +576,7 @@ button {
   font-weight: 600;
 }
 
-/* ---------- Archival Dossier (DOSSIER_CSS) ---------- */
+/* ---------- 取证档案详情样式 (DOSSIER_CSS) ---------- */
 .td-dossier {
   padding: 14px 16px;
   background: var(--surface-bg);
@@ -649,7 +649,7 @@ button {
   color: #243952;
 }
 
-/* ---------- Guide Article (GUIDE_CSS) ---------- */
+/* ---------- 操作指南正文样式 (GUIDE_CSS) ---------- */
 .td-guide-article {
   font-size: 13.5px;
   color: var(--text-primary);

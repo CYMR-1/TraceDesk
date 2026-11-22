@@ -5,7 +5,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Modal } from './dialogs/Modal';
 
 interface PageJumpDialogProps {
-  currentPage: number; // 1-based
+  currentPage: number; // 从 1 开始的页码
   totalPages: number;
   onJump: (pageIndexZeroBased: number) => void;
   onClose: () => void;
@@ -82,7 +82,7 @@ export const PageJumpDialog: React.FC<PageJumpDialogProps> = ({
 };
 
 interface PaginationProps {
-  /** 0-based page index */
+  /** 从 0 开始的页码索引 */
   page: number;
   totalPages: number;
   onPageChange: (nextPageZeroBased: number) => void;

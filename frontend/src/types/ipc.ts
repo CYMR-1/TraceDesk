@@ -424,7 +424,7 @@ export interface McpStatus {
   activeCaseNumber: string | null;
 }
 
-/* ---------- Streaming Event Payloads (§3.6) ---------- */
+/* ---------- 流式事件载荷 (§3.6) ---------- */
 
 export interface TaskProgressEvent {
   stage: string;
