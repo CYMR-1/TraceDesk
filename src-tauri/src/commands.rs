@@ -1,5 +1,5 @@
-//! Implementation of all 38 Tauri Commands and 6 streaming Events defined in
-//! `ui-contract.md` §3 and `frontend/src/api/tauri.ts` (plus convenience aliases).
+//! 实现 `ui-contract.md` §3 与 `frontend/src/api/tauri.ts` 中定义的全部 38 个 Tauri 命令及
+//! 6 类流式事件（含便捷别名）。
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
@@ -43,7 +43,7 @@ use crate::state::{
 };
 
 /* ==========================================================================================
- * Helper: Event Emission
+ * 辅助函数：事件推送
  * ========================================================================================== */
 
 fn emit_task_started(app: Option<&AppHandle>, stage: &str) {
@@ -84,7 +84,7 @@ fn emit_task_finished(app: Option<&AppHandle>, stage: &str, ok: bool, error: Opt
 }
 
 /* ==========================================================================================
- * 3.1 App 状态与案件管理 Commands (Core Functions + Tauri Command Wrappers)
+ * 3.1 应用状态与案件管理命令（核心函数 + Tauri 命令封装）
  * ========================================================================================== */
 
 pub fn cmd_get_app_paths(state: &Arc<AppState>) -> Result<AppPathsDto, String> {
@@ -199,7 +199,7 @@ pub fn cmd_open_case(state: &Arc<AppState>, case_path: &str) -> Result<CaseSnaps
         .lock()
         .map_err(|_| "案件状态锁异常".to_string())?;
 
-    // If re-opening the currently open case folder, release the existing lock first.
+    // 若重新打开当前已打开的案件目录，需先释放现有锁。
     if case_guard
         .as_ref()
         .is_some_and(|c| resolve_clean(c.folder()) == folder)
@@ -315,7 +315,7 @@ pub fn cmd_list_recent_cases(state: &Arc<AppState>) -> Result<Vec<RecentCaseDto>
 }
 
 /* ==========================================================================================
- * 3.2 证据镜像与文件浏览 Commands
+ * 3.2 证据镜像与文件浏览命令
  * ========================================================================================== */
 
 pub fn cmd_load_image(
@@ -364,7 +364,7 @@ pub fn cmd_verify_integrity(
     state: &Arc<AppState>,
     app: Option<&AppHandle>,
 ) -> Result<VerifyIntegrityResponse, String> {
-    // Check if the loaded image is a large image (>= 1 GiB) and we have an AppHandle for background streaming.
+    // 检查已加载镜像是否为大镜像（>= 1 GiB），且持有用于后台流式推送进度的 AppHandle。
     let (is_large, initial_fixed_pre, snap_pre) = {
         let view = state
             .view
@@ -392,7 +392,7 @@ pub fn cmd_verify_integrity(
         });
     }
 
-    // Synchronous / small-image verification (with task:progress events).
+    // 同步/小镜像校验（附带 task:progress 事件推送）。
     emit_task_started(app, "校验 SHA-256");
     state.hash_cancel.store(false, Ordering::Relaxed);
     let cancel = Arc::clone(&state.hash_cancel);
@@ -441,15 +441,15 @@ pub fn cmd_verify_integrity(
     })
 }
 
-/// Spawn a non-blocking background worker for large-image (`>= 1 GiB`) SHA-256 verification.
-/// Releases `case_lock` during disk hashing so the user can continue browsing directories!
+/// 启动非阻塞后台工作线程执行大镜像（`>= 1 GiB`）SHA-256 校验。
+/// 磁盘计算哈希期间会释放 `case_lock`，确保用户可继续浏览目录。
 fn spawn_large_image_hash_worker(state: Arc<AppState>, app: AppHandle) -> Result<(), String> {
     if state.hashing_active.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
     state.hash_cancel.store(false, Ordering::Relaxed);
 
-    // Step 1: Under case_lock, verify source guard and clone EvidenceInfo.
+    // 第 1 步：在持有 case_lock 期间校验源镜像守卫并克隆 EvidenceInfo。
     let (ev, case_folder) = {
         let mut case_guard = match state.case_lock.lock() {
             Ok(g) => g,
@@ -501,7 +501,7 @@ fn spawn_large_image_hash_worker(state: Arc<AppState>, app: AppHandle) -> Result
 
             let measure_res = measure_hash_detached(&ev, &cancel, &progress_cb);
 
-            // Re-acquire case_lock briefly to commit `accept_hash` or log cancellation/error.
+            // 短暂重新获取 case_lock，以提交 `accept_hash` 结果或记录取消/错误日志。
             let mut finished_event = HashFinishedEvent {
                 cancelled: false,
                 ok: None,
@@ -1052,7 +1052,7 @@ pub fn cmd_locate_file_in_scope(
 }
 
 /* ==========================================================================================
- * 3.3 文件预览、导出与取证发现 Commands
+ * 3.3 文件预览、导出与取证发现命令
  * ========================================================================================== */
 
 pub fn cmd_preview_file_page(
@@ -1388,8 +1388,8 @@ pub fn cmd_list_findings(
         "尚无取证发现 · 右键文件可记录笔记、计算摘要或比对副本".to_string()
     };
 
-    // Match FindingsPanel.set_text: sort original groups ascending by (display_time(last.timestamp), last.seq)
-    // and assign 1-based `seq` in that order.
+    // 与 FindingsPanel.set_text 保持一致：将原始分组按 (display_time(last.timestamp), last.seq) 升序排列，
+    // 并按该顺序分配从 1 开始的 `seq` 编号。
     raw_groups.sort_by(|a, b| {
         let a_last = a.records.last();
         let b_last = b.records.last();
@@ -1552,7 +1552,7 @@ pub fn cmd_export_findings(
             if let Some(g) = by_key.remove(k) {
                 selected.push(g);
             } else {
-                // Fallback match without trailing image_sha256 for compatibility with 4-part keys.
+                // 兼容 4 段式分组键：忽略末尾的 image_sha256 进行回退匹配。
                 let found_key = by_key
                     .keys()
                     .find(|cand| cand.starts_with(&format!("{k}|")))
@@ -1596,7 +1596,7 @@ pub fn cmd_export_findings(
 }
 
 /* ==========================================================================================
- * 3.4 时间线、审计、内容搜索与复核包 Commands
+ * 3.4 时间线、审计、内容搜索与复核包命令
  * ========================================================================================== */
 
 pub fn cmd_build_timeline(state: &Arc<AppState>) -> Result<BuildTimelineResponse, String> {
@@ -1648,7 +1648,7 @@ pub fn cmd_query_timeline_page(
     page: usize,
     page_size: usize,
 ) -> Result<QueryTimelinePageResponse, String> {
-    // Ensure timeline is built in ViewCache.
+    // 确保 ViewCache 中已构建时间线索引。
     let needs_build = {
         let view = state
             .view
@@ -2032,7 +2032,7 @@ pub fn cmd_start_content_search(
             })
             .map_err(|e| format!("无法启动后台内容搜索线程：{e}"))?;
     } else {
-        // Synchronous execution when called from direct Rust tests without an AppHandle.
+        // 在无 AppHandle 的 Rust 集成测试直接调用时采用同步执行。
         run_content_search_worker(
             state_clone,
             sid,
@@ -2197,7 +2197,7 @@ fn run_content_search_worker(
         (out, snap)
     };
 
-    // Flush any remaining hits before emitting search:finished!
+    // 在发送 search:finished 之前刷新所有剩余命中结果。
     if let Some(ref handle) = app
         && !pending_batch.is_empty()
     {
@@ -2580,7 +2580,7 @@ pub fn cmd_build_review_bundle(
 }
 
 /* ==========================================================================================
- * 3.5 MCP 托管与系统工具 Commands
+ * 3.5 MCP 托管与系统工具命令
  * ========================================================================================== */
 
 pub fn cmd_get_mcp_status(state: &Arc<AppState>, port: Option<u16>) -> Result<McpStatus, String> {
@@ -2625,7 +2625,7 @@ pub fn cmd_open_in_os(
         return Ok(OpenInOsResponse { ok: false });
     }
 
-    // Security guard: only open files/folders inside the current case folder, cases_dir, or root.
+    // 安全边界校验：仅允许打开当前案件目录、cases_dir 或工作区根目录内的文件与文件夹。
     let allowed = {
         let view = state
             .view
@@ -2747,7 +2747,7 @@ pub fn cmd_get_guide_pages() -> Result<Vec<GuidePageDto>, String> {
 }
 
 /* ==========================================================================================
- * Tauri #[tauri::command] Wrappers (Non-blocking via spawn_blocking for heavy I/O)
+ * Tauri #[tauri::command] 命令封装（重型 I/O 通过 spawn_blocking 非阻塞执行）
  * ========================================================================================== */
 
 #[tauri::command]

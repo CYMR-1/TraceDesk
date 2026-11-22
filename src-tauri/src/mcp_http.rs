@@ -1,18 +1,16 @@
-//! Embedded local Streamable HTTP MCP server (`127.0.0.1:<port>/mcp`) for TraceDesk Desktop.
+//! TraceDesk 桌面端内嵌的本地 Streamable HTTP MCP 服务（`127.0.0.1:<port>/mcp`）。
 //!
-//! - Delegates all JSON-RPC 2.0 protocol handling, 19 forensic tools (with full JSON Schema,
-//!   FastMCP `{"params": {...}}` unwrapping, `response_format`, and `Error (<Kind>): ...`), and
-//!   2 resources directly to [`tracedesk_mcp::McpServer`] for 100% contract parity with the
-//!   standalone `tracedesk-mcp` server.
-//! - Reuses [`tracedesk_mcp::verify_dns_rebinding`] (missing/invalid `Host` -> HTTP 421,
-//!   invalid `Origin` -> HTTP 403), [`tracedesk_mcp::validate_loopback_host`],
-//!   [`tracedesk_mcp::normalize_http_path`], and [`tracedesk_mcp::MAX_HTTP_BODY_BYTES`] (16 MiB).
-//! - Supports HTTP/1.1 keep-alive, `Transfer-Encoding: chunked` (with `checked_add` overflow
-//!   protection -> HTTP 413), strict `Content-Length` parsing (malformed -> HTTP 400, >16 MiB
-//!   -> HTTP 413), strict request path matching (root `/` returns HTTP 404 when mounted on `/mcp`),
-//!   and per-connection worker threads so slow tools never block the accept loop.
-//! - Smoothly coordinates `case.lock` with the active desktop [`AppState`] whenever a `tools/call`
-//!   targets the case currently open in the desktop UI.
+//! - 将全部 JSON-RPC 2.0 协议处理、19 个取证工具（含完整 JSON Schema、
+//!   FastMCP `{"params": {...}}` 解包、`response_format` 以及 `Error (<Kind>): ...`）与
+//!   2 个资源直接委托给 [`tracedesk_mcp::McpServer`]，与独立版 `tracedesk-mcp` 服务保持 100% 契约一致。
+//! - 复用 [`tracedesk_mcp::verify_dns_rebinding`]（缺失或无效 `Host` 返回 HTTP 421，
+//!   无效 `Origin` 返回 HTTP 403）、[`tracedesk_mcp::validate_loopback_host`]、
+//!   [`tracedesk_mcp::normalize_http_path`] 以及 [`tracedesk_mcp::MAX_HTTP_BODY_BYTES`]（16 MiB）。
+//! - 支持 HTTP/1.1 keep-alive、`Transfer-Encoding: chunked`（带 `checked_add` 溢出保护，
+//!   超限时返回 HTTP 413）、严格的 `Content-Length` 解析（格式错误返回 HTTP 400，超过 16 MiB
+//!   返回 HTTP 413）、严格的请求路径匹配（挂载在 `/mcp` 时访问根路径 `/` 返回 HTTP 404），
+//!   以及每连接独立工作线程，确保耗时工具不会阻塞 accept 循环。
+//! - 当 `tools/call` 指向桌面端 UI 当前打开的案件时，与活跃的 [`AppState`] 平滑协调 `case.lock`。
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
@@ -33,7 +31,7 @@ use uuid::Uuid;
 
 use crate::state::{AppState, ToolCatalogItem};
 
-/// Single-sourced 19-tool catalog directly from [`tracedesk_mcp::TOOL_CATALOG`].
+/// 直接从 [`tracedesk_mcp::TOOL_CATALOG`] 统一生成 19 个工具的目录。
 pub fn default_tool_catalog() -> Vec<ToolCatalogItem> {
     TOOL_CATALOG
         .iter()
@@ -47,7 +45,7 @@ pub fn default_tool_catalog() -> Vec<ToolCatalogItem> {
         .collect()
 }
 
-/// List recent cases under `cases_dir` (or the default workspace `cases/` root) via `CaseService`.
+/// 通过 `CaseService` 列出 `cases_dir`（或默认工作区 `cases/` 根目录）下的最近案件。
 pub fn mcp_list_cases(
     state: &Arc<AppState>,
     cases_dir: Option<&str>,
@@ -59,7 +57,7 @@ pub fn mcp_list_cases(
         .map_err(|e| e.to_string())
 }
 
-/// Manages the lifecycle of the embedded loopback Streamable HTTP MCP server.
+/// 管理内嵌本地回环 Streamable HTTP MCP 服务的生命周期。
 pub struct LocalMcpHttpServer {
     host: String,
     port: u16,
@@ -103,7 +101,7 @@ impl LocalMcpHttpServer {
         &self.path
     }
 
-    /// Start the loopback Streamable HTTP MCP listener on `127.0.0.1:<port>/mcp`.
+    /// 在 `127.0.0.1:<port>/mcp` 启动回环 Streamable HTTP MCP 监听器。
     pub fn start(&mut self, port: u16, app_state: Arc<AppState>) -> Result<(), String> {
         if port == 0 {
             return Err("端口号必须在 1 到 65535 之间。".to_string());
@@ -165,7 +163,7 @@ impl LocalMcpHttpServer {
         Ok(())
     }
 
-    /// Gracefully stop the local Streamable HTTP MCP server.
+    /// 优雅停止本地 Streamable HTTP MCP 服务。
     pub fn stop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         let bind_ip = resolve_bind_ip(&self.host);
@@ -193,8 +191,8 @@ fn resolve_bind_ip(host: &str) -> IpAddr {
     }
 }
 
-/// Normalize inbound HTTP request path by stripping trailing slashes ONLY.
-/// Root `"/"` stays `"/"` and never falls back to `DEFAULT_HTTP_PATH`.
+/// 规范化入站 HTTP 请求路径（仅去除末尾斜杠）。
+/// 根路径 `"/"` 保持为 `"/"`，绝不回退为 `DEFAULT_HTTP_PATH`。
 fn normalize_request_path(raw_path: &str) -> String {
     let clean = raw_path.trim().trim_end_matches('/');
     if clean.is_empty() {
@@ -473,7 +471,7 @@ fn handle_client_connection(
             .is_some_and(|c| c.eq_ignore_ascii_case("close"))
             || shutdown.load(Ordering::Relaxed);
 
-        // 1. DNS Rebinding protection via tracedesk-mcp (missing/invalid Host -> 421, invalid Origin -> 403).
+        // 1. 通过 tracedesk-mcp 执行 DNS 重绑定防护（缺失或无效 Host 返回 421，无效 Origin 返回 403）。
         if let Err((code, reason, msg)) = verify_dns_rebinding(
             &configured_host,
             port,
@@ -493,7 +491,7 @@ fn handle_client_connection(
             break;
         }
 
-        // 2. Endpoint path matching (root "/" must NOT fall back to "/mcp").
+        // 2. 端点路径匹配（根路径 "/" 不得回退为 "/mcp"）。
         let raw_path = req.target.split('?').next().unwrap_or("/");
         let norm_req_path = normalize_request_path(raw_path);
         if norm_req_path != expected_path {
@@ -515,7 +513,7 @@ fn handle_client_connection(
             continue;
         }
 
-        // 3. HTTP Method dispatch.
+        // 3. HTTP 方法分发。
         let session_id = req
             .headers
             .get("mcp-session-id")
@@ -645,10 +643,9 @@ fn handle_client_connection(
     let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
-/// Extract candidate target case directories from a single JSON-RPC request or batch so
-/// [`AppState::coordinate_mcp_call`] can coordinate `case.lock` when a `tools/call` targets
-/// the case currently open in the desktop UI. Supports both flat `arguments.case_dir` and
-/// FastMCP nested `arguments.params.case_dir`.
+/// 从单条 JSON-RPC 请求或批处理请求中提取候选目标案件目录，以便在 `tools/call` 指向
+/// 桌面端 UI 当前打开的案件时，由 [`AppState::coordinate_mcp_call`] 协调 `case.lock`。
+/// 同时兼容扁平结构 `arguments.case_dir` 与 FastMCP 嵌套结构 `arguments.params.case_dir`。
 fn extract_target_case_dirs(payload: &Value, cases_root: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     match payload {

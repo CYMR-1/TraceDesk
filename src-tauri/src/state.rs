@@ -1,6 +1,5 @@
-//! Thread-safe desktop application state, IPC data transfer objects (100% aligned with
-//! `ui-contract.md` §3 and `frontend/src/types/ipc.ts`), and background task / search / MCP
-//! coordination.
+//! 线程安全的桌面端应用状态、IPC 数据传输对象（与 `ui-contract.md` §3 及
+//! `frontend/src/types/ipc.ts` 100% 对齐），以及后台任务、内容搜索与 MCP 协调。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +20,7 @@ use tracedesk_engines::InventoryEntry;
 use crate::mcp_http::{LocalMcpHttpServer, default_tool_catalog};
 
 /* ==========================================================================================
- * 1. IPC Data Transfer Objects (100% aligned with frontend/src/types/ipc.ts)
+ * 1. IPC 数据传输对象（与 frontend/src/types/ipc.ts 100% 对齐）
  * ========================================================================================== */
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -648,7 +647,7 @@ pub struct RecentCaseDto {
     pub exports_count: usize,
 }
 
-/* ---------- Streaming Event Payloads (ui-contract.md §3.6) ---------- */
+/* ---------- 流式事件载荷（ui-contract.md §3.6） ---------- */
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -737,10 +736,10 @@ pub struct SearchFinishedEvent {
 }
 
 /* ==========================================================================================
- * 2. Helper Functions for Snapshot & EntryView Construction
+ * 2. 快照与 EntryView 构建辅助函数
  * ========================================================================================== */
 
-/// Infer icon kind matching `forensic/ui/icons.py::entry_icon_kind` and `frontend/src/components/Icons.tsx`.
+/// 推断图标类型，与 `forensic/ui/icons.py::entry_icon_kind` 及 `frontend/src/components/Icons.tsx` 保持一致。
 pub fn infer_entry_icon_kind(entry: &InventoryEntry) -> &'static str {
     if entry.directory {
         return "folder";
@@ -760,7 +759,7 @@ pub fn infer_entry_icon_kind(entry: &InventoryEntry) -> &'static str {
     }
 }
 
-/// Extract per-partition filesystem names from `fsstat` output and `coverage.volumes`.
+/// 从 `fsstat` 输出与 `coverage.volumes` 提取各分区的文件系统名称。
 pub fn build_filesystem_map(
     evidence: Option<&EvidenceInfo>,
     fsstat: Option<&str>,
@@ -796,7 +795,7 @@ pub fn build_filesystem_map(
     map
 }
 
-/// Convert an [`InventoryEntry`] at index `idx` in [`BrowserIndex::ordered`] into [`EntryView`].
+/// 将 [`BrowserIndex::ordered`] 中索引为 `idx` 的 [`InventoryEntry`] 转换为 [`EntryView`]。
 pub fn entry_to_view(
     idx: usize,
     entry: &InventoryEntry,
@@ -846,7 +845,7 @@ pub fn entry_to_view(
     }
 }
 
-/// Compute `custodyState` matching `forensic/ui/controller.py::_custody_state`.
+/// 计算 `custodyState`，与 `forensic/ui/controller.py::_custody_state` 保持一致。
 pub fn compute_custody_state(case: &Case) -> &'static str {
     let data = case.data();
     let Some(ref ev) = data.evidence else {
@@ -872,7 +871,7 @@ pub fn compute_custody_state(case: &Case) -> &'static str {
     "verified"
 }
 
-/// Build a full [`CaseSnapshot`] from the given [`Case`].
+/// 根据给定的 [`Case`] 构建完整的 [`CaseSnapshot`]。
 pub fn build_case_snapshot(case: &Case) -> CaseSnapshot {
     let data = case.data();
     let custody_state = compute_custody_state(case).to_string();
@@ -1041,7 +1040,7 @@ pub fn build_case_snapshot(case: &Case) -> CaseSnapshot {
 }
 
 /* ==========================================================================================
- * 3. Search Session & Cached View State
+ * 3. 搜索会话与缓存视图状态
  * ========================================================================================== */
 
 #[derive(Debug, Clone)]
@@ -1065,7 +1064,7 @@ pub struct SearchSessionState {
     pub hits: Vec<StoredSearchHit>,
 }
 
-/// Fast read-mostly view state so tree/page/preview/timeline reads never block on long task execution.
+/// 面向读多写少场景的快速视图缓存，确保目录树、分页、预览与时间线读取不会被耗时任务阻塞。
 #[derive(Default)]
 pub struct ViewCache {
     pub snapshot: Option<CaseSnapshot>,
@@ -1078,7 +1077,7 @@ pub struct ViewCache {
 }
 
 impl ViewCache {
-    /// Synchronize [`ViewCache`] from the active [`Case`].
+    /// 从当前活跃的 [`Case`] 同步 [`ViewCache`]。
     pub fn sync_from_case(&mut self, case: &Case, rebuild_browser_index: bool) {
         let prev_folder = self.case_folder.clone();
         let prev_count = self.snapshot.as_ref().map(|s| s.inventory_count);
@@ -1124,8 +1123,8 @@ impl ViewCache {
         self.timeline_index = None;
     }
 
-    /// Resolve an [`InventoryEntry`] and its 0-based `BrowserIndex` index from an `entryId` string.
-    /// Accepts either `"0"` (0-based canonical index) or `"offset:inode:deleted"` / `"offset:inode:deleted:path"`.
+    /// 根据 `entryId` 字符串解析对应的 [`InventoryEntry`] 及其在 `BrowserIndex` 中的 0 起始索引。
+    /// 支持 `"0"`（0 起始规范索引）或 `"offset:inode:deleted"` / `"offset:inode:deleted:path"` 格式。
     pub fn resolve_entry(&self, entry_id: &str) -> Option<(usize, InventoryEntry)> {
         let trimmed = entry_id.trim();
         if let Ok(idx) = trimmed.parse::<usize>()
@@ -1155,7 +1154,7 @@ impl ViewCache {
 }
 
 /* ==========================================================================================
- * 4. Thread-Safe Application State (AppState)
+ * 4. 线程安全的应用状态（AppState）
  * ========================================================================================== */
 
 pub struct AppState {
@@ -1194,7 +1193,7 @@ impl AppState {
         })
     }
 
-    /// Check if any background task (partition scan, large-image hash verification, or content search) is running.
+    /// 检查是否存在正在运行的后台任务（分区扫描、大镜像哈希校验或内容搜索）。
     pub fn check_busy(&self) -> BusyCheckResponse {
         if self.scanning_active.load(Ordering::Relaxed) {
             return BusyCheckResponse {
@@ -1222,8 +1221,7 @@ impl AppState {
         }
     }
 
-    /// Cancel all active background operations (partition scan, hash verification, content searches)
-    /// and stop the embedded HTTP MCP server.
+    /// 取消全部活跃后台操作（分区扫描、哈希校验、内容搜索）并停止内嵌 HTTP MCP 服务。
     pub fn shutdown_all(&self) {
         self.scan_cancel.store(true, Ordering::Relaxed);
         self.hash_cancel.store(true, Ordering::Relaxed);
@@ -1253,12 +1251,11 @@ impl AppState {
         }
     }
 
-    /// Coordinate a delegated `tracedesk_mcp::McpServer` call with the active desktop [`Case`].
+    /// 协调委托给 `tracedesk_mcp::McpServer` 的调用与桌面端当前打开的 [`Case`]。
     ///
-    /// If any path in `target_folders` matches the case currently open in the desktop UI,
-    /// this temporarily closes the desktop `Case` (releasing `case.lock` and any image handles),
-    /// runs `work()` while holding `case_lock` to prevent concurrent UI mutation, and then
-    /// reopens the desktop `Case` in [`AuditOrigin::Manual`] mode and refreshes [`ViewCache`].
+    /// 若 `target_folders` 中存在路径匹配桌面端 UI 当前打开的案件，则先临时关闭桌面端 `Case`
+    /// （释放 `case.lock` 及镜像句柄），在持有 `case_lock` 防止 UI 并发修改的前提下执行 `work()`，
+    /// 随后以 [`AuditOrigin::Manual`] 模式重新打开桌面端 `Case` 并刷新 [`ViewCache`]。
     pub fn coordinate_mcp_call<T, F>(&self, target_folders: &[PathBuf], work: F) -> T
     where
         F: FnOnce() -> T,
@@ -1293,14 +1290,14 @@ impl AppState {
             .as_ref()
             .and_then(|c| c.directory_location().cloned());
 
-        // Release desktop case.lock so tracedesk_mcp::CaseService can acquire it cleanly.
+        // 释放桌面端 case.lock，使 tracedesk_mcp::CaseService 能够顺利获取锁。
         if let Some(mut open_case) = case_guard.take() {
             open_case.close();
         }
 
         let result = work();
 
-        // Re-open the desktop Case in Manual mode and refresh ViewCache.
+        // 以 Manual 模式重新打开桌面端 Case 并刷新 ViewCache。
         if let Ok(mut reopened) = Case::open(&open_dir, None, AuditOrigin::Manual) {
             if reopened.browsing_directories()
                 && let Some(loc) = prev_dir_loc
@@ -1320,7 +1317,7 @@ impl AppState {
         result
     }
 
-    /// Build [`McpStatus`] for the given optional port override.
+    /// 按可选的指定端口构建 [`McpStatus`]。
     pub fn build_mcp_status(&self, requested_port: Option<u16>) -> McpStatus {
         let (running, host, active_port, path) = match self.mcp_server.lock() {
             Ok(srv) => {

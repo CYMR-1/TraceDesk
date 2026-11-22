@@ -1,5 +1,5 @@
-//! End-to-end integration tests for `tracedesk-desktop` IPC commands, JSON contract
-//! alignment with `frontend/src/types/ipc.ts`, and embedded Streamable HTTP MCP coordination.
+//! `tracedesk-desktop` 端到端集成测试，覆盖 IPC 命令、与 `frontend/src/types/ipc.ts` 的
+//! JSON 契约对齐，以及内嵌 Streamable HTTP MCP 服务协调。
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -88,7 +88,7 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
     let state = make_test_state(cases_dir.clone());
     let demo_dd = demo_image_path();
 
-    // 1. App paths & suggest_case_dir & guide pages
+    // 1. 应用路径、suggest_case_dir 与指引页
     let paths_dto = cmd_get_app_paths(&state).expect("get_app_paths");
     let paths_json = serde_json::to_value(&paths_dto).expect("serialize AppPathsDto");
     assert!(paths_json.get("rootDir").and_then(Value::as_str).is_some());
@@ -117,7 +117,7 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
     assert_eq!(guides[0].image, "/assets/guide/01_quickstart.png");
     assert_eq!(guides[8].image, "/assets/guide/09_mcp_dialog.png");
 
-    // 2. Create case & snapshot JSON keys
+    // 2. 新建案件及快照 JSON 字段
     assert!(cmd_get_case_snapshot(&state).unwrap().is_none());
     let snap = cmd_create_case(
         &state,
@@ -140,7 +140,7 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].number, "DEMO-IPC-01");
 
-    // 3. Load real demo.dd & scan all partitions
+    // 3. 加载真实 demo.dd 镜像并扫描全部分区
     let snap = cmd_load_image(&state, &demo_dd.to_string_lossy(), None).expect("load_image");
     assert_eq!(snap.custody_state, "verified");
     let ev = snap.evidence.as_ref().expect("evidence loaded");
@@ -154,7 +154,7 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
     assert!(scan_res.snapshot.inventory_count > 0);
     assert!(!scan_res.snapshot.needs_partition_scan);
 
-    // 4. Verify integrity & register source (mismatch -> error, match -> verified)
+    // 4. 完整性校验与来源登记（不匹配 -> error，一致 -> verified）
     let verify_res = cmd_verify_integrity(&state, None).expect("verify_integrity");
     let verify_json = serde_json::to_value(&verify_res).expect("serialize verify");
     assert_eq!(verify_json["ok"], true);
@@ -192,11 +192,11 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
         "交付方摘要与本机固定值一致"
     );
 
-    // 5. Export fsstat
+    // 5. 导出 fsstat
     let fsstat_res = cmd_export_fsstat(&state, part_offset).expect("export_fsstat");
     assert!(PathBuf::from(&fsstat_res.path).is_file());
 
-    // 6. Lazy tree children & query_files_page (with logFilter audit check) & locate_file_in_scope
+    // 6. 目录树懒加载、query_files_page（含 logFilter 审计检查）与 locate_file_in_scope
     let root_tree = cmd_get_tree_children(&state, part_offset, "", None).expect("get_tree_children");
     assert!(!root_tree.nodes.is_empty());
     assert!(root_tree.nodes.iter().any(|n| n.kind == "directory" && n.scope_path.as_deref() == Some("DOCS")));
@@ -205,7 +205,7 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
         .expect("audit before filter");
     assert_eq!(audit_before_filter.records.len(), 0);
 
-    // Query without logFilter -> must NOT write FILE_FILTER
+    // 未开启 logFilter 查询 -> 不得写入 FILE_FILTER 审计记录
     let page_no_log = cmd_query_files_page(
         &state,
         Some(part_offset),
@@ -226,7 +226,7 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
         .expect("audit still zero");
     assert_eq!(audit_still_zero.records.len(), 0);
 
-    // Query with logFilter = true -> writes exactly 1 FILE_FILTER
+    // 开启 logFilter = true 查询 -> 精确写入 1 条 FILE_FILTER 审计记录
     let page_with_log = cmd_query_files_page(
         &state,
         None,
@@ -249,7 +249,7 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
     assert_eq!(located.scope_offset, part_offset);
     assert_eq!(located.scope_path, "DOCS");
 
-    // 7. Preview file page (UTF-8 + HEX) & non-image preview
+    // 7. 文件分页预览（UTF-8 + HEX）与非图片预览
     let preview = cmd_preview_file_page(&state, &case_txt_id, 0, Some(4096), "UTF-8")
         .expect("preview_file_page");
     let preview_json = serde_json::to_value(&preview).expect("serialize PreviewPageResponse");
@@ -263,7 +263,7 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
     let img_preview = cmd_preview_file_image(&state, &case_txt_id).expect("preview_file_image");
     assert!(!img_preview.ok);
 
-    // 8. Export file, examine (hash + compare), record note, list & export findings
+    // 8. 导出文件、检视（哈希 + 比对）、记录笔记、查询并导出取证发现
     let exported = cmd_export_file(&state, &case_txt_id).expect("export_file");
     assert_eq!(exported.title, "导出成功");
     assert!(PathBuf::from(&exported.path).is_file());
@@ -286,7 +286,7 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
         .expect("list_findings");
     assert_eq!(findings.groups.len(), 1);
     assert_eq!(findings.groups[0].subject, "DOCS/CASE.TXT");
-    assert_eq!(findings.groups[0].count, 3); // FILE_HASH + FILE_COMPARE + FILE_NOTE
+    assert_eq!(findings.groups[0].count, 3); // 包含 FILE_HASH、FILE_COMPARE 与 FILE_NOTE 共 3 条记录
 
     let group_keys: Vec<String> = findings.groups.iter().map(|g| g.group_key.clone()).collect();
     let exp_findings = cmd_export_findings(&state, &group_keys).expect("export_findings");
@@ -294,7 +294,7 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
     assert_eq!(exp_findings.failed_count, 0);
     assert!(PathBuf::from(&exp_findings.summary_path).is_file());
 
-    // 9. MACB Timeline build & paginated query
+    // 9. 构建 MACB 时间线并分页查询
     let tl_build = cmd_build_timeline(&state).expect("build_timeline");
     assert!(tl_build.total > 0);
     assert!(!tl_build.filter_options.events.is_empty());
@@ -304,7 +304,7 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
     assert!(tl_page.total >= 1);
     assert!(tl_page.items.iter().all(|r| r.event == "M 内容修改"));
 
-    // 10. Content search (HEX: "6E 6F 74 65" -> "note" at byte 5 in DOCS/CASE.TXT) & bookmark & reload
+    // 10. 内容搜索（HEX："6E 6F 74 65" -> 命中 DOCS/CASE.TXT 字节偏移 5 处的 "note"）、保存书签与重载记录
     let search_res = cmd_start_content_search(&state, "6E 6F 74 65", "HEX", None, None)
         .expect("start_content_search");
     assert_eq!(search_res.needle_hex, "6e6f7465");
@@ -313,7 +313,7 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
         .expect("bookmark_search_hits");
     assert_eq!(bookmark_res.saved_count, 1);
 
-    // Verify historical search record can be reloaded
+    // 验证历史搜索记录可重新加载
     let report_name = {
         let searches = state.searches.lock().unwrap();
         searches
@@ -324,13 +324,13 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
     let reloaded_hits = cmd_load_search_record(&state, &report_name).expect("load_search_record");
     assert!(reloaded_hits.iter().any(|h| h.path == "DOCS/CASE.TXT" && h.pos == 5));
 
-    // 11. Report generation & review bundle material inspection (including missing export detection)
+    // 11. 生成报告与复核包材料检查（包含缺失导出副本检测）
     let report_res = cmd_generate_report(&state).expect("generate_report");
     let report_text = std::fs::read_to_string(&report_res.path).expect("read report.md");
     assert!(report_text.contains("# 电子数据取证报告"));
     assert!(report_text.contains("## 适用边界"));
 
-    // Delete the first exported file to test missing-material detection
+    // 删除首个导出文件以测试缺失材料检测
     std::fs::remove_file(&exported.path).expect("simulate missing exported copy");
     let materials = cmd_inspect_bundle_materials(&state).expect("inspect_bundle_materials");
     assert!(materials.exports.iter().any(|e| !e.exists));
@@ -357,7 +357,7 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
     let verified_count = verify_bundle(&bundle_path, None).expect("verify_bundle passed");
     assert!(verified_count >= 6);
 
-    // 12. Audit log verification + cancel/busy helpers + reopen/close case
+    // 12. 审计日志校验 + 取消/忙碌状态辅助检查 + 重新打开与关闭案件
     let audit = cmd_list_audit_log(&state, "", None, None, None, None, "seq", true)
         .expect("list_audit_log");
     assert!(audit.valid);
@@ -386,7 +386,7 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     let state = make_test_state(cases_dir.clone());
     let demo_dd = demo_image_path();
 
-    // Open a case in the desktop AppState (holding case.lock!)
+    // 在桌面端 AppState 中打开案件（持有 case.lock）
     let snap = cmd_create_case(
         &state,
         &cases_dir.to_string_lossy(),
@@ -399,7 +399,7 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     cmd_load_image(&state, &demo_dd.to_string_lossy(), None).expect("load_image");
     cmd_scan_all_partitions(&state, None).expect("scan_all_partitions");
 
-    // Pick a free ephemeral port on 127.0.0.1
+    // 在 127.0.0.1 上分配一个空闲临时端口
     let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     let port = probe.local_addr().unwrap().port();
     drop(probe);
@@ -416,8 +416,8 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     let host = format!("127.0.0.1:{port}");
     let ping_body = json!({"jsonrpc":"2.0","id":1,"method":"ping"}).to_string();
 
-    // 1. DNS rebinding & HTTP hardening checks
-    // 1a. Missing Host header -> 421 Misdirected Request
+    // 1. DNS 重绑定与 HTTP 安全加固校验
+    // 1a. 缺失 Host 请求头 -> 返回 421 Misdirected Request
     let (code_no_host, _) = send_raw_http(
         port,
         &format!(
@@ -431,11 +431,11 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     );
     assert_eq!(code_no_host, 421);
 
-    // 1b. Foreign Host header -> 421 Misdirected Request
+    // 1b. 非本地 Host 请求头 -> 返回 421 Misdirected Request
     let (code_bad_host, _) = send_http_request(port, "evil.example.com:8765", &ping_body);
     assert_eq!(code_bad_host, 421);
 
-    // 1c. Foreign Origin header -> 403 Forbidden
+    // 1c. 外部 Origin 请求头 -> 返回 403 Forbidden
     let (code_bad_origin, _) = send_raw_http(
         port,
         &format!(
@@ -451,7 +451,7 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     );
     assert_eq!(code_bad_origin, 403);
 
-    // 1d. Root path POST / must return 404 (never fall back to /mcp), while POST /mcp/ returns 200
+    // 1d. 根路径 POST / 必须返回 404（不得回退至 /mcp），而 POST /mcp/ 返回 200
     let (code_root, _) = send_raw_http(
         port,
         &format!(
@@ -480,7 +480,7 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     );
     assert_eq!(code_slash, 200);
 
-    // 1e. Malformed Content-Length -> 400 Bad Request; >16 MiB -> 413 Payload Too Large
+    // 1e. 非法 Content-Length 返回 400 Bad Request；超过 16 MiB 返回 413 Payload Too Large
     let (code_bad_cl, _) = send_raw_http(
         port,
         &format!(
@@ -505,7 +505,7 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     );
     assert_eq!(code_huge_cl, 413);
 
-    // 1f. Chunked request exceeding 16 MiB -> 413 Payload Too Large
+    // 1f. 分块传输（chunked）请求超过 16 MiB -> 返回 413 Payload Too Large
     let (code_huge_chunk, _) = send_raw_http(
         port,
         &format!(
@@ -518,7 +518,7 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     );
     assert_eq!(code_huge_chunk, 413);
 
-    // 2. initialize & tools/list (must expose full JSON Schema with properties/required/additionalProperties=false)
+    // 2. initialize 与 tools/list（必须暴露包含 properties/required/additionalProperties=false 的完整 JSON Schema）
     let (code_init, body_init) = send_http_request(
         port,
         &host,
@@ -547,8 +547,8 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     assert!(record_tool["inputSchema"]["properties"]["path"].is_object());
     assert!(record_tool["inputSchema"]["properties"]["note"].is_object());
 
-    // 3. Call tracedesk_record_finding via FastMCP nested `{"params": ...}` + response_format="json"
-    //    WHILE the desktop holds case.lock!
+    // 3. 在桌面端持有 case.lock 期间，通过 FastMCP 嵌套 `{"params": ...}` 及
+    //    response_format="json" 调用 tracedesk_record_finding
     let (code_call, body_call) = send_http_request(
         port,
         &host,
@@ -582,7 +582,7 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     assert_eq!(payload_json["actor"], "ai-assistant");
     assert_eq!(payload_json["note"], "来自本地 HTTP MCP 协同写入的取证发现");
 
-    // 3b. Valid Transfer-Encoding: chunked request calling tracedesk_list_files with contract params
+    // 3b. 使用合法的 Transfer-Encoding: chunked 请求并按契约参数调用 tracedesk_list_files
     let chunk_json = json!({
         "jsonrpc": "2.0",
         "id": 4,
@@ -616,7 +616,7 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     let list_json: Value = serde_json::from_str(list_text).expect("valid list JSON");
     assert!(list_json["total"].as_u64().unwrap_or(0) >= 13);
 
-    // 4. Desktop audit log must immediately see the MCP record with origin="mcp" & valid chain!
+    // 4. 桌面端审计日志必须立即可见 origin="mcp" 的 MCP 记录且哈希链校验通过
     let audit = cmd_list_audit_log(&state, "", Some("MCP"), None, None, None, "seq", true)
         .expect("list_audit_log after mcp");
     assert!(audit.valid);
