@@ -14,7 +14,8 @@ use tauri::{AppHandle, Emitter, State};
 use tracedesk_core::{
     AuditOrigin, BrowserFilter, BuildBundleOptions, Case, CoreError, EvidenceInfo, FindingGroup,
     PreviewEncoding, Provenance, SearchHit, SearchOptions, SearchRecord, StatusFilter,
-    TimelineFilter, TimelineIndex, action_title, audit_origin, build_bundle, case_folder_name,
+    TimelineFilter, TimelineIndex, action_title, audit_mcp_user, audit_origin, audit_origin_label,
+    build_bundle, case_folder_name,
     deleted_export_summary, deleted_source_note, display_iso_time, entry_status, examine,
     export_findings as core_export_findings, format_missing_materials, group_findings, hex_lower,
     inspect_bundle_exports, inspect_bundle_searches, is_within, next_case_folder_path,
@@ -1434,6 +1435,8 @@ pub fn cmd_list_findings(
             .into_iter()
             .map(|r| {
                 let origin_enum = audit_origin(&r);
+                let origin_label = audit_origin_label(&r);
+                let mcp_user = audit_mcp_user(&r);
                 let op_title = operation_title(&r.action).unwrap_or(&r.action).to_string();
                 FindingRecordDto {
                     seq: r.seq,
@@ -1441,7 +1444,8 @@ pub fn cmd_list_findings(
                     action: r.action,
                     action_title: Some(op_title),
                     origin: origin_enum.as_str().to_string(),
-                    origin_label: Some(origin_enum.label().to_string()),
+                    origin_label: Some(origin_label),
+                    mcp_user,
                     actor: r.actor,
                     result: r.result,
                     details: r.details,
@@ -1777,7 +1781,9 @@ pub fn cmd_list_audit_log(
         raw_records.len()
     );
 
-    let mut origins_set: BTreeSet<String> = BTreeSet::new();
+    let mut has_manual_origin = false;
+    let mut has_mcp_origin = false;
+    let mut specific_mcp_origins: BTreeSet<String> = BTreeSet::new();
     let mut actors_set: BTreeSet<String> = BTreeSet::new();
     let mut actions_set: BTreeSet<String> = BTreeSet::new();
     let mut results_set: BTreeSet<String> = BTreeSet::new();
@@ -1785,12 +1791,21 @@ pub fn cmd_list_audit_log(
     let mut all_dtos: Vec<(String, AuditRecordDto)> = Vec::with_capacity(raw_records.len());
     for r in raw_records {
         let orig = audit_origin(&r);
-        let orig_label = orig.label().to_string();
+        let orig_label = audit_origin_label(&r);
+        let mcp_user = audit_mcp_user(&r);
         let act_title = action_title(&r.action).to_string();
         let full_time = display_iso_time(&r.timestamp, false);
         let compact_time = display_iso_time(&r.timestamp, true);
 
-        origins_set.insert(orig_label.clone());
+        match orig {
+            AuditOrigin::Manual => has_manual_origin = true,
+            AuditOrigin::Mcp => {
+                has_mcp_origin = true;
+                if orig_label != AuditOrigin::Mcp.label() {
+                    specific_mcp_origins.insert(orig_label.clone());
+                }
+            }
+        }
         if !r.actor.is_empty() {
             actors_set.insert(r.actor.clone());
         }
@@ -1808,6 +1823,7 @@ pub fn cmd_list_audit_log(
                 timestamp: compact_time,
                 origin: orig.as_str().to_string(),
                 origin_label: orig_label,
+                mcp_user,
                 actor: r.actor,
                 action: r.action,
                 action_title: act_title,
@@ -1818,6 +1834,16 @@ pub fn cmd_list_audit_log(
                 hash: r.hash,
             },
         ));
+    }
+
+    // 来源筛选选项始终保留顶层大类（“人工” / “MCP”），并追加具体“MCP · <使用者>”细项以便按调用方精筛。
+    let mut origin_options: Vec<String> = Vec::new();
+    if has_manual_origin {
+        origin_options.push(AuditOrigin::Manual.label().to_string());
+    }
+    if has_mcp_origin {
+        origin_options.push(AuditOrigin::Mcp.label().to_string());
+        origin_options.extend(specific_mcp_origins);
     }
 
     let origin_f = origin.map(str::trim).filter(|s| !s.is_empty());
@@ -1832,11 +1858,15 @@ pub fn cmd_list_audit_log(
     let mut filtered: Vec<(String, AuditRecordDto)> = all_dtos
         .into_iter()
         .filter(|(_, r)| {
-            if let Some(of) = origin_f
-                && r.origin_label != of
-                && !r.origin.eq_ignore_ascii_case(of)
-            {
-                return false;
+            if let Some(of) = origin_f {
+                // 选择 “MCP” / “mcp” 时匹配全部 MCP 记录，选择 “MCP · <使用者>” 时精确匹配该调用方。
+                let matches_origin = r.origin_label == of
+                    || r.origin.eq_ignore_ascii_case(of)
+                    || (of == "人工" && r.origin == "manual")
+                    || (of.eq_ignore_ascii_case("mcp") && r.origin == "mcp");
+                if !matches_origin {
+                    return false;
+                }
             }
             if let Some(af) = actor_f
                 && r.actor != af
@@ -1856,10 +1886,12 @@ pub fn cmd_list_audit_log(
             }
             if let Some(ref kw) = q_f {
                 let details_str = serde_json::to_string(&r.details).unwrap_or_default();
+                let mcp_user_str = r.mcp_user.as_deref().unwrap_or("");
                 let hay = format!(
-                    "{} {} {} {} {} {} {} {} {details_str} {} {}",
+                    "{} {} {} {} {mcp_user_str} {} {} {} {} {} {details_str} {} {}",
                     r.seq,
                     r.timestamp,
+                    r.origin,
                     r.origin_label,
                     r.actor,
                     r.action_title,
@@ -1891,7 +1923,7 @@ pub fn cmd_list_audit_log(
         valid: true,
         status_text,
         filter_options: AuditFilterOptionsDto {
-            origins: origins_set.into_iter().collect(),
+            origins: origin_options,
             actors: actors_set.into_iter().collect(),
             actions: actions_set.into_iter().collect(),
             results: results_set.into_iter().collect(),

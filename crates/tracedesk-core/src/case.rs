@@ -429,6 +429,8 @@ pub struct Case {
     folder: PathBuf,
     actor: String,
     origin: AuditOrigin,
+    /// MCP 调用方/使用者标识（仅当 `origin == AuditOrigin::Mcp` 时生效，人工操作始终为 `None`）。
+    mcp_client: Option<String>,
     lease: Option<CaseFileLock>,
     source_guard: Option<SourceGuard>,
     source_paths: Vec<PathBuf>,
@@ -443,9 +445,18 @@ pub struct Case {
     audit_cache: Option<AuditCache>,
 }
 
+/// 规范化可选 MCP 使用者/客户端标识（仅在来源为 MCP 且去空白后非空时保留）。
+fn normalize_mcp_client(origin: AuditOrigin, raw: Option<&str>) -> Option<String> {
+    if origin != AuditOrigin::Mcp {
+        return None;
+    }
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 impl Case {
-    /// Create a brand-new case directory under `root`, initialize `case.json` and `audit.jsonl`,
-    /// acquire `case.lock`, and append the initial `CASE_CREATE` audit entry.
+    /// 在 `root` 下创建新案件目录、初始化 `case.json` 与 `audit.jsonl`、获取 `case.lock` 并追加 `CASE_CREATE` 审计记录。
     pub fn create(
         root: &Path,
         number: &str,
@@ -454,6 +465,30 @@ impl Case {
         folder_name: Option<&str>,
         actor: Option<&str>,
         origin: AuditOrigin,
+    ) -> CoreResult<Self> {
+        Self::create_with_mcp_client(
+            root,
+            number,
+            examiner,
+            target,
+            folder_name,
+            actor,
+            origin,
+            None,
+        )
+    }
+
+    /// 创建新案件并指定可选的 MCP 使用者/客户端标识（写入初始 `CASE_CREATE` 及后续 MCP 审计记录）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_mcp_client(
+        root: &Path,
+        number: &str,
+        examiner: &str,
+        target: &str,
+        folder_name: Option<&str>,
+        actor: Option<&str>,
+        origin: AuditOrigin,
+        mcp_client: Option<&str>,
     ) -> CoreResult<Self> {
         if number.trim().is_empty() || examiner.trim().is_empty() || target.trim().is_empty() {
             return Err(CoreError::InvalidInput(
@@ -501,14 +536,23 @@ impl Case {
             .truncate(false)
             .open(folder.join("audit.jsonl"))?;
 
-        let mut case = Self::open(&folder, actor, origin)?;
+        let mut case = Self::open_with_mcp_client(&folder, actor, origin, mcp_client)?;
         case.log("CASE_CREATE", number, "成功", Map::new())?;
         Ok(case)
     }
 
-    /// Open an existing case directory, acquire `case.lock`, validate metadata & inventory,
-    /// verify the entire SHA-256 audit chain, and auto-migrate legacy inline inventories.
+    /// 打开已有案件目录、获取 `case.lock`、校验元数据与清单、核验完整 SHA-256 审计链，并自动迁移旧版内联清单。
     pub fn open(folder: &Path, actor: Option<&str>, origin: AuditOrigin) -> CoreResult<Self> {
+        Self::open_with_mcp_client(folder, actor, origin, None)
+    }
+
+    /// 打开已有案件目录，并在 `origin == AuditOrigin::Mcp` 时绑定当前会话的 MCP 使用者/客户端标识。
+    pub fn open_with_mcp_client(
+        folder: &Path,
+        actor: Option<&str>,
+        origin: AuditOrigin,
+        mcp_client: Option<&str>,
+    ) -> CoreResult<Self> {
         let folder = resolve_clean(folder);
         let metadata_path = folder.join("case.json");
         if !metadata_path.is_file() {
@@ -641,12 +685,15 @@ impl Case {
             .unwrap_or(&examiner)
             .to_string();
 
+        let resolved_mcp_client = normalize_mcp_client(origin, mcp_client);
+
         let needs_legacy_migration = inventory_file.is_none() && !inventory.is_empty();
 
         let mut case = Self {
             folder,
             actor: resolved_actor,
             origin,
+            mcp_client: resolved_mcp_client,
             lease: Some(lease),
             source_guard: None,
             source_paths: Vec::new(),
@@ -712,6 +759,16 @@ impl Case {
 
     pub fn origin(&self) -> AuditOrigin {
         self.origin
+    }
+
+    /// 返回当前案件绑定的 MCP 使用者/客户端标识（人工操作始终为 `None`）。
+    pub fn mcp_client(&self) -> Option<&str> {
+        self.mcp_client.as_deref()
+    }
+
+    /// 更新当前案件会话绑定的 MCP 使用者/客户端标识（仅在 `origin == AuditOrigin::Mcp` 时生效）。
+    pub fn set_mcp_client(&mut self, mcp_client: Option<&str>) {
+        self.mcp_client = normalize_mcp_client(self.origin, mcp_client);
     }
 
     pub fn data(&self) -> &CaseData {
@@ -912,16 +969,27 @@ impl Case {
         Some((cache.count, cache.head.clone(), cache.file_hasher.clone()))
     }
 
-    /// Append a new entry to `audit.jsonl` (fsync'd) and update `audit.head` (exact 64 ASCII bytes,
-    /// NO trailing newline). Uses the `len`/`mtime`/`sha256`/`head` cache to avoid O(N²) JSON
-    /// re-parsing on bursts while automatically falling back to full chain verification on any
-    /// external change (including in-place same-length same-timestamp edits).
+    /// 向 `audit.jsonl` 追加单条防篡改审计记录（含 `fsync`）并更新 64 字节无换行的 `audit.head`。
+    /// 复用 `len`/`mtime`/`sha256`/`head` 缓存避免高频写入时的 O(N²) 重复验链，一旦外部变更则自动回退全量校验。
     pub fn log(
         &mut self,
         action: &str,
         subject: &str,
         result: &str,
         details: Map<String, Value>,
+    ) -> CoreResult<AuditRecord> {
+        self.log_with_mcp_client(action, subject, result, details, None)
+    }
+
+    /// 向 `audit.jsonl` 追加单条审计记录，并允许为本次 MCP 日志显式覆盖 `mcp_client` 使用者/客户端标识。
+    /// 人工操作（`AuditOrigin::Manual`）会忽略 `mcp_client` 且不写入该键，保证与旧版人工记录完全一致。
+    pub fn log_with_mcp_client(
+        &mut self,
+        action: &str,
+        subject: &str,
+        result: &str,
+        details: Map<String, Value>,
+        mcp_client: Option<&str>,
     ) -> CoreResult<AuditRecord> {
         self.ensure_open()?;
         let (count, previous, mut next_hasher) = match self.audit_fast_check() {
@@ -942,6 +1010,12 @@ impl Case {
             }
         };
 
+        let effective_mcp_client = if self.origin == AuditOrigin::Mcp {
+            normalize_mcp_client(self.origin, mcp_client).or_else(|| self.mcp_client.clone())
+        } else {
+            None
+        };
+
         let seq = count + 1;
         let timestamp = now();
         let mut unsigned = Map::new();
@@ -952,6 +1026,9 @@ impl Case {
             "origin".to_string(),
             Value::String(self.origin.as_str().to_string()),
         );
+        if let Some(ref client) = effective_mcp_client {
+            unsigned.insert("mcp_client".to_string(), Value::String(client.clone()));
+        }
         unsigned.insert("action".to_string(), Value::String(action.to_string()));
         unsigned.insert("subject".to_string(), Value::String(subject.to_string()));
         unsigned.insert("result".to_string(), Value::String(result.to_string()));
@@ -964,7 +1041,7 @@ impl Case {
 
         let signed_line = canonical_json_value(&Value::Object(unsigned))?;
 
-        // Invalidate cache before I/O so any partial failure forces full verification next time.
+        // 写盘前先清空内存缓存，确保发生半途 I/O 异常时下次操作强制执行全量审计链校验。
         self.audit_cache = None;
 
         let audit_path = self.folder.join("audit.jsonl");
@@ -978,7 +1055,7 @@ impl Case {
         file.sync_all()?;
         drop(file);
 
-        // CRITICAL: exact 64 ASCII hex bytes, NO trailing newline (`scripts/verify_bundle.py:41`).
+        // 关键约定：精确写入 64 字节 ASCII 十六进制摘要，禁止附加换行符（对齐 `verify_bundle.py`）。
         fs::write(self.folder.join("audit.head"), hash.as_bytes())?;
 
         next_hasher.update(signed_line.as_bytes());
@@ -1001,6 +1078,7 @@ impl Case {
             timestamp,
             actor: self.actor.clone(),
             origin: Some(self.origin.as_str().to_string()),
+            mcp_client: effective_mcp_client,
             action: action.to_string(),
             subject: subject.to_string(),
             result: result.to_string(),

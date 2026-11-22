@@ -368,7 +368,7 @@ pub fn render_report(data: &CaseData, records: &[AuditRecord], conclusion: &str)
                     "- **`#{}` {}** · [{}] · {} · {} · **{}**",
                     r.seq,
                     display_iso_time(&r.timestamp, true),
-                    audit_origin_label(r),
+                    cell(&audit_origin_label(r)),
                     cell(&r.actor),
                     op,
                     cell(&r.result)
@@ -448,7 +448,7 @@ pub fn render_report(data: &CaseData, records: &[AuditRecord], conclusion: &str)
         let fields = [
             row.seq.to_string(),
             display_iso_time(&row.timestamp, false),
-            audit_origin_label(row).to_string(),
+            audit_origin_label(row),
             row.actor.clone(),
             action_title(&row.action).to_string(),
             row.subject.clone(),

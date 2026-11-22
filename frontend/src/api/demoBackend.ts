@@ -380,8 +380,9 @@ const demoFindings: FindingGroupDto[] = [
         action: 'FILE_HASH',
         actionTitle: '计算摘要',
         origin: 'mcp',
-        originLabel: 'MCP',
-        actor: 'tracedesk_mcp (MCP)',
+        originLabel: 'MCP · Cursor 1.2',
+        mcpUser: 'Cursor 1.2',
+        actor: '演示人员',
         result: '成功',
         details: {
           offset: 2048,
@@ -487,8 +488,9 @@ const demoAuditRecords: AuditRecordDto[] = [
     seq: 7,
     timestamp: '2026-03-10 09:42:18',
     origin: 'mcp',
-    originLabel: 'MCP',
-    actor: 'tracedesk_mcp (MCP)',
+    originLabel: 'MCP · Cursor 1.2',
+    mcpUser: 'Cursor 1.2',
+    actor: '演示人员',
     action: 'FILE_HASH',
     actionTitle: '计算文件摘要',
     result: '成功',
@@ -997,11 +999,26 @@ export const demoBackend = {
     }
     const q = args.query.trim().toLowerCase();
     let records = demoAuditRecords.filter((r) => {
-      if (args.origin && r.originLabel !== args.origin) return false;
+      if (args.origin) {
+        // 表头筛选“MCP”/“mcp”匹配全部 MCP 记录，筛选“MCP · <使用者>”时精确匹配该调用方
+        const originFilter = args.origin.trim();
+        const originLower = originFilter.toLowerCase();
+        const matched =
+          r.originLabel === originFilter ||
+          r.origin.toLowerCase() === originLower ||
+          (originFilter === '人工' && r.origin === 'manual') ||
+          (originLower === 'mcp' && r.origin === 'mcp');
+        if (!matched) return false;
+      }
       if (args.actor && r.actor !== args.actor) return false;
       if (args.action && r.actionTitle !== args.action) return false;
       if (args.result && r.result !== args.result) return false;
-      if (q && !`${r.originLabel} ${r.actor} ${r.actionTitle} ${r.result} ${r.subject} ${JSON.stringify(r.details)}`.toLowerCase().includes(q)) {
+      if (
+        q &&
+        !`${r.origin} ${r.originLabel} ${r.mcpUser ?? ''} ${r.actor} ${r.actionTitle} ${r.result} ${r.subject} ${JSON.stringify(r.details)}`
+          .toLowerCase()
+          .includes(q)
+      ) {
         return false;
       }
       return true;
@@ -1012,11 +1029,24 @@ export const demoBackend = {
     });
     const mcpCount = demoAuditRecords.filter((r) => r.origin === 'mcp').length;
     const manualCount = demoAuditRecords.length - mcpCount;
+    const originOptions: string[] = [];
+    if (manualCount > 0) originOptions.push('人工');
+    if (mcpCount > 0) {
+      originOptions.push('MCP');
+      const specificMcp = Array.from(
+        new Set(
+          demoAuditRecords
+            .filter((r) => r.origin === 'mcp' && r.originLabel && r.originLabel !== 'MCP')
+            .map((r) => r.originLabel)
+        )
+      ).sort();
+      originOptions.push(...specificMcp);
+    }
     return {
       valid: true,
       statusText: `日志链校验通过 · 共 ${demoAuditRecords.length} 条操作（人工 ${manualCount} · MCP ${mcpCount}）`,
       filterOptions: {
-        origins: Array.from(new Set(demoAuditRecords.map((r) => r.originLabel))),
+        origins: originOptions,
         actors: Array.from(new Set(demoAuditRecords.map((r) => r.actor))),
         actions: Array.from(new Set(demoAuditRecords.map((r) => r.actionTitle))),
         results: Array.from(new Set(demoAuditRecords.map((r) => r.result))),

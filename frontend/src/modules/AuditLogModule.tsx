@@ -98,11 +98,16 @@ export const AuditLogModule: React.FC<AuditLogModuleProps> = ({ snapshot, refres
       {
         key: 'origin',
         label: '来源',
-        width: 96,
+        // 加宽来源列以完整展示“MCP · 使用者 / 客户端”胶囊，避免截断乱版
+        width: 188,
         pill: true,
         filterable: true,
         filterMode: 'single',
         getText: (r) => r.originLabel || (r.origin === 'mcp' ? 'MCP' : '人工'),
+        getTooltip: (r) => {
+          const label = r.originLabel || (r.origin === 'mcp' ? 'MCP' : '人工');
+          return r.mcpUser ? `${label}（MCP 使用者：${r.mcpUser}）` : label;
+        },
       },
       { key: 'actor', label: '操作人员', width: 132, filterable: true, filterMode: 'single', getText: (r) => r.actor },
       {
@@ -114,7 +119,7 @@ export const AuditLogModule: React.FC<AuditLogModuleProps> = ({ snapshot, refres
         getText: (r) => r.actionTitle || AUDIT_ACTION_TITLES[r.action] || r.action,
       },
       { key: 'result', label: '结果', width: 112, pill: true, filterable: true, filterMode: 'single', getText: (r) => r.result },
-      { key: 'subject', label: '对象', width: 320, getText: (r) => r.subject },
+      { key: 'subject', label: '对象', width: 300, getText: (r) => r.subject },
     ],
     []
   );
@@ -122,17 +127,23 @@ export const AuditLogModule: React.FC<AuditLogModuleProps> = ({ snapshot, refres
   const detailSections = useMemo<DossierSection[]>(() => {
     if (!selectedRecord) return [];
     const originLabel = selectedRecord.originLabel || (selectedRecord.origin === 'mcp' ? 'MCP' : '人工');
+    const detailRows: [string, unknown][] = [
+      ['时间（UTC+8）', selectedRecord.timestamp],
+      ['操作来源', originLabel],
+    ];
+    if (selectedRecord.mcpUser) {
+      detailRows.push(['MCP 使用者', selectedRecord.mcpUser]);
+    }
+    detailRows.push(
+      ['操作人员', selectedRecord.actor],
+      ['对象', selectedRecord.subject],
+      ['结果', selectedRecord.result],
+      ['操作代码', selectedRecord.action]
+    );
     const sections: DossierSection[] = [
       {
         title: '操作详情',
-        rows: [
-          ['时间（UTC+8）', selectedRecord.timestamp],
-          ['操作来源', originLabel],
-          ['操作人员', selectedRecord.actor],
-          ['对象', selectedRecord.subject],
-          ['结果', selectedRecord.result],
-          ['操作代码', selectedRecord.action],
-        ],
+        rows: detailRows,
       },
     ];
     const detailEntries = Object.entries(selectedRecord.details || {});
@@ -177,7 +188,7 @@ export const AuditLogModule: React.FC<AuditLogModuleProps> = ({ snapshot, refres
           <input
             type="text"
             className="td-input"
-            placeholder="搜索来源（人工/MCP）、操作、人员、对象或结果"
+            placeholder="搜索来源（人工/MCP/使用者）、操作、人员、对象或结果"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />

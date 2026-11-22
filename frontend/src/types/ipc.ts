@@ -262,6 +262,8 @@ export interface FindingRecordDto {
   actionTitle?: string;
   origin: 'manual' | 'mcp' | string;
   originLabel?: string;
+  /** MCP 使用者/客户端标识（仅来源为 MCP 且已知使用者/客户端时有值） */
+  mcpUser?: string;
   actor: string;
   result: string;
   details: Record<string, unknown>;
@@ -331,6 +333,8 @@ export interface AuditRecordDto {
   timestamp: string;
   origin: 'manual' | 'mcp' | string;
   originLabel: string;
+  /** MCP 使用者/客户端标识（仅来源为 MCP 且已知使用者/客户端时有值） */
+  mcpUser?: string;
   actor: string;
   action: string;
   actionTitle: string;

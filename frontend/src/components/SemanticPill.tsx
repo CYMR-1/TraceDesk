@@ -80,9 +80,10 @@ export const SemanticPill: React.FC<{
     return <span className="td-muted-text">{trimmed || '—'}</span>;
   }
   const variant = resolvePillVariant(trimmed, fallback) ?? fallback;
+  // 内层文本节点独立启用省略号截断，避免长标签（如 MCP · 使用者 / 客户端）撑破列宽或左右裁切
   return (
     <span className={`td-pill td-pill--${variant}`} title={title ?? trimmed}>
-      {trimmed}
+      <span className="td-pill-label">{trimmed}</span>
     </span>
   );
 };

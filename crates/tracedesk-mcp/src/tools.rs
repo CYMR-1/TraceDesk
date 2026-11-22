@@ -1,13 +1,14 @@
 //! TraceDesk MCP 全部 19 个工具、2 个资源、JSON Schema 定义、Markdown/JSON 渲染器与 JSON-RPC 2.0 协议分发。
 
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedesk_core::{PAGE_BYTES, PREVIEW_ENCODINGS, format_commas};
 
-use crate::service::{CaseService, McpError, McpResult};
+use crate::service::{CaseService, McpError, McpResult, sanitize_mcp_identity};
 
 /// MCP 服务端固定名称（`mcp-contract.md` §1.1）。
 pub const SERVER_NAME: &str = "tracedesk_mcp";
@@ -1264,6 +1265,11 @@ pub fn render_timeline_md(data: &Value) -> String {
     lines.join("\n")
 }
 
+/// 转义 Markdown 表格单元格中的竖线与换行符，防止破坏表格结构。
+fn escape_md_cell(raw: &str) -> String {
+    raw.replace('|', "\\|").replace(['\r', '\n'], " ")
+}
+
 pub fn render_audit_md(data: &Value) -> String {
     let audit_head = data
         .get("audit_head")
@@ -1304,17 +1310,19 @@ pub fn render_audit_md(data: &Value) -> String {
         lines.push("未匹配到审计记录。".to_string());
         return lines.join("\n");
     }
+    lines.push("| 序号 | 时间（UTC+8） | 来源 | 操作人员 | 操作 | 对象 | 结果 |".to_string());
+    lines.push("| ---: | --- | --- | --- | --- | --- | --- |".to_string());
     for r in items {
         let seq = r.get("seq").and_then(Value::as_u64).unwrap_or(0);
-        let ts = r.get("timestamp").and_then(Value::as_str).unwrap_or("");
-        let ol = r.get("origin_label").and_then(Value::as_str).unwrap_or("");
-        let title = r.get("action_title").and_then(Value::as_str).unwrap_or("");
-        let action = r.get("action").and_then(Value::as_str).unwrap_or("");
-        let actor = r.get("actor").and_then(Value::as_str).unwrap_or("");
-        let res = r.get("result").and_then(Value::as_str).unwrap_or("");
-        let subj = r.get("subject").and_then(Value::as_str).unwrap_or("");
+        let ts = escape_md_cell(r.get("timestamp").and_then(Value::as_str).unwrap_or(""));
+        let ol = escape_md_cell(r.get("origin_label").and_then(Value::as_str).unwrap_or(""));
+        let title = escape_md_cell(r.get("action_title").and_then(Value::as_str).unwrap_or(""));
+        let action = escape_md_cell(r.get("action").and_then(Value::as_str).unwrap_or(""));
+        let actor = escape_md_cell(r.get("actor").and_then(Value::as_str).unwrap_or(""));
+        let res = escape_md_cell(r.get("result").and_then(Value::as_str).unwrap_or(""));
+        let subj = escape_md_cell(r.get("subject").and_then(Value::as_str).unwrap_or(""));
         lines.push(format!(
-            "- `#{seq}` {ts} · **[{ol}]** · **{title}** (`{action}`) · {actor} · {res} · 对象：`{subj}`"
+            "| #{seq} | {ts} | {ol} | {actor} | {title} (`{action}`) | `{subj}` | {res} |"
         ));
     }
     if data
@@ -1898,12 +1906,113 @@ fn build_resource_definitions() -> Vec<McpResourceDefinition> {
     ]
 }
 
+/// 单次 MCP 会话缓存上限，避免长驻服务无限增长内存。
+const MAX_TRACKED_SESSIONS: usize = 512;
+
+/// 单次 MCP 协议请求携带的传输层调用方上下文（用于识别会话、显式使用者与客户端名称）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpRequestContext {
+    /// 本次请求对应的会话标识（HTTP 为 `Mcp-Session-Id`，stdio 为会话循环 ID）。
+    pub session_id: Option<String>,
+    /// HTTP 头 `X-MCP-User` 指定的显式使用者名称。
+    pub header_user: Option<String>,
+    /// HTTP 头 `X-MCP-Client` / `X-Client-Name` 指定的显式客户端标识（优先级高于 `initialize.clientInfo`）。
+    pub header_client: Option<String>,
+    /// 非通用 `User-Agent` 提取的客户端标识（作为 `initialize.clientInfo` 缺失时的补充回退）。
+    pub user_agent_client: Option<String>,
+}
+
+/// 从 MCP `initialize` 请求的 `params.clientInfo` 解析客户端标识（如 `"Cursor 1.2"` 或 `"claude-code"`）。
+pub fn parse_initialize_client_info(params: &Value) -> Option<String> {
+    let info = params
+        .get("clientInfo")
+        .or_else(|| params.get("client_info"))
+        .and_then(Value::as_object)?;
+    let name = info
+        .get("name")
+        .and_then(Value::as_str)
+        .and_then(sanitize_mcp_identity)?;
+    let version = info
+        .get("version")
+        .and_then(Value::as_str)
+        .and_then(sanitize_mcp_identity);
+
+    match version {
+        Some(ver) if !name.eq_ignore_ascii_case(&ver) && !name.ends_with(&ver) => {
+            sanitize_mcp_identity(&format!("{name} {ver}"))
+        }
+        _ => Some(name),
+    }
+}
+
+/// 维护 `session_id -> client_info` 映射与最近一次 `initialize` 客户端的内存注册表。
+#[derive(Debug, Default)]
+struct ClientRegistry {
+    /// 已初始化的会话映射；值为 `None` 表示该会话已握手但未携带 `clientInfo`。
+    sessions: HashMap<String, Option<String>>,
+    /// 按写入顺序记录会话 ID，超出上限时淘汰最老会话。
+    session_order: VecDeque<String>,
+    /// 最近一次 `initialize` 解析到的客户端标识，供无 session 头请求或直接调用回退使用。
+    last_initialized: Option<String>,
+}
+
+impl ClientRegistry {
+    fn record_initialize(&mut self, session_id: Option<&str>, client_info: Option<String>) {
+        if let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) {
+            let sid_owned = sid.to_string();
+            if !self.sessions.contains_key(&sid_owned) {
+                while self.sessions.len() >= MAX_TRACKED_SESSIONS {
+                    let Some(oldest) = self.session_order.pop_front() else {
+                        break;
+                    };
+                    self.sessions.remove(&oldest);
+                }
+                self.session_order.push_back(sid_owned.clone());
+            }
+            self.sessions.insert(sid_owned, client_info.clone());
+        }
+        if let Some(info) = client_info {
+            self.last_initialized = Some(info);
+        }
+    }
+
+    fn resolve_client(&self, ctx: &McpRequestContext) -> Option<String> {
+        // 优先级 1：显式 HTTP 头 `X-MCP-Client` / `X-Client-Name`
+        if let Some(ref explicit_client) = ctx.header_client {
+            return Some(explicit_client.clone());
+        }
+        // 优先级 2：命中当前 `Mcp-Session-Id`（或 stdio 会话）对应的 `initialize.clientInfo`
+        if let Some(sid) = ctx.session_id.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            && let Some(entry) = self.sessions.get(sid)
+        {
+            return entry.clone().or_else(|| ctx.user_agent_client.clone());
+        }
+        // 优先级 3：无 session 头或未登记 session 时回退到最近一次 `initialize` 客户端
+        if let Some(ref last) = self.last_initialized {
+            return Some(last.clone());
+        }
+        // 优先级 4：非通用 `User-Agent` 补充回退
+        ctx.user_agent_client.clone()
+    }
+
+    fn remove_session(&mut self, session_id: &str) {
+        let sid = session_id.trim();
+        if sid.is_empty() {
+            return;
+        }
+        if self.sessions.remove(sid).is_some() {
+            self.session_order.retain(|item| item != sid);
+        }
+    }
+}
+
 /// TraceDesk MCP 核心协议服务实例（同时供 `stdio`、`streamable-http`、桌面端与集成测试调用）。
 #[derive(Clone)]
 pub struct McpServer {
     service: Arc<CaseService>,
     tools: Arc<Vec<McpToolDefinition>>,
     resources: Arc<Vec<McpResourceDefinition>>,
+    clients: Arc<Mutex<ClientRegistry>>,
 }
 
 impl McpServer {
@@ -1917,11 +2026,44 @@ impl McpServer {
             service,
             tools: Arc::new(build_tool_definitions()),
             resources: Arc::new(build_resource_definitions()),
+            clients: Arc::new(Mutex::new(ClientRegistry::default())),
         }
     }
 
     pub fn service(&self) -> &Arc<CaseService> {
         &self.service
+    }
+
+    /// 移除指定会话 ID 缓存的客户端标识（用于 HTTP `DELETE` 会话结束或 stdio 循环退出清理）。
+    pub fn remove_session(&self, session_id: &str) {
+        if let Ok(mut guard) = self.clients.lock() {
+            guard.remove_session(session_id);
+        }
+    }
+
+    /// 查询指定会话 ID 关联的 `initialize.clientInfo`（用于诊断与回归测试）。
+    pub fn session_client_info(&self, session_id: &str) -> Option<String> {
+        self.clients
+            .lock()
+            .ok()
+            .and_then(|g| g.sessions.get(session_id.trim()).cloned().flatten())
+    }
+
+    /// 查询最近一次 `initialize` 请求解析到的客户端标识（用于诊断与回归测试）。
+    pub fn last_initialized_client(&self) -> Option<String> {
+        self.clients
+            .lock()
+            .ok()
+            .and_then(|g| g.last_initialized.clone())
+    }
+
+    fn resolve_client_for_context(&self, ctx: &McpRequestContext) -> Option<String> {
+        self.clients
+            .lock()
+            .ok()
+            .and_then(|g| g.resolve_client(ctx))
+            .or_else(|| ctx.header_client.clone())
+            .or_else(|| ctx.user_agent_client.clone())
     }
 
     /// 返回全部 19 个 MCP 工具定义。
@@ -1956,7 +2098,23 @@ impl McpServer {
 
     /// 执行指定名称的 MCP 工具并返回结构化 [`McpToolCallOutput`]。
     pub fn call_tool(&self, name: &str, arguments: Value) -> McpToolCallOutput {
-        match self.dispatch_tool(name, arguments) {
+        self.call_tool_with_context(name, arguments, &McpRequestContext::default())
+    }
+
+    /// 在指定传输层请求上下文中执行 MCP 工具，自动向审计链写入调用方/客户端身份。
+    pub fn call_tool_with_context(
+        &self,
+        name: &str,
+        arguments: Value,
+        ctx: &McpRequestContext,
+    ) -> McpToolCallOutput {
+        let resolved_client = self.resolve_client_for_context(ctx);
+        let outcome = CaseService::with_caller_scope(
+            ctx.header_user.as_deref(),
+            resolved_client.as_deref(),
+            || self.dispatch_tool(name, arguments),
+        );
+        match outcome {
             Ok(text) => McpToolCallOutput::ok(text),
             Err(err) => McpToolCallOutput::err(&err),
         }
@@ -2406,14 +2564,27 @@ impl McpServer {
 
     /// 处理单条或批量 JSON-RPC 2.0 消息；对于纯 Notification（无 `id`）返回 `None`。
     pub fn handle_jsonrpc_value(&self, msg: Value) -> Option<Value> {
+        self.handle_jsonrpc_value_with_context(msg, &McpRequestContext::default())
+    }
+
+    /// 在指定传输层上下文中处理单条或批量 JSON-RPC 2.0 消息（记录 `initialize.clientInfo` 并关联工具调用方）。
+    pub fn handle_jsonrpc_value_with_context(
+        &self,
+        msg: Value,
+        ctx: &McpRequestContext,
+    ) -> Option<Value> {
         match msg {
             Value::Array(batch) => {
                 if batch.is_empty() {
-                    return Some(jsonrpc_error(Value::Null, -32600, "Invalid Request: empty batch"));
+                    return Some(jsonrpc_error(
+                        Value::Null,
+                        -32600,
+                        "Invalid Request: empty batch",
+                    ));
                 }
                 let mut responses = Vec::new();
                 for item in batch {
-                    if let Some(resp) = self.handle_single_jsonrpc(item) {
+                    if let Some(resp) = self.handle_single_jsonrpc(item, ctx) {
                         responses.push(resp);
                     }
                 }
@@ -2423,12 +2594,21 @@ impl McpServer {
                     Some(Value::Array(responses))
                 }
             }
-            single => self.handle_single_jsonrpc(single),
+            single => self.handle_single_jsonrpc(single, ctx),
         }
     }
 
     /// 解析并处理 UTF-8 JSON-RPC 字符串，返回序列化后的响应（或 `None` 表示无需响应的通知）。
     pub fn handle_jsonrpc_str(&self, raw: &str) -> Option<String> {
+        self.handle_jsonrpc_str_with_context(raw, &McpRequestContext::default())
+    }
+
+    /// 在指定传输层上下文中解析并处理 UTF-8 JSON-RPC 字符串。
+    pub fn handle_jsonrpc_str_with_context(
+        &self,
+        raw: &str,
+        ctx: &McpRequestContext,
+    ) -> Option<String> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return None;
@@ -2440,11 +2620,11 @@ impl McpServer {
                 return serde_json::to_string(&resp).ok();
             }
         };
-        let resp = self.handle_jsonrpc_value(parsed)?;
+        let resp = self.handle_jsonrpc_value_with_context(parsed, ctx)?;
         serde_json::to_string(&resp).ok()
     }
 
-    fn handle_single_jsonrpc(&self, msg: Value) -> Option<Value> {
+    fn handle_single_jsonrpc(&self, msg: Value, ctx: &McpRequestContext) -> Option<Value> {
         let Some(obj) = msg.as_object() else {
             return Some(jsonrpc_error(Value::Null, -32600, "Invalid Request"));
         };
@@ -2452,7 +2632,7 @@ impl McpServer {
         let id = obj.get("id").cloned().unwrap_or(Value::Null);
 
         let Some(method) = obj.get("method").and_then(Value::as_str) else {
-            // If it has an `id` and `result`/`error` without `method`, it's a client response; ignore.
+            // 若消息不含 `method` 但带有 `result`/`error`，视为客户端响应，直接忽略。
             if obj.contains_key("result") || obj.contains_key("error") {
                 return None;
             }
@@ -2465,13 +2645,17 @@ impl McpServer {
 
         let params = obj.get("params").cloned().unwrap_or_else(|| json!({}));
 
-        // Notifications (no `id` key) never emit a response in JSON-RPC 2.0.
+        // JSON-RPC 2.0 规定无 `id` 的通知消息不返回响应体。
         if !has_id {
             return None;
         }
 
         match method {
             "initialize" => {
+                let client_info = parse_initialize_client_info(&params);
+                if let Ok(mut guard) = self.clients.lock() {
+                    guard.record_initialize(ctx.session_id.as_deref(), client_info);
+                }
                 let requested_version = params
                     .get("protocolVersion")
                     .and_then(Value::as_str)
@@ -2523,7 +2707,7 @@ impl McpServer {
                     .get("arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
-                let output = self.call_tool(tool_name, args);
+                let output = self.call_tool_with_context(tool_name, args, ctx);
                 Some(jsonrpc_result(
                     id,
                     serde_json::to_value(output).unwrap_or_else(|_| json!({})),

@@ -16,12 +16,16 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tracedesk_core::{AppPaths, AuditOrigin, Case, verify_bundle};
+use tracedesk_core::{
+    AppPaths, AuditOrigin, Case, audit_mcp_user, audit_origin_label, verify_audit_chain_at,
+    verify_bundle,
+};
 use tracedesk_mcp::{
-    LocalHttpMcpManager, MAX_HTTP_BODY_BYTES, McpServer, TOOL_CATALOG, TransportMode,
-    build_claude_config, build_cli_command, build_cursor_config, build_http_config,
-    build_stdio_config, create_server, force_release_case_lock, format_config_json,
-    parse_cli_args, run_stdio_loop, validate_loopback_host,
+    DEFAULT_MCP_CLIENT_LABEL, LocalHttpMcpManager, MAX_HTTP_BODY_BYTES, McpHttpServerHandle,
+    McpServer, TOOL_CATALOG, TransportMode, build_claude_config, build_cli_command,
+    build_cursor_config, build_http_config, build_stdio_config, create_server,
+    force_release_case_lock, format_config_json, parse_cli_args, run_stdio_loop,
+    validate_loopback_host,
 };
 
 fn free_local_port() -> u16 {
@@ -225,7 +229,14 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     let case_dir = created["case_dir"].as_str().expect("case_dir").to_string();
     assert!(Path::new(&case_dir).join("case.json").is_file());
     assert_eq!(created["origin"].as_str(), Some("mcp"));
-    assert_eq!(created["origin_label"].as_str(), Some("MCP"));
+    assert_eq!(
+        created["origin_label"].as_str(),
+        Some("MCP · 本地 MCP 客户端")
+    );
+    assert_eq!(
+        created["mcp_client"].as_str(),
+        Some(DEFAULT_MCP_CLIENT_LABEL)
+    );
 
     // 2. tracedesk_list_cases (JSON & Markdown)
     let listed = call_json(&server, "tracedesk_list_cases", json!({}));
@@ -436,7 +447,11 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     );
     assert_eq!(noted["actor"].as_str(), Some("张取证"));
     assert_eq!(noted["origin"].as_str(), Some("mcp"));
-    assert_eq!(noted["origin_label"].as_str(), Some("MCP"));
+    assert_eq!(
+        noted["origin_label"].as_str(),
+        Some("MCP · 本地 MCP 客户端")
+    );
+    assert_eq!(noted["mcp_client"].as_str(), Some(DEFAULT_MCP_CLIENT_LABEL));
 
     // 14. tracedesk_list_findings (JSON & Markdown)
     let findings = call_json(
@@ -450,14 +465,17 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     assert_eq!(findings["total"].as_u64(), Some(1));
     assert_eq!(findings["items"][0]["path"].as_str(), Some("DOCS/CASE.TXT"));
     let recs = findings["items"][0]["records"].as_array().expect("records");
-    assert_eq!(recs.last().unwrap()["origin_label"].as_str(), Some("MCP"));
+    assert_eq!(
+        recs.last().unwrap()["origin_label"].as_str(),
+        Some("MCP · 本地 MCP 客户端")
+    );
     let findings_md = call_text(
         &server,
         "tracedesk_list_findings",
         json!({ "case_dir": case_dir }),
     );
     assert!(findings_md.contains("# 取证发现"));
-    assert!(findings_md.contains("[MCP]"));
+    assert!(findings_md.contains("[MCP · 本地 MCP 客户端]"));
 
     // 15. tracedesk_export_findings
     let exported_findings = call_json(
@@ -527,7 +545,11 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     assert!(mcp_total >= 5);
     for item in audit_mcp["items"].as_array().expect("items") {
         assert_eq!(item["origin"].as_str(), Some("mcp"));
-        assert_eq!(item["origin_label"].as_str(), Some("MCP"));
+        assert_eq!(
+            item["origin_label"].as_str(),
+            Some("MCP · 本地 MCP 客户端")
+        );
+        assert_eq!(item["mcp_client"].as_str(), Some(DEFAULT_MCP_CLIENT_LABEL));
     }
     assert_eq!(audit_mcp["origin_counts"]["manual"].as_u64(), Some(1));
     assert_eq!(audit_mcp["origin_counts"]["mcp"].as_u64(), Some(mcp_total));
@@ -556,8 +578,9 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
         "tracedesk_query_audit_log",
         json!({ "case_dir": case_dir }),
     );
-    assert!(audit_md.contains("[MCP]"));
-    assert!(audit_md.contains("[人工]"));
+    assert!(audit_md.contains("| 序号 | 时间（UTC+8） | 来源 |"));
+    assert!(audit_md.contains("| MCP · 本地 MCP 客户端 |"));
+    assert!(audit_md.contains("| 人工 |"));
 
     // 18. tracedesk_generate_report
     let report = call_json(
@@ -571,7 +594,7 @@ fn test_full_real_tsk_forensic_workflow_all_19_tools_and_2_resources() {
     assert!(report_text.contains("6E 6F 74 65"));
     assert!(report_text.contains("| 序号 | 时间 (UTC+8) | 来源 | 操作人员 | 操作 | 对象 | 结果 |"));
     assert!(report_text.contains("| 人工 |"));
-    assert!(report_text.contains("| MCP |"));
+    assert!(report_text.contains("| MCP · 本地 MCP 客户端 |"));
 
     // 19. tracedesk_build_review_bundle & native bundle verification
     let bundle = call_json(
@@ -1231,4 +1254,522 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
     // 10. Stop server and verify clean shutdown
     manager.stop();
     assert!(!manager.running());
+}
+
+/// 发送 HTTP 请求并返回 `(状态码, 小写键响应头映射, 响应体文本)`，便于验证 `Mcp-Session-Id` 等响应头。
+fn send_http(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> (u16, HashMap<String, String>, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect local mcp http");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+
+    let mut req = format!("{method} {path} HTTP/1.1\r\n");
+    for &(k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    if !body.is_empty() {
+        req.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    req.push_str("Connection: close\r\n\r\n");
+    req.push_str(body);
+    stream.write_all(req.as_bytes()).unwrap();
+    stream.flush().unwrap();
+
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader.read_line(&mut status_line).unwrap();
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+
+    let mut resp_headers = HashMap::new();
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).unwrap();
+        if n == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            resp_headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+        }
+    }
+    let resp_body = if let Some(cl) = resp_headers
+        .get("content-length")
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        let mut buf = vec![0u8; cl];
+        if cl > 0 {
+            reader.read_exact(&mut buf).unwrap();
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    } else {
+        let mut s = String::new();
+        reader.read_to_string(&mut s).unwrap();
+        s
+    };
+    (status_code, resp_headers, resp_body)
+}
+
+#[test]
+fn test_mcp_caller_identity_stdio_http_headers_and_actor_combination() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cases_dir = tmp.path().join("cases");
+    fs::create_dir_all(&cases_dir).expect("create cases_dir");
+    let (image_path, _) = prepare_demo_image(&tmp.path().join("evidence"));
+
+    // 1. stdio 传输：在会话期间记住 initialize.clientInfo，并正确与工具参数 actor 合并。
+    let stdio_server = McpServer::new(Some(cases_dir.clone()), None);
+    let stdio_input = [
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "clientInfo": { "name": "claude-code", "version": "2.1" }
+            }
+        })
+        .to_string(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_create_case",
+                "arguments": {
+                    "number": "WHO-STDIO-001",
+                    "examiner": "张取证",
+                    "target": "stdio调用方测试",
+                    "response_format": "json"
+                }
+            }
+        })
+        .to_string(),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_load_image",
+                "arguments": {
+                    "case_dir": "WHO-STDIO-001-张取证-stdio调用方测试",
+                    "image_path": image_path.to_string_lossy(),
+                    "scan_all": true,
+                    "actor": "张三",
+                    "response_format": "json"
+                }
+            }
+        })
+        .to_string(),
+    ]
+    .join("\n")
+        + "\n";
+    let mut stdio_out = Vec::new();
+    run_stdio_loop(
+        &stdio_server,
+        BufReader::new(Cursor::new(stdio_input.as_bytes())),
+        &mut stdio_out,
+    )
+    .expect("stdio 循环执行成功");
+    let out_lines: Vec<Value> = String::from_utf8(stdio_out)
+        .expect("utf8")
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json 响应行"))
+        .collect();
+    assert_eq!(out_lines.len(), 3);
+    let created_payload: Value = serde_json::from_str(
+        out_lines[1]["result"]["content"][0]["text"]
+            .as_str()
+            .expect("create_case json"),
+    )
+    .expect("解析 create_case");
+    let case_dir = created_payload["case_dir"]
+        .as_str()
+        .expect("case_dir")
+        .to_string();
+    assert_eq!(
+        created_payload["mcp_client"].as_str(),
+        Some("claude-code 2.1")
+    );
+    assert_eq!(
+        created_payload["origin_label"].as_str(),
+        Some("MCP · claude-code 2.1")
+    );
+
+    // 校验 stdio 会话中两条操作在 audit.jsonl 中的 mcp_client 标记。
+    let stdio_records = verify_audit_chain_at(Path::new(&case_dir)).expect("校验 stdio 审计链");
+    assert_eq!(
+        stdio_records[0].mcp_client.as_deref(),
+        Some("claude-code 2.1")
+    );
+    assert!(
+        stdio_records
+            .iter()
+            .any(|r| r.action == "IMAGE_LOAD" && r.mcp_client.as_deref() == Some("张三 / claude-code 2.1")),
+        "携带 actor=张三 时应合并为 张三 / claude-code 2.1"
+    );
+
+    // 2. streamable-http 传输：验证 Mcp-Session-Id 隔离、无 session 回退、HTTP 头优先级与 --actor 合并。
+    let port = free_local_port();
+    let http_server = McpServer::new(Some(cases_dir.clone()), None);
+    let mut handle = McpHttpServerHandle::start(http_server, "127.0.0.1", port, "/mcp")
+        .expect("启动本地 HTTP MCP 服务");
+    let host_hdr = format!("127.0.0.1:{port}");
+
+    // 2a. 客户端 A（Cursor 1.2）初始化，获取专属 Mcp-Session-Id。
+    let (code_a, hdrs_a, _) = send_http(
+        port,
+        "POST",
+        "/mcp",
+        &[("Host", &host_hdr), ("Content-Type", "application/json")],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "clientInfo": { "name": "Cursor", "version": "1.2" }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code_a, 200);
+    let sid_a = hdrs_a
+        .get("mcp-session-id")
+        .cloned()
+        .expect("initialize 响应必须返回 Mcp-Session-Id");
+
+    // 2b. 客户端 B（CherryStudio）初始化，获取另一个 Mcp-Session-Id（并成为最近一次 initialize 回退目标）。
+    let (code_b, hdrs_b, _) = send_http(
+        port,
+        "POST",
+        "/mcp",
+        &[("Host", &host_hdr), ("Content-Type", "application/json")],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "clientInfo": { "name": "CherryStudio" }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code_b, 200);
+    let sid_b = hdrs_b
+        .get("mcp-session-id")
+        .cloned()
+        .expect("第二次 initialize 返回独立 Mcp-Session-Id");
+    assert_ne!(sid_a, sid_b);
+
+    // 2c. 客户端 A 携带自己的 Mcp-Session-Id 写入取证笔记 -> 应标记为 Cursor 1.2（不受后初始化的客户端 B 影响）。
+    let (code_note_a, _, body_note_a) = send_http(
+        port,
+        "POST",
+        "/mcp",
+        &[
+            ("Host", &host_hdr),
+            ("Content-Type", "application/json"),
+            ("Mcp-Session-Id", &sid_a),
+        ],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_record_finding",
+                "arguments": {
+                    "case_dir": case_dir,
+                    "path": "DOCS/CASE.TXT",
+                    "partition_offset": 2048,
+                    "note": "来自会话 A 的笔记",
+                    "response_format": "json"
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code_note_a, 200);
+    let note_a_rpc: Value = serde_json::from_str(&body_note_a).expect("parse note A");
+    let note_a: Value = serde_json::from_str(
+        note_a_rpc["result"]["content"][0]["text"]
+            .as_str()
+            .expect("note A text"),
+    )
+    .expect("note A json");
+    assert_eq!(note_a["mcp_client"].as_str(), Some("Cursor 1.2"));
+    assert_eq!(note_a["origin_label"].as_str(), Some("MCP · Cursor 1.2"));
+
+    // 2d. 无 Mcp-Session-Id 请求 -> 回退到最近一次 initialize 的客户端 CherryStudio。
+    let (code_no_sid, _, body_no_sid) = send_http(
+        port,
+        "POST",
+        "/mcp",
+        &[("Host", &host_hdr), ("Content-Type", "application/json")],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 13,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_record_finding",
+                "arguments": {
+                    "case_dir": case_dir,
+                    "path": "DOCS/CASE.TXT",
+                    "partition_offset": 2048,
+                    "note": "无 session 头回退笔记",
+                    "response_format": "json"
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code_no_sid, 200);
+    let no_sid_rpc: Value = serde_json::from_str(&body_no_sid).expect("parse no sid");
+    let no_sid_note: Value = serde_json::from_str(
+        no_sid_rpc["result"]["content"][0]["text"]
+            .as_str()
+            .expect("no sid text"),
+    )
+    .expect("no sid json");
+    assert_eq!(no_sid_note["mcp_client"].as_str(), Some("CherryStudio"));
+    assert_eq!(
+        no_sid_note["origin_label"].as_str(),
+        Some("MCP · CherryStudio")
+    );
+
+    // 2e. 显式 HTTP 头 X-MCP-User + X-MCP-Client 优先于会话 clientInfo。
+    let (code_hdr, _, body_hdr) = send_http(
+        port,
+        "POST",
+        "/mcp",
+        &[
+            ("Host", &host_hdr),
+            ("Content-Type", "application/json"),
+            ("Mcp-Session-Id", &sid_a),
+            ("X-MCP-User", "李四"),
+            ("X-MCP-Client", "CustomAgent"),
+        ],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 14,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_record_finding",
+                "arguments": {
+                    "case_dir": case_dir,
+                    "path": "DOCS/CASE.TXT",
+                    "partition_offset": 2048,
+                    "note": "显式 HTTP 头覆盖",
+                    "response_format": "json"
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code_hdr, 200);
+    let hdr_rpc: Value = serde_json::from_str(&body_hdr).expect("parse hdr");
+    let hdr_note: Value = serde_json::from_str(
+        hdr_rpc["result"]["content"][0]["text"]
+            .as_str()
+            .expect("hdr text"),
+    )
+    .expect("hdr json");
+    assert_eq!(hdr_note["mcp_client"].as_str(), Some("李四 / CustomAgent"));
+    assert_eq!(
+        hdr_note["origin_label"].as_str(),
+        Some("MCP · 李四 / CustomAgent")
+    );
+
+    // 2f. 泛化 actor="MCP" 不应与客户端名拼接为 "MCP / Cursor 1.2"。
+    let (code_gen, _, body_gen) = send_http(
+        port,
+        "POST",
+        "/mcp",
+        &[
+            ("Host", &host_hdr),
+            ("Content-Type", "application/json"),
+            ("Mcp-Session-Id", &sid_a),
+        ],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 15,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_record_finding",
+                "arguments": {
+                    "case_dir": case_dir,
+                    "path": "DOCS/CASE.TXT",
+                    "partition_offset": 2048,
+                    "actor": "MCP",
+                    "note": "泛化 actor 去重检查",
+                    "response_format": "json"
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code_gen, 200);
+    let gen_rpc: Value = serde_json::from_str(&body_gen).expect("parse gen");
+    let gen_note: Value = serde_json::from_str(
+        gen_rpc["result"]["content"][0]["text"]
+            .as_str()
+            .expect("gen text"),
+    )
+    .expect("gen json");
+    assert_eq!(gen_note["mcp_client"].as_str(), Some("Cursor 1.2"));
+
+    handle.stop();
+
+    // 3. 独立 HTTP 服务实例：校验非通用 User-Agent 回退、通用 curl UA 忽略以及 --actor 默认操作人合并。
+    let port2 = free_local_port();
+    let actor_server = McpServer::new(Some(cases_dir.clone()), Some("王五".to_string()));
+    let mut handle2 = McpHttpServerHandle::start(actor_server, "127.0.0.1", port2, "/mcp")
+        .expect("启动带默认 actor 的 HTTP MCP 服务");
+    let host_hdr2 = format!("127.0.0.1:{port2}");
+
+    // 3a. 非通用 User-Agent 作为补充回退并与默认 --actor 合并为 "王五 / ForensicBot/3.0"。
+    let (code_ua, _, body_ua) = send_http(
+        port2,
+        "POST",
+        "/mcp",
+        &[
+            ("Host", &host_hdr2),
+            ("Content-Type", "application/json"),
+            ("User-Agent", "ForensicBot/3.0"),
+        ],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_record_finding",
+                "arguments": {
+                    "case_dir": case_dir,
+                    "path": "DOCS/CASE.TXT",
+                    "partition_offset": 2048,
+                    "note": "非通用 UA 与默认 actor 合并",
+                    "response_format": "json"
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code_ua, 200);
+    let ua_rpc: Value = serde_json::from_str(&body_ua).expect("parse ua");
+    let ua_note: Value = serde_json::from_str(
+        ua_rpc["result"]["content"][0]["text"]
+            .as_str()
+            .expect("ua text"),
+    )
+    .expect("ua json");
+    assert_eq!(
+        ua_note["mcp_client"].as_str(),
+        Some("王五 / ForensicBot/3.0")
+    );
+
+    // 3b. 通用 User-Agent (curl/8.5.0) 应被忽略，仅保留默认 --actor "王五"。
+    let (code_curl, _, body_curl) = send_http(
+        port2,
+        "POST",
+        "/mcp",
+        &[
+            ("Host", &host_hdr2),
+            ("Content-Type", "application/json"),
+            ("User-Agent", "curl/8.5.0"),
+        ],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_record_finding",
+                "arguments": {
+                    "case_dir": case_dir,
+                    "path": "DOCS/CASE.TXT",
+                    "partition_offset": 2048,
+                    "note": "通用 curl UA 忽略测试",
+                    "response_format": "json"
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code_curl, 200);
+    let curl_rpc: Value = serde_json::from_str(&body_curl).expect("parse curl");
+    let curl_note: Value = serde_json::from_str(
+        curl_rpc["result"]["content"][0]["text"]
+            .as_str()
+            .expect("curl text"),
+    )
+    .expect("curl json");
+    assert_eq!(curl_note["mcp_client"].as_str(), Some("王五"));
+
+    handle2.stop();
+
+    // 4. 校验 tracedesk_query_audit_log（JSON + Markdown 表格）与整案复核包验签。
+    let query_server = create_server(Some(cases_dir), None);
+    let audit_json = call_json(
+        &query_server,
+        "tracedesk_query_audit_log",
+        json!({
+            "case_dir": case_dir,
+            "origin": "mcp",
+            "limit": 50
+        }),
+    );
+    assert_eq!(audit_json["audit_chain_valid"].as_bool(), Some(true));
+    let items = audit_json["items"].as_array().expect("items");
+    assert!(
+        items
+            .iter()
+            .any(|it| it["mcp_client"].as_str() == Some("Cursor 1.2")
+                && it["origin_label"].as_str() == Some("MCP · Cursor 1.2"))
+    );
+    assert!(
+        items
+            .iter()
+            .any(|it| it["mcp_client"].as_str() == Some("李四 / CustomAgent")
+                && it["origin_label"].as_str() == Some("MCP · 李四 / CustomAgent"))
+    );
+
+    let audit_md = call_text(
+        &query_server,
+        "tracedesk_query_audit_log",
+        json!({
+            "case_dir": case_dir,
+            "limit": 50
+        }),
+    );
+    assert!(audit_md.contains("| 序号 | 时间（UTC+8） | 来源 |"));
+    assert!(audit_md.contains("| MCP · Cursor 1.2 |"));
+    assert!(audit_md.contains("| MCP · 李四 / CustomAgent |"));
+    assert!(audit_md.contains("| MCP · 王五 / ForensicBot/3.0 |"));
+
+    let disk_records = verify_audit_chain_at(Path::new(&case_dir)).expect("全链校验通过");
+    assert!(
+        disk_records
+            .iter()
+            .all(|r| audit_mcp_user(r).is_some() && audit_origin_label(r).starts_with("MCP · "))
+    );
+
+    let bundle = call_json(
+        &query_server,
+        "tracedesk_build_review_bundle",
+        json!({ "case_dir": case_dir }),
+    );
+    let bundle_path = PathBuf::from(bundle["bundle_path"].as_str().expect("bundle_path"));
+    let bundle_sha = bundle["sha256"].as_str().expect("sha256");
+    verify_bundle(&bundle_path, Some(bundle_sha)).expect("复核包验签通过");
 }
