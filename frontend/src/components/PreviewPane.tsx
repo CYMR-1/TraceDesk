@@ -34,7 +34,7 @@ interface PreviewPaneProps {
   emptyMessage?: string;
   /** 初始强制显示模式（内容搜索双击命中定位十六进制弹窗使用） */
   initialTab?: 'primary' | 'hex';
-  /** 初始目标页号（0-based，用于搜索命中定位） */
+  /** 初始目标页号（从 0 开始，用于搜索命中定位） */
   initialPage?: number;
   /** 高亮并滚动至目标十六进制行号（0..255） */
   highlightHexRow?: number | null;

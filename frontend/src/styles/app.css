@@ -1,5 +1,5 @@
 /* ==========================================================================
- * TraceDesk Workbench Layout & Component Styles
+ * TraceDesk 工作台布局与组件样式
  * ========================================================================== */
 
 .td-workbench {
@@ -11,7 +11,7 @@
   overflow: hidden;
 }
 
-/* ---------- 1. Top Porcelain Command Ribbon (48px) ---------- */
+/* ---------- 1. 顶部 48px 明净瓷白命令带 ---------- */
 .td-header {
   display: flex;
   align-items: center;
@@ -75,7 +75,7 @@
   font-weight: 600;
 }
 
-/* Header-scoped buttons */
+/* 顶栏专用按钮 */
 .td-header .td-hdr-btn {
   height: 30px;
   min-height: 30px;
@@ -155,7 +155,7 @@
   border-color: var(--header-primary-disabled-border);
 }
 
-/* ---------- 2. Case Custody Status Bar (3px Semantic Left Border) ---------- */
+/* ---------- 2. 案件与证据保管状态条（3px 左侧语义指示边框） ---------- */
 .td-custody-bar {
   display: flex;
   align-items: center;
@@ -205,7 +205,7 @@
   word-break: break-word;
 }
 
-/* ---------- 3. Module Tab Strip (38px, Mist Blue #EFF4F9) ---------- */
+/* ---------- 3. 模块导航标签带（38px，薄雾浅蓝 #EFF4F9） ---------- */
 .td-tab-strip {
   display: flex;
   align-items: stretch;
@@ -263,7 +263,7 @@
   flex-shrink: 0;
 }
 
-/* ---------- 4. Pure White Evidence Workspace ---------- */
+/* ---------- 4. 纯白证据工作区 ---------- */
 .td-workspace {
   flex: 1;
   min-height: 0;
@@ -274,7 +274,7 @@
   position: relative;
 }
 
-/* ---------- 5. Footer Status & Telemetry Bar (28px) ---------- */
+/* ---------- 5. 底部状态与遥测栏（28px） ---------- */
 .td-footer {
   display: flex;
   align-items: center;
@@ -342,7 +342,7 @@
   }
 }
 
-/* ---------- Split Pane ---------- */
+/* ---------- 可拖拽分隔面板 (SplitPane) ---------- */
 .td-split {
   display: flex;
   width: 100%;
@@ -390,7 +390,7 @@
   background: var(--accent);
 }
 
-/* ---------- Common Panel Chrome ---------- */
+/* ---------- 通用面板框架 ---------- */
 .td-panel {
   display: flex;
   flex-direction: column;
@@ -445,7 +445,7 @@
   flex-shrink: 0;
 }
 
-/* Search Input with Icon & Clear */
+/* 带图标与清除按钮的搜索输入框 */
 .td-search-box {
   position: relative;
   display: flex;
@@ -491,7 +491,7 @@
   color: var(--text-primary);
 }
 
-/* ---------- Left Navigation Tree (FileBrowser) ---------- */
+/* ---------- 左侧目录导航树 (FileBrowser) ---------- */
 .td-nav-panel {
   display: flex;
   flex-direction: column;
@@ -612,7 +612,7 @@
   flex-shrink: 0;
 }
 
-/* ---------- File Results Filter Bar & Breadcrumb ---------- */
+/* ---------- 文件结果筛选栏与面包屑 ---------- */
 .td-filter-bar {
   display: flex;
   align-items: center;
@@ -661,7 +661,7 @@
   flex-shrink: 0;
 }
 
-/* ---------- VirtualTable & FilterHeader ---------- */
+/* ---------- 虚拟滚动表格与表头 (VirtualTable & FilterHeader) ---------- */
 .td-vtable {
   display: flex;
   flex-direction: column;
@@ -777,7 +777,7 @@
   background: rgba(38, 116, 196, 0.35);
 }
 
-/* Tri-state Checkbox */
+/* 三态复选框 */
 .td-checkbox {
   width: 15px;
   height: 15px;
@@ -809,7 +809,7 @@
   cursor: not-allowed;
 }
 
-/* Virtual Table Rows */
+/* 虚拟表格数据行 */
 .td-vtable-body {
   position: relative;
 }
@@ -893,7 +893,7 @@
   font-size: 12.5px;
 }
 
-/* ---------- Preview Pane ---------- */
+/* ---------- 内容预览面板 (PreviewPane) ---------- */
 .td-preview-panel {
   display: flex;
   flex-direction: column;
@@ -1015,7 +1015,7 @@
   user-select: text;
 }
 
-/* Image Preview */
+/* 图片预览 */
 .td-preview-image-wrap {
   flex: 1;
   min-height: 0;
@@ -1052,7 +1052,7 @@
   max-width: 480px;
 }
 
-/* Hex Preview (HexItemDelegate 1:1) */
+/* 十六进制预览（1:1 还原 HexItemDelegate） */
 .td-hex-container {
   flex: 1;
   min-height: 0;
@@ -1179,7 +1179,7 @@
   color: var(--hex-null-selected-fg);
 }
 
-/* ---------- Raw Code / Monospace Textarea ---------- */
+/* ---------- 原始代码与等宽只读文本区 ---------- */
 .td-raw-viewer {
   flex: 1;
   width: 100%;
@@ -1211,7 +1211,7 @@
   user-select: text;
 }
 
-/* ---------- Dropdown Filter Menu & Context Menu ---------- */
+/* ---------- 表头下拉筛选菜单与右键菜单 ---------- */
 .td-menu {
   position: fixed;
   z-index: 1200;
@@ -1263,7 +1263,7 @@
   margin: 4px 6px;
 }
 
-/* ---------- Modal Dialogs ---------- */
+/* ---------- 模态弹窗 ---------- */
 .td-modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1351,7 +1351,7 @@
   flex: 1;
 }
 
-/* Form Grid */
+/* 表单网格布局 */
 .td-form-grid {
   display: grid;
   grid-template-columns: 120px 1fr;
@@ -1376,7 +1376,7 @@
   gap: 10px;
 }
 
-/* Inner Dialog Tabs (MCP & Bundle) */
+/* 弹窗内嵌标签页（MCP 与复核包） */
 .td-dialog-tabs {
   display: flex;
   flex-direction: column;
@@ -1432,7 +1432,7 @@
   overflow: hidden;
 }
 
-/* Help Guide Dialog */
+/* 图文操作说明弹窗 */
 .td-guide-shell {
   display: flex;
   flex: 1;
@@ -1556,7 +1556,7 @@
   color: var(--text-muted);
 }
 
-/* Lightbox */
+/* 高清图片放大查看器 (Lightbox) */
 .td-lightbox-scroll {
   flex: 1;
   min-height: 0;

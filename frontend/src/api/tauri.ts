@@ -1,5 +1,5 @@
 /**
- * TraceDesk Tauri 2 IPC 完整类型封装层（Commands + Streaming Events + Native Dialogs）
+ * TraceDesk Tauri 2 IPC 完整类型封装层（命令 + 流式事件 + 原生对话框）
  * - 在 Tauri WebView2 环境：严格调用 @tauri-apps/api/core invoke、@tauri-apps/api/event listen 与 @tauri-apps/plugin-dialog open。
  * - 在非 Tauri 浏览器预览环境：优雅降级到只读 demoBackend，便于独立预览与验证。
  */
@@ -57,7 +57,7 @@ async function callCommand<T>(cmd: string, args?: Record<string, unknown>): Prom
   return (await fn.call(demoBackend, args)) as T;
 }
 
-/* ---------- 3.1 App 状态与案件管理 Commands ---------- */
+/* ---------- 3.1 应用状态与案件管理命令 ---------- */
 
 export const tauriApi = {
   getAppPaths(): Promise<AppPaths> {
@@ -95,7 +95,7 @@ export const tauriApi = {
     return callCommand<CaseSnapshot | null>('get_case_snapshot', {});
   },
 
-  /* ---------- 3.2 证据镜像与文件浏览 Commands ---------- */
+  /* ---------- 3.2 证据镜像与文件浏览命令 ---------- */
 
   loadImage(params: { imagePath: string }): Promise<CaseSnapshot> {
     return callCommand<CaseSnapshot>('load_image', params);
@@ -164,7 +164,7 @@ export const tauriApi = {
     return callCommand<LocateFileResponse>('locate_file_in_scope', params);
   },
 
-  /* ---------- 3.3 文件预览、导出与取证发现 Commands ---------- */
+  /* ---------- 3.3 文件预览、导出与取证发现命令 ---------- */
 
   previewFilePage(params: {
     entryId: string;
@@ -208,7 +208,7 @@ export const tauriApi = {
     return callCommand<ExportFindingsResponse>('export_findings', params);
   },
 
-  /* ---------- 3.4 时间线、审计、内容搜索与复核包 Commands ---------- */
+  /* ---------- 3.4 时间线、审计、内容搜索与复核包命令 ---------- */
 
   buildTimeline(): Promise<BuildTimelineResponse> {
     return callCommand<BuildTimelineResponse>('build_timeline', {});
@@ -273,7 +273,7 @@ export const tauriApi = {
     return callCommand<{ path: string; snapshot: CaseSnapshot }>('build_review_bundle', params);
   },
 
-  /* ---------- 3.5 MCP 托管与系统工具 Commands ---------- */
+  /* ---------- 3.5 MCP 托管与系统工具命令 ---------- */
 
   getMcpStatus(params?: { port?: number }): Promise<McpStatus> {
     return callCommand<McpStatus>('get_mcp_status', params || {});
@@ -295,7 +295,7 @@ export const tauriApi = {
     return callCommand<{ busy: boolean; reason?: string }>('check_busy_before_close', {});
   },
 
-  /* ---------- Native File / Folder Pickers (@tauri-apps/plugin-dialog) ---------- */
+  /* ---------- 原生文件 / 目录选择器 (@tauri-apps/plugin-dialog) ---------- */
 
   async pickFile(options: {
     title: string;
@@ -329,7 +329,7 @@ export const tauriApi = {
   },
 };
 
-/* ---------- 3.6 流式 Tauri Events 监听 ---------- */
+/* ---------- 3.6 流式 Tauri 事件监听 ---------- */
 
 export const tauriEvents = {
   onTaskProgress(handler: (payload: TaskProgressEvent) => void): Promise<UnlistenFn> {
