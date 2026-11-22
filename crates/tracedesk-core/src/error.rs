@@ -2,7 +2,7 @@ use std::io;
 use thiserror::Error;
 use tracedesk_engines::EngineError;
 
-/// Unified error type for `tracedesk-core`.
+/// `tracedesk-core` 统一错误类型。
 #[derive(Debug, Error)]
 pub enum CoreError {
     #[error("I/O 错误：{0}")]
@@ -52,7 +52,7 @@ pub enum CoreError {
 }
 
 impl CoreError {
-    /// Returns `true` when this error represents cooperative cancellation.
+    /// 当该错误表示协作式取消时返回 `true`。
     pub fn is_cancelled(&self) -> bool {
         match self {
             Self::Cancelled(_) => true,
@@ -61,12 +61,12 @@ impl CoreError {
         }
     }
 
-    /// Returns `true` when this error indicates `case.lock` contention.
+    /// 当该错误表示 `case.lock` 锁竞争时返回 `true`。
     pub fn is_locked(&self) -> bool {
         matches!(self, Self::Locked(_) | Self::Engine(EngineError::Locked(_)))
     }
 
-    /// Short error category name suitable for structured logs and MCP error text.
+    /// 适用于结构化日志与 MCP 错误文本的简短错误类别名。
     pub fn kind_name(&self) -> &'static str {
         match self {
             Self::Io(_) => "IOError",

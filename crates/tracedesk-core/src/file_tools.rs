@@ -1,6 +1,6 @@
-//! Per-file forensic operations bound to image SHA-256, partition offset, path, and inode:
-//! single-file hashing (`FILE_HASH`), external copy comparison (`FILE_COMPARE`), and
-//! forensic notes (`FILE_NOTE`) (`forensic/core/file_tools.py`).
+//! 绑定到镜像 SHA-256、分区偏移、路径与 inode 的单文件取证操作：
+//! 单文件哈希（`FILE_HASH`）、外部副本比对（`FILE_COMPARE`）以及
+//! 取证笔记（`FILE_NOTE`）（对应 `forensic/core/file_tools.py`）。
 
 use std::path::Path;
 
@@ -14,7 +14,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::findings::AuditRecord;
 use crate::formatting::hex_lower;
 
-/// Build the audit identity map binding an operation to a specific image + file entry.
+/// 构建审计标识映射，将操作绑定到特定镜像与文件条目。
 pub fn entry_identity(case: &Case, entry: &InventoryEntry) -> CoreResult<Map<String, Value>> {
     if !case.displayed_entries().contains(entry) || !can_export(entry) {
         return Err(CoreError::InvalidInput(
@@ -36,7 +36,7 @@ pub fn entry_identity(case: &Case, entry: &InventoryEntry) -> CoreResult<Map<Str
     Ok(map)
 }
 
-/// Record a forensic note (`FILE_NOTE`) attached to `entry`.
+/// 记录关联到 `entry` 的取证笔记（`FILE_NOTE`）。
 pub fn record_note(
     case: &mut Case,
     entry: &InventoryEntry,
@@ -59,8 +59,8 @@ pub fn record_note(
     case.log("FILE_NOTE", &entry.path, "成功", reference)
 }
 
-/// Record a forensic note referencing a content search hit (`FILE_NOTE` with `file_byte`, `before`,
-/// `after`, and `search_record` metadata).
+/// 记录引用内容搜索命中项的取证笔记（`FILE_NOTE`，包含 `file_byte`、`before`、
+/// `after` 与 `search_record` 元数据）。
 #[allow(clippy::too_many_arguments)]
 pub fn record_search_hit_note(
     case: &mut Case,
@@ -107,7 +107,7 @@ pub fn record_search_hit_note(
     case.log("FILE_NOTE", &entry.path, "成功", reference)
 }
 
-/// Result of [`examine`] (`FILE_HASH` or `FILE_COMPARE`).
+/// [`examine`] 的返回结果（`FILE_HASH` 或 `FILE_COMPARE`）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExamineResult {
     pub operation: String,
@@ -115,8 +115,7 @@ pub struct ExamineResult {
     pub details: Map<String, Value>,
 }
 
-/// Stream an in-image file to compute its SHA-256 (`FILE_HASH`) and optionally compare against an
-/// external copy on disk (`FILE_COMPARE`).
+/// 流式读取镜像内文件以计算其 SHA-256（`FILE_HASH`），并可选地与磁盘上的外部副本进行比对（`FILE_COMPARE`）。
 pub fn examine(
     case: &mut Case,
     entry: &InventoryEntry,

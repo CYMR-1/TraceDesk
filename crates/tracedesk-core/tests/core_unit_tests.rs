@@ -1,6 +1,6 @@
-//! Core unit & behavioral tests for formatting, canonical JSON, audit chain tamper detection,
-//! locking, legacy migration, coverage, browser index, cross-page GBK/UTF-16/image preview,
-//! SIMD content search, and selective/tampered review bundles.
+//! 核心单元与行为测试：覆盖格式化、规范化 JSON、审计链篡改检测、
+//! 文件锁、旧版清单迁移、卷覆盖范围、浏览索引、跨页 GBK/UTF-16/图片预览、
+//! SIMD 内容搜索以及按需/篡改复核包校验。
 
 use std::fs;
 use std::io::{Cursor, Write};
@@ -91,8 +91,8 @@ fn canonical_json_matches_python_byte_for_byte() {
         r#"{"alpha":"取证测试/路径","ctrl":"\u0001\b\f\r\n\t","empty":null,"flag":true,"nested":{"a_list":[{"k1":1,"k2":2},null,false],"b_zh":"中文内容\n换行\t制表\"引号\\反斜杠"},"slash":"a/b/c","zebra":42}"#
     );
 
-    // Optional cross-check against Python json.dumps(..., ensure_ascii=False, sort_keys=True, separators=(',', ':'))
-    // when local `.venv\Scripts\python.exe` is available.
+    // 当本地存在 `.venv\Scripts\python.exe` 时，可选与 Python
+    // json.dumps(..., ensure_ascii=False, sort_keys=True, separators=(',', ':')) 做交叉核对。
     let paths = AppPaths::discover();
     if let Some(py) = find_python(&paths.root) {
         let out = Command::new(&py)
@@ -128,17 +128,17 @@ fn formatting_windows_filenames_and_stack_timestamps() {
     assert_eq!(windows_filename("LPT¹.dat", 255), "_LPT¹.dat");
     assert_eq!(windows_filename("   ...  ", 255), "file");
 
-    // Surrogate pair (emoji = 2 UTF-16 code units) must never be split.
-    let emoji_name = "a😀b"; // 1 + 2 + 1 = 4 UTF-16 units
+    // 代理对（emoji 占 2 个 UTF-16 代码单元）绝不能被拆分。
+    let emoji_name = "a😀b"; // 1 + 2 + 1 = 4 个 UTF-16 代码单元
     assert_eq!(windows_filename(emoji_name, 2), "a");
     assert_eq!(windows_filename(emoji_name, 3), "a😀");
 
-    // Overlong case folder name (>255 UTF-16 units) splits into <=84 units per field.
+    // 超长案件目录名（>255 个 UTF-16 单元）每个字段截断至 <=84 个单元。
     let long = "案".repeat(120);
     let folder = case_folder_name(&long, &long, &long);
     assert!(folder.chars().map(char::len_utf16).sum::<usize>() <= 255);
 
-    // Zero-alloc stack UTC+8 formatter matches chrono across edge dates & leap years.
+    // 零分配栈上 UTC+8 格式化器在边界日期与闰年上与 chrono 结果一致。
     for ts in [
         1_i64,
         86_400,
@@ -172,19 +172,19 @@ fn audit_head_no_newline_tamper_detection_and_legacy_origin() {
     case.log("FILE_FILTER", "*.txt", "成功", Map::new())
         .expect("log 2");
 
-    // `audit.head` must be exact 64 ASCII bytes, no newline.
+    // `audit.head` 必须严格为 64 字节 ASCII，不含换行符。
     let head_path = case.folder().join("audit.head");
     let raw_head = fs::read(&head_path).expect("read head");
     assert_eq!(raw_head.len(), 64);
     assert!(!raw_head.contains(&b'\n'));
 
-    // Tamper `audit.head` -> detected both by `log` (via cache miss -> full check) and `check_audit`.
+    // 篡改 `audit.head` -> `log`（缓存未命中触发全量检查）与 `check_audit` 均应检出。
     fs::write(&head_path, "0".repeat(64)).expect("tamper head");
     let err = case.log("FILE_FILTER", "*", "成功", Map::new()).unwrap_err();
     assert!(matches!(err, CoreError::AuditTampered(_)));
 
-    // Restore head, tamper `audit.jsonl` body with EQUAL byte length AND preserved mtime,
-    // then call `case.log()` -> MUST detect tampering and return `AuditTampered`!
+    // 恢复 head，保持字节长度与 mtime 不变地篡改 `audit.jsonl` 正文，
+    // 再调用 `case.log()` -> 必须检出篡改并返回 `AuditTampered`！
     fs::write(&head_path, &raw_head).expect("restore head");
     let audit_path = case.folder().join("audit.jsonl");
     let orig_content = fs::read_to_string(&audit_path).expect("read audit.jsonl");
@@ -256,7 +256,7 @@ fn case_lock_isolation_and_legacy_inline_inventory_migration() {
     )
     .expect("create case1");
 
-    // Duplicate case folder name gets ` (2)`.
+    // 重名案件目录自动追加 ` (2)` 后缀。
     let mut case_dup = Case::create(
         tmp.path(),
         "LOCK-001",
@@ -270,24 +270,24 @@ fn case_lock_isolation_and_legacy_inline_inventory_migration() {
     assert!(case_dup.folder().file_name().unwrap().to_string_lossy().ends_with(" (2)"));
     case_dup.close();
 
-    // Concurrent open on same case fails with Locked.
+    // 并发打开同一案件应因锁冲突返回 Locked 错误。
     let lock_err = Case::open(case1.folder(), None, AuditOrigin::Mcp).err().expect("should lock");
     assert!(lock_err.is_locked());
 
-    // Evidence inside cases root must be rejected!
+    // 位于案件库根目录内部的镜像文件必须被拒绝。
     let bad_img = tmp.path().join("inside.dd");
     fs::write(&bad_img, vec![0u8; 4096]).expect("write bad img");
     let iso_err = case1.load_image(&bad_img, None, None, None).unwrap_err();
     assert!(iso_err.to_string().contains("案件库目录之外"));
 
-    // `.e02` outside cases root must be rejected with "请从首段 E01 打开".
+    // 案件库外部的 `.e02` 分段文件必须被拒绝并提示“请从首段 E01 打开”。
     let outside = tempfile::tempdir().expect("outside dir");
     let e02 = outside.path().join("disk.E02");
     fs::write(&e02, vec![0u8; 4096]).expect("write e02");
     let e02_err = case1.load_image(&e02, None, None, None).unwrap_err();
     assert!(e02_err.to_string().contains("首段 E01"));
 
-    // Simulate legacy inline inventory in `case.json` and confirm automatic migration on `Case::open`.
+    // 模拟 `case.json` 中的旧版内联清单，验证 `Case::open` 会自动迁移为 `.jsonl.gz`。
     let folder = case1.folder().to_path_buf();
     case1.close();
 
@@ -315,7 +315,7 @@ fn coverage_boot_sector_ntfs_fat_and_provenance() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let img = tmp.path().join("vol.dd");
 
-    // Create a synthetic 2 MiB image with a valid NTFS boot sector at sector 0 claiming 4096 sectors (=2 MiB).
+    // 构造合成 2 MiB 镜像，扇区 0 包含有效 NTFS 引导扇区并声明 4096 扇区（=2 MiB）。
     let mut data = vec![0u8; 4096 * 512];
     data[3..11].copy_from_slice(b"NTFS    ");
     data[11..13].copy_from_slice(&512u16.to_le_bytes());
@@ -334,7 +334,7 @@ fn coverage_boot_sector_ntfs_fat_and_provenance() {
     assert_eq!(cov.volumes[0].status, "声明范围已覆盖");
     assert_eq!(cov.volumes[0].missing_bytes, 0);
 
-    // Claiming more sectors than image size -> `声明范围超出镜像`.
+    // 声明扇区数超出镜像大小 -> `声明范围超出镜像`。
     data[40..48].copy_from_slice(&8192u64.to_le_bytes());
     fs::write(&img, &data).expect("write truncated vol");
     let cov_short = assess_coverage::<fn(u64) -> Option<Vec<u8>>>(&img, &parts, "", None, None)
@@ -342,7 +342,7 @@ fn coverage_boot_sector_ntfs_fat_and_provenance() {
     assert_eq!(cov_short.volumes[0].status, "声明范围超出镜像");
     assert_eq!(cov_short.volumes[0].missing_bytes, 4096 * 512);
 
-    // Invalid expected_sha256 rejected.
+    // 非法的 expected_sha256 应被拒绝。
     let bad_prov = Provenance {
         expected_sha256: "not-64-hex".to_string(),
         ..Default::default()
@@ -372,7 +372,7 @@ fn coverage_boot_sector_ntfs_fat_and_provenance() {
 
 #[test]
 fn browser_index_virtual_ancestors_pagination_and_large_dir_grouping() {
-    // Include deep file without explicit parent directory entry + 2100 files in one folder.
+    // 包含缺少显式父目录条目的深层文件，以及同一目录下的 2100 个文件。
     let mut entries = vec![make_entry("DEEP/SUB/LEAF.TXT", 2048, "99999", 10, false, false)];
     for i in 0..(TREE_GROUP_THRESHOLD + 52) {
         entries.push(make_entry(
@@ -386,13 +386,13 @@ fn browser_index_virtual_ancestors_pagination_and_large_dir_grouping() {
     }
 
     let index = BrowserIndex::build(&entries);
-    // Synthesized virtual ancestors `DEEP`, `DEEP/SUB`, and `BIG` must exist in root branch.
+    // 合成的虚拟祖先目录 `DEEP`、`DEEP/SUB` 与 `BIG` 必须出现在根分支中。
     let root_page = index.tree_children(2048, "", None);
     assert!(!root_page.grouped);
     assert!(root_page.nodes.iter().any(|n| n.path == "DEEP" && n.entry_id.is_none()));
     assert!(root_page.nodes.iter().any(|n| n.path == "BIG" && n.entry_id.is_none()));
 
-    // `BIG` has 2100 > 2048 children -> grouped by 256!
+    // `BIG` 含有 2100 > 2048 个子项 -> 按每桶 256 项分组。
     let big_grouped = index.tree_children(2048, "BIG", None);
     assert!(big_grouped.grouped);
     assert_eq!(
@@ -402,12 +402,12 @@ fn browser_index_virtual_ancestors_pagination_and_large_dir_grouping() {
     assert!(big_grouped.nodes[0].is_group);
     assert_eq!(big_grouped.nodes[0].label, "条目 1–256");
 
-    // Expanding bucket 0 yields 256 concrete nodes.
+    // 展开第 0 桶应返回 256 个实际节点。
     let bucket0 = index.tree_children(2048, "BIG", Some(0));
     assert!(!bucket0.grouped);
     assert_eq!(bucket0.nodes.len(), 256);
 
-    // Filtered pagination: deleted only in `BIG`.
+    // 筛选分页：仅查询 `BIG` 目录下的已删除条目。
     let page = index.query_page(
         &BrowserFilter {
             scope_offset: Some(2048),
@@ -425,8 +425,8 @@ fn browser_index_virtual_ancestors_pagination_and_large_dir_grouping() {
 
 #[test]
 fn preview_cross_page_gbk_gb18030_utf16_and_image_caps() {
-    // 1. Cross-page GBK Chinese boundary: 4095 bytes of 'A' + GBK("中文测试")
-    //    '中' = [0xD6, 0xD0] straddles byte 4095 (page 0) and byte 4096 (page 1)!
+    // 1. 跨页 GBK 中文边界：4095 字节 'A' + GBK("中文测试")
+    //    '中' = [0xD6, 0xD0] 跨越第 0 页末尾字节 4095 与第 1 页起始字节 4096。
     let (gbk_zh, _, had_err) = encoding_rs::GBK.encode("中文测试");
     assert!(!had_err);
     let mut gbk_data = vec![b'A'; 4095];
@@ -439,7 +439,7 @@ fn preview_cross_page_gbk_gb18030_utf16_and_image_caps() {
         Ok(gbk_data[s..e].to_vec())
     };
 
-    // Page 0: bytes [0..4099)
+    // 第 0 页：字节范围 [0..4099)
     let win0 = PageWindow {
         bytes: read_at(0, 4096 + 3).unwrap(),
         carry: 0,
@@ -448,7 +448,7 @@ fn preview_cross_page_gbk_gb18030_utf16_and_image_caps() {
     let text0 = preview_text(&win0, 0, size, PreviewEncoding::Gbk, 4096);
     assert!(text0.ends_with("AA中"), "page 0 should decode straddling '中'");
 
-    // Page 1: start = 4096, compute_legacy_carry must detect carry = 1!
+    // 第 1 页：start = 4096，compute_legacy_carry 必须检出 carry = 1。
     let (carry1, _) =
         compute_legacy_carry(4096, PreviewEncoding::Gbk, None, read_at).expect("carry");
     assert_eq!(carry1, 1);
@@ -460,7 +460,7 @@ fn preview_cross_page_gbk_gb18030_utf16_and_image_caps() {
     let text1 = preview_text(&win1, 4096, size, PreviewEncoding::Gbk, 4096);
     assert_eq!(text1, "文测试", "page 1 must align cleanly after straddling '中'");
 
-    // 2. Cross-page UTF-16LE surrogate pair: 2047 'A's (4094 bytes) + "😀" (4 bytes at 4094..4098) + "中"
+    // 2. 跨页 UTF-16LE 代理对：2047 个 'A'（4094 字节）+ "😀"（4 字节位于 4094..4098）+ "中"
     let full_str = format!("{}😀中", "A".repeat(2047));
     let u16_bytes: Vec<u8> = full_str
         .encode_utf16()
@@ -484,12 +484,12 @@ fn preview_cross_page_gbk_gb18030_utf16_and_image_caps() {
     let u16_t1 = preview_text(&u16_win1, 4096, u16_size, PreviewEncoding::Utf16Le, 4096);
     assert_eq!(u16_t1, "中");
 
-    // 3. HEX row formatting check.
+    // 3. HEX 行格式化检查。
     let hex = preview_rows(&u16_win1, 4096, u16_size, PreviewEncoding::Utf16Le, 4096);
     assert_eq!(hex.len(), 1);
     assert_eq!(hex[0].offset_hex, "00001000");
 
-    // 4. Image preview: valid PNG, oversized dimension (>4096px downscale), animated GIF first frame, corrupt data.
+    // 4. 图片预览：有效 PNG、超大尺寸降采样（>4096px）、动图 GIF 首帧以及损坏数据拦截。
     let img_entry = make_entry("PIC.PNG", 2048, "1", 1000, false, false);
     let mut small_png = Vec::new();
     let small_buf: ImageBuffer<Rgba<u8>, Vec<u8>> =
@@ -504,7 +504,7 @@ fn preview_cross_page_gbk_gb18030_utf16_and_image_caps() {
     assert!(!res_ok.animated);
     assert!(res_ok.data_url.as_deref().unwrap().starts_with("data:image/png;base64,"));
 
-    // Oversized width 5000 x 100 (500k pixels <= 40MP, > 4096px axis -> scaled to 4096 wide)
+    // 超宽尺寸 5000 x 100（50 万像素 <= 4000 万像素，单边 > 4096px -> 缩放至宽 4096）
     let mut wide_png = Vec::new();
     let wide_buf: ImageBuffer<Rgba<u8>, Vec<u8>> =
         ImageBuffer::from_pixel(5000, 100, Rgba([20, 140, 80, 255]));
@@ -516,7 +516,7 @@ fn preview_cross_page_gbk_gb18030_utf16_and_image_caps() {
     assert_eq!(res_wide.width, Some(5000));
     assert_eq!(res_wide.display_width, Some(4096));
 
-    // Multi-frame animated GIF -> `animated == true`, decodes first frame cleanly.
+    // 多帧动图 GIF -> `animated == true`，正常解码首帧。
     let mut gif_bytes = Vec::new();
     {
         let mut enc = GifEncoder::new(&mut gif_bytes);
@@ -538,12 +538,12 @@ fn preview_cross_page_gbk_gb18030_utf16_and_image_caps() {
     assert!(res_gif.ok);
     assert!(res_gif.animated);
 
-    // Corrupt image bytes rejected cleanly.
+    // 损坏图片字节应被明确拒绝。
     let res_corrupt = decode_image_preview(b"not a valid image", &img_entry, "");
     assert!(!res_corrupt.ok);
     assert!(res_corrupt.error.unwrap().contains("损坏或格式不受支持"));
 
-    // >32 MiB image rejected before decode.
+    // 超过 32 MiB 的图片应在解码前直接拒绝。
     let huge_entry = make_entry("HUGE.PNG", 2048, "2", 33 * 1024 * 1024, false, false);
     let res_huge = decode_image_preview(&[], &huge_entry, "");
     assert!(!res_huge.ok);
@@ -558,38 +558,38 @@ fn content_search_patterns_sliding_context_and_timeline_aliases() {
     assert!(parse_pattern("", "UTF-8").is_err());
     assert!(parse_pattern(&"A".repeat(4097), "UTF-8").is_err());
 
-    // Overlapping hits & exact 12-byte before/after hex context across boundaries.
+    // 跨边界的重叠命中与精确 12 字节前后 HEX 上下文。
     let mut payload = vec![b'x'; 20];
     payload.extend_from_slice(b"AAAA");
     payload.extend_from_slice(b"0123456789abcdef");
     let mut cursor = Cursor::new(&payload);
     let hits = find_matches_in_reader(&mut cursor, payload.len() as u64, b"AA", None, None, None)
         .expect("find matches");
-    assert_eq!(hits.len(), 3); // offsets 20, 21, 22
+    assert_eq!(hits.len(), 3); // 偏移 20、21、22
     assert_eq!(hits[0].file_byte, 20);
     assert_eq!(hits[1].file_byte, 21);
     assert_eq!(hits[2].file_byte, 22);
     assert_eq!(hits[0].before.split(' ').count(), 12);
     assert_eq!(hits[0].after.split(' ').count(), 12);
 
-    // Short-read stream (25 of 50 recorded bytes) with a hit in the trailing 12 bytes (19..23):
-    // flushing the tail buffer with `push_chunk(&[], ...)` must preserve the hit!
+    // 短读流（记录 50 字节但仅读到 25 字节），且命中位于末尾 12 字节内（19..23）：
+    // 调用 `push_chunk(&[], ...)` 冲刷尾缓冲必须保留该命中项。
     let finder = memchr::memmem::Finder::new(b"NOTE");
     let mut short_matcher =
         tracedesk_core::StreamMatcher::new(&finder, 4, 50, 0, 0, 50, None);
     let mut short_stream = vec![b'.'; 19];
     short_stream.extend_from_slice(b"NOTE!");
-    short_stream.push(b'!'); // 25 bytes total; "NOTE" is at 19..23 (only 2 bytes after!)
+    short_stream.push(b'!'); // 总计 25 字节；"NOTE" 位于 19..23（其后仅剩 2 字节）
     assert_eq!(short_stream.len(), 25);
     short_matcher.push_chunk(&short_stream, None).unwrap();
-    // Before EOF flush, hit at 19..23 is held waiting for 12-byte after context.
+    // EOF 冲刷前，位于 19..23 的命中项会暂存等待 12 字节后文上下文。
     short_matcher.push_chunk(&[], None).unwrap();
     let short_hits = short_matcher.into_hits();
     assert_eq!(short_hits.len(), 1);
     assert_eq!(short_hits[0].file_byte, 19);
     assert_eq!(short_hits[0].after, "21 21");
 
-    // Timeline event aliases M/A/C/B.
+    // 时间线事件别名 M/A/C/B。
     assert_eq!(normalize_event_filter("M").unwrap(), "M 内容修改");
     assert_eq!(normalize_event_filter("a").unwrap(), "A 访问");
     assert_eq!(normalize_event_filter("C").unwrap(), "C 元数据变更");
@@ -608,7 +608,7 @@ fn content_search_patterns_sliding_context_and_timeline_aliases() {
     let page = tl
         .query_page(&TimelineFilter::default(), true, 0, 10)
         .unwrap();
-    // Descending preserves 1-based global ascending sequence numbers!
+    // 倒序展示时仍保留从 1 开始的全局升序序号。
     assert_eq!(page.items[0].number, 3);
     assert_eq!(page.items[2].number, 1);
 }
@@ -636,14 +636,14 @@ fn review_bundle_missing_material_handling_and_tamper_detection() {
     let p1 = case.export(&f1, None).expect("export 1");
     let _p2 = case.export(&f2, None).expect("export 2");
 
-    // Delete first exported file to simulate missing local copy.
+    // 删除首个导出文件以模拟本地副本缺失。
     fs::remove_file(&p1).expect("delete exported copy");
 
-    // Default (`skip_missing=false`) rejects missing selected export.
+    // 默认选项（`skip_missing=false`）拒绝缺失已选导出文件的复核包构建。
     let miss_err = build_bundle(&mut case, &BuildBundleOptions::default(), None).unwrap_err();
     assert!(matches!(miss_err, CoreError::MissingMaterials(_)));
 
-    // `skip_missing=true` succeeds, omits export #1, appends instruction #7, and passes verify_bundle!
+    // `skip_missing=true` 应构建成功，省略导出 #1、追加说明第 7 条并通过 verify_bundle 核验。
     let res = build_bundle(
         &mut case,
         &BuildBundleOptions {
@@ -659,7 +659,7 @@ fn review_bundle_missing_material_handling_and_tamper_detection() {
     assert_eq!(res.missing_exports, 1);
     verify_bundle(&res.bundle_path, Some(&res.sha256)).expect("verify bundle with omitted");
 
-    // Repack ZIP with tampered `report.md` -> `verify_bundle` MUST reject!
+    // 重打包 ZIP 并篡改 `report.md` -> `verify_bundle` 必须拒绝！
     let tampered_zip = tmp.path().join("tampered.zip");
     {
         let mut src_zip = ZipArchive::new(fs::File::open(&res.bundle_path).unwrap()).unwrap();
@@ -681,11 +681,11 @@ fn review_bundle_missing_material_handling_and_tamper_detection() {
     let tamper_err = verify_bundle(&tampered_zip, None).unwrap_err();
     assert!(tamper_err.to_string().contains("成员摘要不匹配"));
 
-    // Wrong external SHA-256 rejected.
+    // 错误的外部 SHA-256 应被拒绝。
     let bad_sha = verify_bundle(&res.bundle_path, Some(&"0".repeat(64))).unwrap_err();
     assert!(bad_sha.to_string().contains("外部 SHA-256 不匹配"));
 
-    // Verify `AppPaths` resolves tools & evidence cleanly.
+    // 验证 `AppPaths` 能正确定位工具与证据目录。
     assert!(paths.find_tsk_bin().is_some());
     assert!(paths.verify_bundle_script().is_some());
     let _ = AtomicBool::new(false);

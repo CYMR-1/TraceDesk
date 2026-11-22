@@ -1,15 +1,15 @@
-//! TraceDesk core forensic business logic crate:
-//! - Project & runtime path resolution (`paths`)
-//! - UTC+8 formatting, Windows filename sanitization, and canonical JSON (`formatting`)
-//! - Volume declared coverage & evidence provenance (`coverage`)
-//! - Case lifecycle, gzip inventory, `case.lock`, large-image quick browse, and SHA-256 audit chain (`case`)
-//! - Canonical browser sorting, lazy tree grouping, and multi-condition filtering (`browser_index`)
-//! - Compact `u64` MACB timeline with multi-core parallel sorting & filtering (`timeline`)
-//! - Single-file hash/compare/note tools (`file_tools`) and grouped findings & export (`findings`)
-//! - 9-encoding cross-page preview, HEX formatter, and safe image preview (`preview`)
-//! - Multi-core AVX2 SIMD exact byte search with deterministic ordering (`content_search`)
-//! - 10-section Markdown forensic reporting (`reporting`)
-//! - ZIP64 verifiable review bundle builder & native Rust verifier (`review`)
+//! TraceDesk 核心取证业务逻辑 crate：
+//! - 项目与运行时路径解析（`paths`）
+//! - UTC+8 时间格式化、Windows 文件名净化与规范化 JSON（`formatting`）
+//! - 卷声明覆盖范围与证据来源校验（`coverage`）
+//! - 案件生命周期、gzip 清单、`case.lock`、大镜像快速浏览与 SHA-256 审计链（`case`）
+//! - 规范浏览排序、延迟树分组与多条件过滤（`browser_index`）
+//! - 紧凑 `u64` MACB 时间线及多核并行排序与过滤（`timeline`）
+//! - 单文件哈希/比对/笔记工具（`file_tools`）与分组研判记录及导出（`findings`）
+//! - 9 种编码跨页预览、HEX 格式化与安全图片预览（`preview`）
+//! - 多核 AVX2 SIMD 精确字节搜索及确定性排序（`content_search`）
+//! - 10 节 Markdown 取证报告生成（`reporting`）
+//! - ZIP64 可核验复核包构建器与原生 Rust 校验器（`review`）
 
 pub mod browser_index;
 pub mod case;

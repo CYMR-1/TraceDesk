@@ -1,7 +1,7 @@
-//! Read-only paginated file preview: 9 text encodings with cross-page multi-byte boundary
-//! alignment (UTF-16 surrogate pairs + GBK/GB18030/Big5 safe anchor resynchronization),
-//! 16-byte HEX formatting, extent/VolumeReader/icat routing, and safe image preview
-//! (`core-contract.md` §3.7, matching `forensic/core/preview.py` & `forensic/ui/preview.py`).
+//! 只读分页文件预览：支持 9 种文本编码及跨页多字节边界对齐
+//! （UTF-16 代理对 + GBK/GB18030/Big5 安全锚点重同步）、16 字节 HEX 格式化、
+//! extent/VolumeReader/icat 路由以及安全图片预览
+//! （对应 `core-contract.md` §3.7，与 `forensic/core/preview.py` 和 `forensic/ui/preview.py` 保持一致）。
 
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
@@ -16,25 +16,25 @@ use tracedesk_engines::{InventoryEntry, TskCli, VolumeReader, deleted_source_not
 
 use crate::error::{CoreError, CoreResult};
 
-/// Bytes per HEX preview row.
+/// 每行 HEX 预览显示的字节数。
 pub const ROW_BYTES: usize = 16;
-/// Default bytes per preview page.
+/// 每页预览的默认字节数。
 pub const PAGE_BYTES: usize = 4096;
-/// Maximum file size eligible for full image decoding (32 MiB).
+/// 允许完整图片解码的最大文件大小（32 MiB）。
 pub const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
-/// Maximum pixel count allowed for image preview (40 megapixels).
+/// 允许图片预览的最大像素总数（4000 万像素）。
 pub const MAX_IMAGE_PIXELS: u64 = 40_000_000;
-/// Maximum display dimension along either axis before downscaling.
+/// 缩放前单边允许的最大显示尺寸（像素）。
 pub const MAX_IMAGE_DIM: u32 = 4096;
-/// Threshold above which non-deleted regular files prefer `VolumeReader` random access.
+/// 未删除常规文件优先使用 `VolumeReader` 随机读取的大小阈值。
 pub const RANDOM_READ_MIN_BYTES: u64 = 8 << 20;
 
-/// Supported image filename extensions (lowercase with leading dot).
+/// 支持的图片文件扩展名（含前导点号的小写形式）。
 pub const IMAGE_SUFFIXES: [&str; 9] = [
     ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff", ".ico",
 ];
 
-/// Canonical names of all 9 supported preview encodings.
+/// 全部 9 种受支持预览编码的规范名称。
 pub const PREVIEW_ENCODINGS: [&str; 9] = [
     "ASCII",
     "UTF-8",
@@ -47,7 +47,7 @@ pub const PREVIEW_ENCODINGS: [&str; 9] = [
     "ISO-8859-1",
 ];
 
-/// Supported preview text encodings.
+/// 受支持的预览文本编码枚举。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PreviewEncoding {
     Ascii,
@@ -62,7 +62,7 @@ pub enum PreviewEncoding {
 }
 
 impl PreviewEncoding {
-    /// Parse a canonical encoding name (exact or case-insensitive).
+    /// 解析规范编码名称（精确或大小写不敏感）。
     pub fn parse(name: &str) -> CoreResult<Self> {
         match name.trim().to_ascii_uppercase().as_str() {
             "ASCII" => Ok(Self::Ascii),
@@ -104,8 +104,8 @@ impl PreviewEncoding {
     }
 }
 
-/// Raw byte window `[max(0, start - 3), min(size, start + page_bytes + 3))` plus legacy
-/// multi-byte carry offset from bytes preceding `start`.
+/// 原始字节窗口 `[max(0, start - 3), min(size, start + page_bytes + 3))` 以及
+/// 来自 `start` 之前字节的传统多字节进位偏移。
 #[derive(Debug, Clone)]
 pub struct PageWindow {
     pub bytes: Vec<u8>,
@@ -113,7 +113,7 @@ pub struct PageWindow {
     pub encoding: PreviewEncoding,
 }
 
-/// One 16-byte row in the HEX preview table.
+/// HEX 预览表中的单个 16 字节行。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HexRow {
@@ -122,7 +122,7 @@ pub struct HexRow {
     pub chars: String,
 }
 
-/// Complete rendered preview page (text + HEX rows + metadata).
+/// 完整渲染的预览页结果（文本 + HEX 行 + 元数据）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PreviewPageResult {
@@ -141,7 +141,7 @@ pub struct PreviewPageResult {
     pub is_image_candidate: bool,
 }
 
-/// Decoded image preview result suitable for desktop / web rendering.
+/// 适用于桌面端 / Web 端渲染的解码图片预览结果。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImagePreviewResult {
@@ -165,7 +165,7 @@ pub struct ImagePreviewResult {
     pub source_note: String,
 }
 
-/// Check printability matching Python's `str.isprintable()` semantics for preview display.
+/// 按 Python `str.isprintable()` 语义判断字符在预览展示中是否可打印。
 #[inline]
 fn is_preview_printable(c: char) -> bool {
     if c == ' ' {
@@ -211,7 +211,7 @@ fn decode_windows_1252_byte(byte: u8) -> char {
     if byte < 0x80 {
         return char::from(byte);
     }
-    // Python cp1252 rejects these 5 undefined code positions; map to replacement char.
+    // Python cp1252 拒绝这 5 个未定义码位，统一映射为替换字符。
     if matches!(byte, 0x81 | 0x8D | 0x8F | 0x90 | 0x9D) {
         return '\u{FFFD}';
     }
@@ -220,8 +220,8 @@ fn decode_windows_1252_byte(byte: u8) -> char {
     cow.chars().next().unwrap_or('\u{FFFD}')
 }
 
-/// Decode characters across a [`PageWindow`] starting at byte `start`, returning
-/// `(offset_within_page, decoded_char)` pairs (`forensic/core/preview.py::page_characters`).
+/// 解码从字节偏移 `start` 开始的 [`PageWindow`] 中的字符，返回
+/// `(offset_within_page, decoded_char)` 对（对应 `forensic/core/preview.py::page_characters`）。
 pub fn page_characters(
     window: &PageWindow,
     start: u64,
@@ -367,7 +367,7 @@ pub fn page_characters(
     out
 }
 
-/// Format a [`PageWindow`] into preview text (preserving `\r`, `\n`, `\t`, replacing non-printable with `·`).
+/// 将 [`PageWindow`] 格式化为预览文本（保留 `\r`、`\n`、`\t`，其余不可打印字符替换为 `·`）。
 pub fn preview_text(
     window: &PageWindow,
     start: u64,
@@ -387,7 +387,7 @@ pub fn preview_text(
     out
 }
 
-/// Format a [`PageWindow`] into 16-byte HEX preview rows (`offsetHex`, `bytesHex`, `chars`).
+/// 将 [`PageWindow`] 格式化为 16 字节 HEX 预览行（`offsetHex`、`bytesHex`、`chars`）。
 pub fn preview_rows(
     window: &PageWindow,
     start: u64,
@@ -434,9 +434,8 @@ pub fn preview_rows(
     rows
 }
 
-/// Compute the legacy multi-byte (`GBK` / `GB18030` / `Big5`) carry length (0..=3 bytes)
-/// immediately preceding byte offset `start` using safe `0x00..=0x2F` anchor resynchronization
-/// (`core-contract.md` §3.7).
+/// 使用 `0x00..=0x2F` 安全锚点重同步，计算字节偏移 `start` 紧邻之前的传统多字节编码
+/// （`GBK` / `GB18030` / `Big5`）进位长度（0..=3 字节）（对应 `core-contract.md` §3.7）。
 pub fn compute_legacy_carry<F>(
     start: u64,
     encoding: PreviewEncoding,
@@ -460,8 +459,7 @@ where
         pending = cp_pending;
     }
 
-    // Backtrack in 64 KiB blocks for the rightmost byte in 0x00..=0x2F, which can never be a
-    // trailing byte in GBK, GB18030, or Big5.
+    // 以 64 KiB 为步长向前回溯，查找最右侧落在 0x00..=0x2F 的字节；该范围字节在 GBK/GB18030/Big5 中绝不会作为尾字节出现。
     let mut pos = start;
     while pos > lower {
         let left = pos.saturating_sub(65536).max(lower);
@@ -475,7 +473,7 @@ where
         pos = left;
     }
 
-    // Step forward from `lower` to `start`, carrying pending lead bytes across 64 KiB chunks.
+    // 从 `lower` 向前推进到 `start`，按 64 KiB 分块延续未闭合的前导字节。
     let mut carry_bytes = pending;
     while lower < start {
         let want = (start - lower).min(65536) as usize;
@@ -514,7 +512,7 @@ fn step_legacy_carry(encoding: PreviewEncoding, buf: &[u8]) -> Vec<u8> {
                         i += 1;
                     }
                 } else {
-                    // 2 or 3 trailing bytes of a potential 4-byte GB18030 sequence.
+                    // 可能是 4 字节 GB18030 序列末尾残留的 2 或 3 个字节。
                     let rem = n - i;
                     if rem == 2 || (rem == 3 && (0x81..=0xFE).contains(&buf[i + 2])) {
                         return buf[i..].to_vec();
@@ -533,8 +531,7 @@ fn step_legacy_carry(encoding: PreviewEncoding, buf: &[u8]) -> Vec<u8> {
     Vec::new()
 }
 
-/// Determine whether a file should be considered an image preview candidate via extension
-/// whitelist or magic header sniffing (`core-contract.md` §3.7).
+/// 通过扩展名白名单或魔数头嗅探判断文件是否属于图片预览候选对象（对应 `core-contract.md` §3.7）。
 pub fn is_image_candidate(path: &str, head_bytes: &[u8]) -> bool {
     let lower = path.to_ascii_lowercase();
     if IMAGE_SUFFIXES.iter().any(|ext| lower.ends_with(ext)) {
@@ -543,8 +540,8 @@ pub fn is_image_candidate(path: &str, head_bytes: &[u8]) -> bool {
     !head_bytes.is_empty() && image::guess_format(head_bytes).is_ok()
 }
 
-/// Decode an image payload with strict 32 MiB / 40 MP safety caps, 4096 px downscaling,
-/// animated first-frame handling, and PNG base64 data URL generation (`core-contract.md` §3.7).
+/// 在严格的 32 MiB / 4000 万像素安全上限下解码图片载荷，支持 4096 px 降采样、
+/// 动图首帧处理及 PNG base64 Data URL 生成（对应 `core-contract.md` §3.7）。
 pub fn decode_image_preview(
     raw_bytes: &[u8],
     entry: &InventoryEntry,
@@ -663,9 +660,8 @@ enum PreviewBackend {
     },
 }
 
-/// Stateful preview reader routing across FAT space extents, in-process [`VolumeReader`]
-/// random access (`>= 8 MiB` regular files), and `icat` streaming cache (with legacy carry
-/// checkpoint reuse across sequential page turns).
+/// 有状态的预览读取器，按文件特性路由至 FAT 空间区域 extents、进程内 [`VolumeReader`]
+/// 随机读取（`>= 8 MiB` 常规文件）或 `icat` 流式临时缓存（并在顺序翻页时复用传统多字节进位检查点）。
 pub struct PreviewSession {
     entry: InventoryEntry,
     backend: PreviewBackend,
@@ -673,7 +669,7 @@ pub struct PreviewSession {
 }
 
 impl PreviewSession {
-    /// Open a [`PreviewSession`] for `entry` inside `image`.
+    /// 为镜像 `image` 内的 `entry` 打开一个 [`PreviewSession`]。
     pub fn open(image: &Path, entry: &InventoryEntry, tsk: Option<&TskCli>) -> CoreResult<Self> {
         if entry.directory || entry.mode.starts_with("V/") {
             return Err(CoreError::InvalidInput(format!(
@@ -688,7 +684,7 @@ impl PreviewSession {
             )));
         }
 
-        // Route 1: FAT space region extents.
+        // 路由 1：FAT 空间区域 extents。
         if let Some(ref extents) = entry.extents {
             let file = File::open(image)?;
             let mut cum = Vec::with_capacity(extents.len() + 1);
@@ -710,7 +706,7 @@ impl PreviewSession {
             });
         }
 
-        // Route 2: Large non-deleted regular files prefer `VolumeReader` random access.
+        // 路由 2：未删除的大体积常规文件优先使用 `VolumeReader` 随机读取。
         if entry.size >= RANDOM_READ_MIN_BYTES
             && !entry.deleted
             && entry.mode.starts_with("r/")
@@ -727,7 +723,7 @@ impl PreviewSession {
             });
         }
 
-        // Route 3: Remaining files and deleted entries via `icat` streamed into a temp cache file.
+        // 路由 3：其余文件与已删除条目通过 `icat` 流式写入临时缓存文件。
         let mut cache = tempfile::tempfile()?;
         if entry.size == 0 {
             return Ok(Self {
@@ -790,7 +786,7 @@ impl PreviewSession {
         }
     }
 
-    /// Read exact bytes from `[offset, offset + len)` (clamped to `readable_size`).
+    /// 精确读取 `[offset, offset + len)` 范围内的字节（自动截断至 `readable_size`）。
     pub fn read_at(&mut self, offset: u64, len: usize) -> CoreResult<Vec<u8>> {
         let total = self.readable_size();
         if offset >= total || len == 0 {
@@ -845,7 +841,7 @@ impl PreviewSession {
         }
     }
 
-    /// Read and render a 0-based page with `page_bytes` and `encoding`.
+    /// 按给定的 `page_bytes` 与 `encoding` 读取并渲染从 0 开始的第 `page` 页。
     pub fn read_page(
         &mut self,
         page: usize,
@@ -906,7 +902,7 @@ impl PreviewSession {
         })
     }
 
-    /// Decode the full entry as an image preview (with 32 MiB / 40 MP / 4096 px safety limits).
+    /// 将完整条目解码为图片预览（受 32 MiB / 4000 万像素 / 4096 px 安全上限约束）。
     pub fn read_image(&mut self) -> CoreResult<ImagePreviewResult> {
         let size = self.readable_size();
         if self.entry.size > MAX_IMAGE_BYTES || size > MAX_IMAGE_BYTES {
@@ -917,7 +913,7 @@ impl PreviewSession {
     }
 }
 
-/// Convenience one-shot helper for previewing a single page of an entry inside `image`.
+/// 一次性便捷函数：预览 `image` 内单个条目的指定页。
 pub fn preview_entry_page(
     image: &Path,
     entry: &InventoryEntry,
@@ -930,7 +926,7 @@ pub fn preview_entry_page(
     session.read_page(page, page_bytes, encoding)
 }
 
-/// Convenience one-shot helper for decoding an image preview of `entry` inside `image`.
+/// 一次性便捷函数：解码 `image` 内 `entry` 的图片预览。
 pub fn preview_entry_image(
     image: &Path,
     entry: &InventoryEntry,
@@ -940,7 +936,7 @@ pub fn preview_entry_image(
     session.read_image()
 }
 
-/// Helper returning a canonical path for external callers that also validate image existence.
+/// 为需要同时校验镜像存在性的外部调用方返回镜像路径。
 pub fn validate_preview_image_path(image: &Path) -> CoreResult<PathBuf> {
     if !image.is_file() {
         return Err(CoreError::NotFound(format!(

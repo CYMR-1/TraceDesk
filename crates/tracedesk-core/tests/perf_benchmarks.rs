@@ -1,7 +1,7 @@
-//! Performance regression & benchmark tests matching `scratch/baseline/python_bench.json`:
-//! 1. 100,000 inventory entries gzip write & read (`compresslevel=1`)
-//! 2. 400,000 MACB timeline events parallel sort + filter_options + multi-core parallel filter
-//! 3. 200 sequential audit log appends + full chain verification of 201 records
+//! 与 `scratch/baseline/python_bench.json` 对应的性能回归与基准测试：
+//! 1. 100,000 条文件清单记录的 gzip 写入与读取（`compresslevel=1`）
+//! 2. 400,000 条 MACB 时间线事件的并行排序、`filter_options` 与多核并行过滤
+//! 3. 200 次连续审计日志追加与 201 条记录的完整哈希链校验
 
 use std::time::Instant;
 
@@ -80,7 +80,7 @@ fn bench_timeline_400k_parallel_sort_and_filter() {
     assert_eq!(opts.statuses.len(), 3);
     assert_eq!(opts.offsets.len(), 2);
 
-    // Filtered query (event=M, offset=2048, query="DIR_000")
+    // 组合筛选查询（event=M、offset=2048、query="DIR_000"）
     let t2 = Instant::now();
     let filtered = timeline
         .matching(&TimelineFilter {
@@ -93,7 +93,7 @@ fn bench_timeline_400k_parallel_sort_and_filter() {
     let filtered_ms = t2.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(filtered.len(), 1000);
 
-    // Status-only filter (`已删除·重分配`: every 100th entry -> 1000 entries * 4 events = 4000)
+    // 仅按状态筛选（`已删除·重分配`：每 100 条出现 1 条 -> 1000 条目 * 4 事件 = 4000）
     let t3 = Instant::now();
     let status_hits = timeline
         .matching(&TimelineFilter {
@@ -104,7 +104,7 @@ fn bench_timeline_400k_parallel_sort_and_filter() {
     let status_ms = t3.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(status_hits.len(), 4000);
 
-    // Full date query across all 400k events (matching `2026-09-01` or `2026-09-02` -> `"2026-09-"`)
+    // 全量 40 万事件日期关键词查询（匹配 `2026-09-01` 或 `2026-09-02` -> `"2026-09-"`）
     let t4 = Instant::now();
     let date_hits = timeline
         .matching(&TimelineFilter {

@@ -1,5 +1,5 @@
-//! 10-section Markdown forensic report renderer (`core-contract.md` §2.4,
-//! matching `forensic/core/reporting.py` section-for-section and column-for-column).
+//! 10 节 Markdown 取证报告渲染器（对应 `core-contract.md` §2.4，
+//! 逐节逐列与 `forensic/core/reporting.py` 保持一致）。
 
 use std::collections::HashMap;
 
@@ -45,7 +45,7 @@ fn value_is_truthy(v: &Value) -> bool {
     }
 }
 
-/// Render the full 10-section Markdown forensic report (`reports/report_<12hex>.md`).
+/// 渲染完整的 10 节 Markdown 取证报告（`reports/report_<12hex>.md`）。
 pub fn render_report(data: &CaseData, records: &[AuditRecord], conclusion: &str) -> String {
     let evidence = data
         .evidence
@@ -163,7 +163,7 @@ pub fn render_report(data: &CaseData, records: &[AuditRecord], conclusion: &str)
         lines.push(format!("| {label} | {} |", cell(val)));
     }
 
-    // Section 4: File Inventory Summary
+    // 第 4 节：文件清单摘要
     lines.push(String::new());
     lines.push("## 文件清单摘要".to_string());
     lines.push(String::new());
@@ -241,7 +241,7 @@ pub fn render_report(data: &CaseData, records: &[AuditRecord], conclusion: &str)
         lines.push("尚未建立完整文件清单。".to_string());
     }
 
-    // Section 5: Exported Copies
+    // 第 5 节：导出副本
     lines.push(String::new());
     lines.push("## 导出副本".to_string());
     lines.push(String::new());
@@ -278,7 +278,7 @@ pub fn render_report(data: &CaseData, records: &[AuditRecord], conclusion: &str)
         lines.push("本案件尚未导出文件副本。".to_string());
     }
 
-    // Section 6: Content Search Records (optional, only when searches exist)
+    // 第 6 节：内容搜索记录（可选，仅在存在搜索记录时输出）
     if !searches.is_empty() {
         lines.push(String::new());
         lines.push("## 内容搜索记录".to_string());
@@ -312,7 +312,7 @@ pub fn render_report(data: &CaseData, records: &[AuditRecord], conclusion: &str)
         }
     }
 
-    // Section 7: File Forensic Findings (optional, only when findings exist)
+    // 第 7 节：文件取证发现（可选，仅在存在取证发现时输出）
     if !groups.is_empty() {
         lines.push(String::new());
         lines.push("## 文件取证发现".to_string());
@@ -419,7 +419,7 @@ pub fn render_report(data: &CaseData, records: &[AuditRecord], conclusion: &str)
         }
     }
 
-    // Section 8: Audit Log Summary (last 100 entries)
+    // 第 8 节：审计日志摘要（最近 100 条）
     let shown_start = records.len().saturating_sub(100);
     let shown_audit = &records[shown_start..];
     let mcp_count = records
@@ -458,7 +458,7 @@ pub fn render_report(data: &CaseData, records: &[AuditRecord], conclusion: &str)
         lines.push(format!("| {} |", cells.join(" | ")));
     }
 
-    // Section 9: Examiner Sign-off
+    // 第 9 节：取证人员确认
     lines.push(String::new());
     lines.push("## 取证人员确认".to_string());
     lines.push(String::new());
@@ -467,7 +467,7 @@ pub fn render_report(data: &CaseData, records: &[AuditRecord], conclusion: &str)
     lines.push("| 取证人员 | ________________ | ________________ |".to_string());
     lines.push("| 复核人员 | ________________ | ________________ |".to_string());
 
-    // Section 10: Scope & Boundaries
+    // 第 10 节：适用边界
     lines.push(String::new());
     lines.push("## 适用边界".to_string());
     lines.push(String::new());

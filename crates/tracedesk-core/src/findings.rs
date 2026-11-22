@@ -1,5 +1,5 @@
-//! Forensic findings grouping, audit action titles, audit origin resolution, and one-click
-//! findings export (`core-contract.md` §3.3, matching `forensic/core/findings.py`).
+//! 取证发现分组、审计操作标题、审计来源解析与一键导出取证发现
+//! （对应 `core-contract.md` §3.3，与 `forensic/core/findings.py` 保持一致）。
 
 use std::collections::HashMap;
 use std::fs;
@@ -13,17 +13,17 @@ use crate::case::Case;
 use crate::error::{CoreError, CoreResult};
 use crate::formatting::{can_export, display_iso_time, now, sha256_hex};
 
-/// Audit actions classified as forensic findings.
+/// 归类为取证发现的审计操作类型。
 pub const OPERATIONS: [(&str, &str); 3] = [
     ("FILE_NOTE", "取证笔记"),
     ("FILE_HASH", "计算摘要"),
     ("FILE_COMPARE", "比对副本"),
 ];
 
-/// Valid audit origin identifiers and Chinese display labels.
+/// 合法的审计来源标识符及其中文展示标签。
 pub const AUDIT_ORIGINS: [(&str, &str); 2] = [("manual", "人工"), ("mcp", "MCP")];
 
-/// Complete mapping of all audit action codes to Chinese titles (`core-contract.md` §3.3).
+/// 全部审计操作代码到中文标题的完整映射（对应 `core-contract.md` §3.3）。
 pub const ACTION_TITLES: [(&str, &str); 20] = [
     ("CONTENT_SEARCH", "搜索文件内容"),
     ("SOURCE_REGISTER", "登记证据来源"),
@@ -47,14 +47,14 @@ pub const ACTION_TITLES: [(&str, &str); 20] = [
     ("FSSTAT_EXPORT", "导出文件系统详情"),
 ];
 
-/// Look up the Chinese finding operation name if `action` belongs to [`OPERATIONS`].
+/// 若 `action` 属于 [`OPERATIONS`]，则返回对应的中文取证发现操作名。
 pub fn operation_title(action: &str) -> Option<&'static str> {
     OPERATIONS
         .iter()
         .find_map(|&(code, label)| (code == action).then_some(label))
 }
 
-/// Look up the Chinese display title for an audit `action`, falling back to `action` itself.
+/// 查找审计操作 `action` 对应的中文展示标题，未匹配时回退为 `action` 本身。
 pub fn action_title(action: &str) -> &str {
     ACTION_TITLES
         .iter()
@@ -62,7 +62,7 @@ pub fn action_title(action: &str) -> &str {
         .unwrap_or(action)
 }
 
-/// Standardized audit origin (`"manual"` vs `"mcp"`).
+/// 标准化的审计来源枚举（`"manual"` 与 `"mcp"`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuditOrigin {
@@ -203,7 +203,7 @@ pub fn audit_origin_label(record: &AuditRecord) -> String {
     }
 }
 
-/// Grouping key for findings (`(subject, offset, inode, deleted, image_sha256)`).
+/// 取证发现分组键（`(subject, offset, inode, deleted, image_sha256)`）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FindingGroupKey {
     pub subject: String,
@@ -213,7 +213,7 @@ pub struct FindingGroupKey {
     pub image_sha256: Option<String>,
 }
 
-/// Grouped finding records for a single target file.
+/// 归属于同一目标文件的取证发现记录分组。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FindingGroup {
     pub key: FindingGroupKey,
@@ -250,8 +250,8 @@ fn value_display(v: &Value) -> String {
     }
 }
 
-/// Group forensic finding records by `(subject, offset, inode, deleted, image_sha256)`,
-/// preserving first-appearance insertion order (`core-contract.md` §3.3).
+/// 按 `(subject, offset, inode, deleted, image_sha256)` 对取证发现记录分组，
+/// 并保持首次出现的插入顺序（对应 `core-contract.md` §3.3）。
 pub fn group_findings(records: &[AuditRecord]) -> Vec<FindingGroup> {
     let mut index_by_key: HashMap<FindingGroupKey, usize> = HashMap::new();
     let mut groups: Vec<FindingGroup> = Vec::new();
@@ -291,7 +291,7 @@ pub fn group_findings(records: &[AuditRecord]) -> Vec<FindingGroup> {
     groups
 }
 
-/// Render findings in plain-text detail format matching `forensic/core/findings.py::findings_text`.
+/// 以纯文本明细格式渲染取证发现，与 `forensic/core/findings.py::findings_text` 保持一致。
 pub fn findings_text(records: &[AuditRecord]) -> String {
     let groups = group_findings(records);
     let mut sections = Vec::with_capacity(groups.len());
@@ -353,7 +353,7 @@ pub fn findings_text(records: &[AuditRecord]) -> String {
     sections.join("\n\n")
 }
 
-/// Output summary of [`export_findings`].
+/// [`export_findings`] 的输出摘要。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportFindingsResult {
     pub summary_path: PathBuf,
@@ -361,8 +361,8 @@ pub struct ExportFindingsResult {
     pub failed: Vec<(String, String)>,
 }
 
-/// Batch-export evidence files referenced by `groups` and generate `exports/取证发现汇总_<8hex>.md`
-/// plus a `FINDINGS_EXPORT` audit entry (`core-contract.md` §3.3).
+/// 批量导出 `groups` 引用的证据文件，生成 `exports/取证发现汇总_<8hex>.md`
+/// 并追加 `FINDINGS_EXPORT` 审计记录（对应 `core-contract.md` §3.3）。
 pub fn export_findings(case: &mut Case, groups: &[FindingGroup]) -> CoreResult<ExportFindingsResult> {
     if groups.is_empty() {
         return Err(CoreError::InvalidInput(

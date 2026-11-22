@@ -1,5 +1,5 @@
-//! UTC+8 time formatting, Windows filename sanitization, canonical JSON serialization,
-//! and forensic display helpers (`core-contract.md` §1.1, §3.1, §3.4).
+//! UTC+8 时间格式化、Windows 文件名净化、规范化 JSON 序列化
+//! 与取证展示辅助函数（对应 `core-contract.md` §1.1、§3.1、§3.4）。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ pub use tracedesk_engines::{can_export, deleted_source_note, entry_name, entry_s
 use crate::case::ExportRecord;
 use crate::error::{CoreError, CoreResult};
 
-/// Fixed UTC+08:00 timezone offset in seconds.
+/// 固定 UTC+08:00 时区偏移（秒）。
 pub const EAST_8_OFFSET_SECS: i32 = 8 * 3600;
 
 static INVALID_WIN_CHARS_RE: LazyLock<Regex> =
@@ -26,13 +26,13 @@ static RESERVED_WIN_DEVICE_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid win device regex")
 });
 
-/// Returns the fixed UTC+08:00 offset (`+08:00`).
+/// 返回固定的 UTC+08:00 时区偏移（`+08:00`）。
 #[inline]
 pub fn east_8() -> FixedOffset {
     FixedOffset::east_opt(EAST_8_OFFSET_SECS).expect("valid UTC+8 offset")
 }
 
-/// Current wall-clock timestamp formatted in UTC+08:00 ISO-8601 (matching Python `datetime.now(EAST_8).isoformat()`).
+/// 当前挂钟时间的 UTC+08:00 ISO-8601 格式字符串（与 Python `datetime.now(EAST_8).isoformat()` 一致）。
 pub fn now() -> String {
     let dt = Utc::now().with_timezone(&east_8());
     format_datetime_iso(&dt)
@@ -46,15 +46,15 @@ fn format_datetime_iso(dt: &DateTime<FixedOffset>) -> String {
     }
 }
 
-/// Timestamp input accepted by [`display_time`].
+/// [`display_time`] 接受的时间戳输入类型。
 #[derive(Debug, Clone, Copy)]
 pub enum TimeValue<'a> {
     Unix(i64),
     Iso(&'a str),
 }
 
-/// Convert a Unix timestamp (seconds) to UTC+8 display text.
-/// Returns `"未记录"` when `unix_secs <= 0`.
+/// 将 Unix 时间戳（秒）转换为 UTC+8 展示文本。
+/// 当 `unix_secs <= 0` 时返回 `"未记录"`。
 pub fn display_timestamp(unix_secs: i64, compact: bool) -> String {
     if unix_secs <= 0 {
         return "未记录".to_string();
@@ -70,7 +70,7 @@ pub fn display_timestamp(unix_secs: i64, compact: bool) -> String {
     }
 }
 
-/// Parse an ISO-8601 string (interpreting naive timestamps as UTC) and format in UTC+8.
+/// 解析 ISO-8601 字符串（无时区的时间戳按 UTC 解释）并格式化为 UTC+8。
 pub fn display_iso_time(value: &str, compact: bool) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -89,7 +89,7 @@ pub fn display_iso_time(value: &str, compact: bool) -> String {
     }
 }
 
-/// Parse ISO-8601 datetime strings (with timezone offset, `Z`, space separator, or naive UTC) into UTC+8.
+/// 将 ISO-8601 日期时间字符串（支持时区偏移、`Z`、空格分隔符或无时区 UTC）解析并转换为 UTC+8。
 pub fn parse_iso_to_east8(raw: &str) -> Option<DateTime<FixedOffset>> {
     let s = raw.trim();
     if s.is_empty() {
@@ -98,7 +98,7 @@ pub fn parse_iso_to_east8(raw: &str) -> Option<DateTime<FixedOffset>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Some(dt.with_timezone(&east_8()));
     }
-    // Support space separator with offset (`2026-11-21 17:45:00+08:00` or `.123456+08:00`).
+    // 支持带时区偏移的空格分隔格式（如 `2026-11-21 17:45:00+08:00` 或 `.123456+08:00`）。
     let normalized = if s.len() >= 11 && s.as_bytes()[10] == b' ' {
         let mut owned = s.to_string();
         owned.replace_range(10..11, "T");
@@ -119,7 +119,7 @@ pub fn parse_iso_to_east8(raw: &str) -> Option<DateTime<FixedOffset>> {
             return Some(dt.with_timezone(&east_8()));
         }
     }
-    // Naive ISO strings without timezone are interpreted as UTC, then converted to UTC+8.
+    // 不带时区的 ISO 字符串按 UTC 解释，再转换为 UTC+8。
     for fmt in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"] {
         if let Ok(naive) = NaiveDateTime::parse_from_str(&normalized, fmt) {
             return Some(Utc.from_utc_datetime(&naive).with_timezone(&east_8()));
@@ -133,7 +133,7 @@ pub fn parse_iso_to_east8(raw: &str) -> Option<DateTime<FixedOffset>> {
     None
 }
 
-/// Unified UTC+8 time formatter accepting either Unix timestamp seconds or ISO-8601 strings.
+/// 统一的 UTC+8 时间格式化函数，同时支持 Unix 秒级时间戳与 ISO-8601 字符串。
 pub fn display_time(value: TimeValue<'_>, compact: bool) -> String {
     match value {
         TimeValue::Unix(secs) => display_timestamp(secs, compact),
@@ -141,11 +141,10 @@ pub fn display_time(value: TimeValue<'_>, compact: bool) -> String {
     }
 }
 
-/// Zero-allocation UTC+8 ISO-8601 formatter (`YYYY-MM-DDTHH:MM:SS+08:00`, exact 25 ASCII bytes)
-/// for hot loops such as parallel MACB timeline filtering.
+/// 零分配 UTC+8 ISO-8601 格式化函数（`YYYY-MM-DDTHH:MM:SS+08:00`，固定 25 字节 ASCII），
+/// 用于并行 MACB 时间线过滤等高频热循环。
 ///
-/// Uses Howard Hinnant's civil-from-days algorithm and returns `None` for out-of-range years
-/// outside `0000..=9999`.
+/// 采用 Howard Hinnant 的 civil-from-days 算法；年份超出 `0000..=9999` 范围时返回 `None`。
 #[inline]
 pub fn format_unix_east8_stack(unix_secs: i64) -> Option<[u8; 25]> {
     if unix_secs <= 0 {
@@ -155,7 +154,7 @@ pub fn format_unix_east8_stack(unix_secs: i64) -> Option<[u8; 25]> {
     let days = local.div_euclid(86_400);
     let secs_of_day = local.rem_euclid(86_400) as u32;
 
-    // Howard Hinnant civil_from_days (days since 1970-01-01).
+    // Howard Hinnant civil_from_days 算法（自 1970-01-01 起的天数）。
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = (z - era * 146_097) as u32; // [0, 146096]
@@ -193,7 +192,7 @@ pub fn format_unix_east8_stack(unix_secs: i64) -> Option<[u8; 25]> {
     Some(out)
 }
 
-/// Truncate a UTF-8 string to at most `max_units` UTF-16 code units without splitting surrogate pairs.
+/// 将 UTF-8 字符串截断至不超过 `max_units` 个 UTF-16 代码单元，且不拆分代理对。
 pub fn truncate_utf16_units(s: &str, max_units: usize) -> String {
     let mut out = String::with_capacity(s.len().min(max_units * 3));
     let mut units = 0usize;
@@ -208,13 +207,13 @@ pub fn truncate_utf16_units(s: &str, max_units: usize) -> String {
     out
 }
 
-/// Count the UTF-16 code unit length of `s`.
+/// 计算 `s` 的 UTF-16 代码单元长度。
 #[inline]
 pub fn utf16_unit_len(s: &str) -> usize {
     s.chars().map(char::len_utf16).sum()
 }
 
-/// Sanitize a single filename component for Windows NTFS/FAT (`core-contract.md` §3.1).
+/// 按 Windows NTFS/FAT 规则净化单个文件名组件（对应 `core-contract.md` §3.1）。
 pub fn windows_filename(name: &str, max_units: usize) -> String {
     let mut cleaned = INVALID_WIN_CHARS_RE.replace_all(name, "_").into_owned();
     let stem = cleaned.split('.').next().unwrap_or(&cleaned);
@@ -231,13 +230,13 @@ pub fn windows_filename(name: &str, max_units: usize) -> String {
     }
 }
 
-/// Derive a safe Windows export filename from an in-image slash-separated path.
+/// 从镜像内斜杠分隔的路径派生安全的 Windows 导出文件名。
 pub fn export_filename(source_path: &str) -> String {
     let leaf = source_path.rsplit('/').next().unwrap_or(source_path);
     windows_filename(leaf, 255)
 }
 
-/// Derive the default case directory name from `(number, examiner, target)` (`core-contract.md` §3.1).
+/// 根据 `(number, examiner, target)` 派生默认案件目录名（对应 `core-contract.md` §3.1）。
 pub fn case_folder_name(number: &str, examiner: &str, target: &str) -> String {
     let parts = [number.trim(), examiner.trim(), target.trim()];
     let mut joined = parts.join("-");
@@ -251,7 +250,7 @@ pub fn case_folder_name(number: &str, examiner: &str, target: &str) -> String {
     windows_filename(&joined, 255)
 }
 
-/// Suggest a non-colliding case folder path under `root`, appending ` (2)`, ` (3)`, ... if needed.
+/// 在 `root` 下生成不冲突的案件目录路径，必要时依次追加 ` (2)`、` (3)` 等后缀。
 pub fn next_case_folder_path(root: &Path, base_name: &str) -> PathBuf {
     for index in 1usize.. {
         let suffix = if index == 1 {
@@ -269,7 +268,7 @@ pub fn next_case_folder_path(root: &Path, base_name: &str) -> PathBuf {
     unreachable!("infinite loop")
 }
 
-/// Atomically create a non-colliding case folder under `root`, appending ` (2)`, ` (3)`, ... on conflict.
+/// 在 `root` 下原子创建不冲突的案件目录，遇到重名冲突时自动追加 ` (2)`、` (3)` 等后缀。
 pub fn create_unique_case_folder(root: &Path, base_name: &str) -> CoreResult<PathBuf> {
     fs::create_dir_all(root)?;
     for index in 1usize.. {
@@ -290,7 +289,7 @@ pub fn create_unique_case_folder(root: &Path, base_name: &str) -> CoreResult<Pat
     unreachable!("infinite loop")
 }
 
-/// Build the human-readable Chinese deleted-file export summary (`forensic/core/formatting.py`).
+/// 构建已删除文件导出记录的可读中文摘要（对应 `forensic/core/formatting.py`）。
 pub fn deleted_export_summary(record: &ExportRecord) -> String {
     if record.deleted != Some(true) {
         return String::new();
@@ -322,22 +321,22 @@ pub fn deleted_export_summary(record: &ExportRecord) -> String {
     parts.join(" · ")
 }
 
-/// Canonical JSON serialization byte-for-byte identical to Python:
-/// `json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))`.
+/// 与 Python 逐字节一致的规范化 JSON 序列化：
+/// `json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))`。
 ///
-/// Converts any [`Serialize`] value into [`serde_json::Value`] first so all nested object maps
-/// use `BTreeMap` key ordering (requires `serde_json` WITHOUT `preserve_order`).
+/// 先将任意 [`Serialize`] 值转为 [`serde_json::Value`]，以确保所有嵌套对象映射
+/// 均采用 `BTreeMap` 键序（要求 `serde_json` 未启用 `preserve_order`）。
 pub fn canonical_json<T: Serialize>(value: &T) -> CoreResult<String> {
     let val = serde_json::to_value(value)?;
     canonical_json_value(&val)
 }
 
-/// Canonical JSON serialization for an already-constructed [`serde_json::Value`].
+/// 对已构造的 [`serde_json::Value`] 执行规范化 JSON 序列化。
 pub fn canonical_json_value(value: &Value) -> CoreResult<String> {
     Ok(serde_json::to_string(value)?)
 }
 
-/// Lowercase hexadecimal encoding of raw bytes.
+/// 将原始字节编码为小写十六进制字符串。
 pub fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -348,14 +347,14 @@ pub fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-/// Compute lowercase 64-character SHA-256 hex digest of an in-memory byte slice.
+/// 计算内存字节切片的小写 64 位十六进制 SHA-256 摘要。
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex_lower(&hasher.finalize())
 }
 
-/// Format an unsigned integer with comma thousand separators (e.g. `9437184` -> `"9,437,184"`).
+/// 将无符号整数格式化为带千位逗号分隔的字符串（如 `9437184` -> `"9,437,184"`）。
 pub fn format_commas(n: u64) -> String {
     let raw = n.to_string();
     let bytes = raw.as_bytes();
@@ -373,7 +372,7 @@ pub fn format_commas(n: u64) -> String {
     out
 }
 
-/// Format a byte count with binary unit suffix matching `forensic/core/reporting.py::_format_size`.
+/// 按二进制单位后缀格式化字节数，与 `forensic/core/reporting.py::_format_size` 保持一致。
 pub fn format_size(size: u64) -> String {
     const UNITS: [(&str, u64); 4] = [
         ("TiB", 1u64 << 40),
