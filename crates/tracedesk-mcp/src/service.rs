@@ -6,6 +6,7 @@
 //!   消除重复 gunzip 解压与时间线重排开销，且磁盘文件一旦变化立即刷新
 //! - 提供强制释放残留 `case.lock` 及客户端配置生成辅助函数
 
+use std::cell::RefCell;
 use std::fs;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -20,11 +21,11 @@ use thiserror::Error;
 use tracedesk_core::{
     AppPaths, AuditOrigin, AuditRecord, BuildBundleOptions, Case, CaseData, CoreError,
     FindingGroup, PAGE_BYTES, PREVIEW_ENCODINGS, Provenance, SOURCE_FIELDS, SearchOptions,
-    TimelineFilter, TimelineIndex, action_title, audit_origin, audit_origin_label, build_bundle,
-    can_export, coverage_text, deleted_source_note, display_iso_time, display_timestamp,
-    entry_name, entry_status, examine, export_findings as do_export_findings, group_findings,
-    is_within, normalize_event_filter, operation_title, preview_entry_page, record_note,
-    resolve_clean, search_case, sha256_hex, source_status, verify_audit_chain_at,
+    TimelineFilter, TimelineIndex, action_title, audit_mcp_user, audit_origin, audit_origin_label,
+    build_bundle, can_export, coverage_text, deleted_source_note, display_iso_time,
+    display_timestamp, entry_name, entry_status, examine, export_findings as do_export_findings,
+    group_findings, is_within, normalize_event_filter, operation_title, preview_entry_page,
+    record_note, resolve_clean, search_case, sha256_hex, source_status, verify_audit_chain_at,
 };
 use tracedesk_engines::{CaseFileLock, InventoryEntry};
 
@@ -86,6 +87,126 @@ impl From<std::io::Error> for McpError {
 pub type McpResult<T> = Result<T, McpError>;
 
 const READ_CACHE_CAPACITY: usize = 16;
+
+/// 当人工使用者与客户端标识均缺失时的默认 MCP 调用方回退标记。
+pub const DEFAULT_MCP_CLIENT_LABEL: &str = "本地 MCP 客户端";
+
+/// MCP 使用者/客户端标识允许的最大字符长度，避免异常长请求头污染审计日志。
+const MAX_MCP_IDENTITY_CHARS: usize = 120;
+
+/// 当前线程单次 MCP 调用生效的传输层调用方上下文。
+#[derive(Debug, Clone, Default)]
+struct ActiveCallerScope {
+    /// 来自 HTTP 头 `X-MCP-User` 等传输层的显式使用者名称。
+    header_user: Option<String>,
+    /// 来自 HTTP 头或 `initialize.clientInfo` 的客户端标识。
+    client_name: Option<String>,
+}
+
+thread_local! {
+    static ACTIVE_CALLER_SCOPE: RefCell<Option<ActiveCallerScope>> = const { RefCell::new(None) };
+}
+
+/// 线程局部调用方上下文 RAII 守卫，确保函数正常返回或 panic 时均自动恢复先前状态。
+struct CallerScopeGuard {
+    previous: Option<ActiveCallerScope>,
+}
+
+impl Drop for CallerScopeGuard {
+    fn drop(&mut self) {
+        ACTIVE_CALLER_SCOPE.with(|cell| {
+            *cell.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+/// 清理 MCP 使用者/客户端标识字符串：过滤控制字符、折叠空白并限制最大字符数。
+pub fn sanitize_mcp_identity(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    let truncated: String = collapsed.chars().take(MAX_MCP_IDENTITY_CHARS).collect();
+    let trimmed = truncated.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+/// 去除文本中的 `(MCP)` / `（MCP）` 泛化标记（大小写不敏感）。
+fn strip_generic_mcp_marker(raw: &str) -> String {
+    let mut current = raw.trim().to_string();
+    loop {
+        let lower = current.to_lowercase();
+        let found = lower
+            .find("(mcp)")
+            .map(|pos| (pos, "(mcp)".len()))
+            .or_else(|| lower.find("（mcp）").map(|pos| (pos, "（mcp）".len())));
+        let Some((pos, len)) = found else {
+            break;
+        };
+        if current.len() == lower.len()
+            && current.is_char_boundary(pos)
+            && current.is_char_boundary(pos + len)
+        {
+            current.replace_range(pos..pos + len, " ");
+        } else {
+            let replaced = current
+                .replace("(MCP)", " ")
+                .replace("(mcp)", " ")
+                .replace("(Mcp)", " ")
+                .replace("（MCP）", " ")
+                .replace("（mcp）", " ")
+                .replace("（Mcp）", " ");
+            if replaced == current {
+                break;
+            }
+            current = replaced;
+        }
+    }
+    current.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 规范化显式人工使用者名称（排除空值与泛化 `"MCP"`）。
+pub fn normalize_explicit_user(raw: Option<&str>) -> Option<String> {
+    let sanitized = raw.and_then(sanitize_mcp_identity)?;
+    let stripped = strip_generic_mcp_marker(&sanitized);
+    if stripped.is_empty() || stripped.eq_ignore_ascii_case("MCP") {
+        None
+    } else {
+        Some(stripped)
+    }
+}
+
+/// 按统一规则合成写入 `audit.jsonl` 的 `mcp_client` 标识：
+/// - 若同时存在明确人工使用者（非泛化 `"MCP"`）与客户端名（且二者不同），合并为 `"<使用者> / <客户端>"`；
+/// - 若仅有一项，则直接使用该项；
+/// - 若均缺失，则回退为 `"本地 MCP 客户端"`。
+pub fn compose_mcp_client(explicit_user: Option<&str>, client_name: Option<&str>) -> String {
+    let user = normalize_explicit_user(explicit_user);
+    let client = client_name
+        .and_then(sanitize_mcp_identity)
+        .filter(|s| !s.eq_ignore_ascii_case("MCP"));
+
+    match (user, client) {
+        (Some(u), Some(c)) => {
+            if u.eq_ignore_ascii_case(&c) {
+                c
+            } else {
+                format!("{u} / {c}")
+            }
+        }
+        (Some(u), None) => u,
+        (None, Some(c)) => c,
+        (None, None) => DEFAULT_MCP_CLIENT_LABEL.to_string(),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileStampKey {
@@ -376,18 +497,51 @@ impl CaseService {
         force_release_case_lock(&folder)
     }
 
-    fn effective_actor<'a>(&'a self, actor: Option<&'a str>) -> Option<&'a str> {
-        actor
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .or(self.default_actor.as_deref())
+    /// 在当前线程作用域内绑定本次 MCP 调用的传输层使用者与客户端标识（支持嵌套并自动恢复）。
+    pub fn with_caller_scope<F, R>(
+        header_user: Option<&str>,
+        client_name: Option<&str>,
+        f: F,
+    ) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let next = ActiveCallerScope {
+            header_user: header_user.and_then(sanitize_mcp_identity),
+            client_name: client_name.and_then(sanitize_mcp_identity),
+        };
+        let previous = ACTIVE_CALLER_SCOPE.with(|cell| cell.borrow_mut().replace(next));
+        let _guard = CallerScopeGuard { previous };
+        f()
     }
 
-    /// 打开案件并持有 `case.lock`（固定 `AuditOrigin::Mcp`），随返回值 `Drop` 自动释放锁。
+    /// 结合工具参数 `actor`、传输层 `X-MCP-User`、`--actor`/`TRACEDESK_MCP_ACTOR` 与客户端名，
+    /// 解析本次操作应写入审计链的 `(actor, mcp_client)`。
+    fn resolve_caller_identity(&self, actor: Option<&str>) -> (Option<String>, String) {
+        let (scoped_user, scoped_client) = ACTIVE_CALLER_SCOPE.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|s| (s.header_user.clone(), s.client_name.clone()))
+                .unwrap_or((None, None))
+        });
+        let explicit_actor = actor
+            .and_then(sanitize_mcp_identity)
+            .or(scoped_user)
+            .or_else(|| self.default_actor.clone());
+        let mcp_client = compose_mcp_client(explicit_actor.as_deref(), scoped_client.as_deref());
+        (explicit_actor, mcp_client)
+    }
+
+    /// 打开案件并持有 `case.lock`（固定 `AuditOrigin::Mcp` 且写入 `mcp_client`），随返回值 `Drop` 自动释放锁。
     pub fn open_case(&self, case_dir: &str, actor: Option<&str>) -> McpResult<Case> {
         let folder = self.resolve_case_dir(case_dir)?;
-        let explicit_actor = self.effective_actor(actor);
-        match Case::open(&folder, explicit_actor, AuditOrigin::Mcp) {
+        let (explicit_actor, mcp_client) = self.resolve_caller_identity(actor);
+        match Case::open_with_mcp_client(
+            &folder,
+            explicit_actor.as_deref(),
+            AuditOrigin::Mcp,
+            Some(&mcp_client),
+        ) {
             Ok(case) => Ok(case),
             Err(err) if err.is_locked() => Err(lock_contention_error(&folder)),
             Err(err) => Err(McpError::from(err)),
@@ -800,18 +954,25 @@ impl CaseService {
             None => self.cases_root.clone(),
         };
         let clean_folder = folder_name.map(str::trim).filter(|s| !s.is_empty());
-        let explicit_actor = self.effective_actor(actor);
-        let mut case = Case::create(
+        let (explicit_actor, mcp_client) = self.resolve_caller_identity(actor);
+        let mut case = Case::create_with_mcp_client(
             &root,
             number.trim(),
             examiner.trim(),
             target.trim(),
             clean_folder,
-            explicit_actor,
+            explicit_actor.as_deref(),
             AuditOrigin::Mcp,
+            Some(&mcp_client),
         )?;
+        let latest = case.check_audit()?.pop();
         self.update_case_cache_from_open(&case);
         let data = case.data();
+        let origin_label = latest
+            .as_ref()
+            .map(audit_origin_label)
+            .unwrap_or_else(|| format!("MCP · {mcp_client}"));
+        let resolved_client = latest.as_ref().and_then(audit_mcp_user).or(Some(mcp_client));
         let out = json!({
             "case_dir": case.folder().to_string_lossy(),
             "id": data.id,
@@ -819,7 +980,8 @@ impl CaseService {
             "examiner": data.examiner,
             "target": data.target,
             "origin": "mcp",
-            "origin_label": "MCP",
+            "origin_label": origin_label,
+            "mcp_client": resolved_client,
             "created": display_iso_time(&data.created, false),
         });
         case.close();
@@ -1469,6 +1631,7 @@ impl CaseService {
             "timestamp": display_iso_time(&latest.timestamp, false),
             "origin": audit_origin(&latest).as_str(),
             "origin_label": audit_origin_label(&latest),
+            "mcp_client": audit_mcp_user(&latest),
             "actor": latest.actor,
             "path": entry.path,
             "partition_offset": entry.offset,
@@ -1550,6 +1713,7 @@ impl CaseService {
                             "timestamp": display_iso_time(&r.timestamp, false),
                             "origin": audit_origin(r).as_str(),
                             "origin_label": audit_origin_label(r),
+                            "mcp_client": audit_mcp_user(r),
                             "actor": r.actor,
                             "action": r.action,
                             "operation": operation_title(&r.action).unwrap_or(&r.action),
@@ -1732,6 +1896,7 @@ impl CaseService {
             let mut matched: Vec<Value> = Vec::new();
             for r in records.iter() {
                 let rec_origin = audit_origin(r).as_str();
+                let rec_mcp_client = audit_mcp_user(r);
                 let rec_origin_label = audit_origin_label(r);
                 if matches!(origin_filter.as_str(), "manual" | "mcp")
                     && rec_origin != origin_filter
@@ -1745,10 +1910,14 @@ impl CaseService {
                 {
                     continue;
                 }
-                if let Some(ref af) = actor_cf
-                    && !r.actor.to_lowercase().contains(af)
-                {
-                    continue;
+                if let Some(ref af) = actor_cf {
+                    let actor_matched = r.actor.to_lowercase().contains(af)
+                        || rec_mcp_client
+                            .as_deref()
+                            .is_some_and(|c| c.to_lowercase().contains(af));
+                    if !actor_matched {
+                        continue;
+                    }
                 }
                 if let Some(ref rf) = result_cf
                     && r.result.to_lowercase() != *rf
@@ -1762,6 +1931,7 @@ impl CaseService {
                         formatted_time,
                         rec_origin,
                         rec_origin_label,
+                        rec_mcp_client,
                         r.actor,
                         r.action,
                         title,
@@ -1780,6 +1950,7 @@ impl CaseService {
                     "timestamp": formatted_time,
                     "origin": rec_origin,
                     "origin_label": rec_origin_label,
+                    "mcp_client": rec_mcp_client,
                     "actor": r.actor,
                     "action": r.action,
                     "action_title": title,

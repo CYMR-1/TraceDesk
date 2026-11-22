@@ -50,8 +50,8 @@ pub use error::{CoreError, CoreResult};
 pub use file_tools::{ExamineResult, entry_identity, examine, record_note, record_search_hit_note};
 pub use findings::{
     ACTION_TITLES, AUDIT_ORIGINS, AuditOrigin, AuditRecord, ExportFindingsResult, FindingGroup,
-    FindingGroupKey, OPERATIONS, action_title, audit_origin, audit_origin_label, export_findings,
-    findings_text, group_findings, operation_title,
+    FindingGroupKey, OPERATIONS, action_title, audit_mcp_user, audit_origin, audit_origin_label,
+    export_findings, findings_text, group_findings, operation_title,
 };
 pub use formatting::{
     EAST_8_OFFSET_SECS, TimeValue, can_export, canonical_json, canonical_json_value,

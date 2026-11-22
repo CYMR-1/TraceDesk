@@ -3,8 +3,9 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::tempdir;
@@ -621,10 +622,231 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     assert!(audit.valid);
     assert_eq!(audit.records.len(), 1);
     assert_eq!(audit.records[0].origin, "mcp");
-    assert_eq!(audit.records[0].origin_label, "MCP");
+    assert_eq!(audit.records[0].origin_label, "MCP · ai-assistant");
+    assert_eq!(audit.records[0].mcp_user.as_deref(), Some("ai-assistant"));
     assert_eq!(audit.records[0].action, "FILE_NOTE");
 
     let st_stopped = cmd_stop_mcp_http(&state).expect("stop_mcp_http");
     assert!(!st_stopped.running);
+    let _ = cmd_close_case(&state);
+}
+
+/// 发送原始 HTTP 请求并解析 `(状态码, 响应头小写映射, 响应体字符串)`。
+fn send_raw_http_with_headers(port: u16, raw_request: &str) -> (u16, std::collections::HashMap<String, String>, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect local mcp http");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream.write_all(raw_request.as_bytes()).unwrap();
+    stream.flush().unwrap();
+
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap_or((&text, ""));
+    let mut lines = head.lines();
+    let status_line = lines.next().unwrap_or("");
+    let code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    let mut headers = std::collections::HashMap::new();
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+        }
+    }
+    (code, headers, body.to_string())
+}
+
+#[test]
+fn desktop_embedded_mcp_http_caller_identity_and_audit_filter() {
+    let tmp = tempdir().expect("tempdir");
+    let cases_dir = tmp.path().join("cases");
+    std::fs::create_dir_all(&cases_dir).expect("mkdir cases");
+    let state = make_test_state(cases_dir.clone());
+    let demo_dd = demo_image_path();
+
+    let snap = cmd_create_case(
+        &state,
+        &cases_dir.to_string_lossy(),
+        "DESK-MCP-WHO-01",
+        "桌面取证员",
+        "桌面端MCP来源使用者回归测试",
+        None,
+    )
+    .expect("create case");
+    cmd_load_image(&state, &demo_dd.to_string_lossy(), None).expect("load image");
+    cmd_scan_all_partitions(&state, None).expect("scan partitions");
+
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let st_running = cmd_start_mcp_http(&state, port).expect("start desktop mcp http");
+    assert!(st_running.running);
+    let host = format!("127.0.0.1:{port}");
+
+    // 1. 客户端通过 initialize 上报 clientInfo = Cursor 1.5，服务端返回 Mcp-Session-Id 头。
+    let init_body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "clientInfo": { "name": "Cursor", "version": "1.5" }
+        }
+    })
+    .to_string();
+    let (init_code, init_headers, _) = send_raw_http_with_headers(
+        port,
+        &format!(
+            "POST /mcp HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {init_body}",
+            init_body.len()
+        ),
+    );
+    assert_eq!(init_code, 200);
+    let sid = init_headers
+        .get("mcp-session-id")
+        .cloned()
+        .expect("桌面端内嵌 HTTP MCP 必须返回 Mcp-Session-Id");
+
+    // 2. 携带该 Mcp-Session-Id 调用 tracedesk_record_finding（不传 actor）-> 记录为 Cursor 1.5。
+    let call_cursor_body = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedesk_record_finding",
+            "arguments": {
+                "case_dir": snap.case_dir,
+                "path": "DOCS/CASE.TXT",
+                "partition_offset": 2048,
+                "note": "桌面端内嵌 MCP 会话标记测试",
+                "response_format": "json"
+            }
+        }
+    })
+    .to_string();
+    let (code_cursor, _, body_cursor) = send_raw_http_with_headers(
+        port,
+        &format!(
+            "POST /mcp HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             Mcp-Session-Id: {sid}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {call_cursor_body}",
+            call_cursor_body.len()
+        ),
+    );
+    assert_eq!(code_cursor, 200);
+    let cursor_rpc: Value = serde_json::from_str(&body_cursor).expect("parse cursor rpc");
+    assert_eq!(cursor_rpc["result"]["isError"], false);
+
+    // 3. 携带 X-MCP-User + X-MCP-Client 请求头 -> 覆盖为 “赵六 / Claude Desktop”。
+    let call_hdr_body = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedesk_record_finding",
+            "arguments": {
+                "case_dir": snap.case_dir,
+                "path": "DOCS/CASE.TXT",
+                "partition_offset": 2048,
+                "note": "桌面端 HTTP 头使用者标记测试",
+                "response_format": "json"
+            }
+        }
+    })
+    .to_string();
+    let (code_hdr, _, body_hdr) = send_raw_http_with_headers(
+        port,
+        &format!(
+            "POST /mcp HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             Mcp-Session-Id: {sid}\r\n\
+             X-MCP-User: 赵六\r\n\
+             X-MCP-Client: Claude Desktop\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {call_hdr_body}",
+            call_hdr_body.len()
+        ),
+    );
+    assert_eq!(code_hdr, 200);
+    let hdr_rpc: Value = serde_json::from_str(&body_hdr).expect("parse hdr rpc");
+    assert_eq!(hdr_rpc["result"]["isError"], false);
+
+    // 4. 校验桌面端 list_audit_log：按 “mcp” / “MCP” 筛出全部 MCP 记录，并支持按使用者关键词检索。
+    let all_mcp = cmd_list_audit_log(&state, "", Some("mcp"), None, None, None, "seq", true)
+        .expect("按 mcp 筛选");
+    assert!(all_mcp.valid);
+    assert_eq!(all_mcp.records.len(), 2);
+    assert!(all_mcp.filter_options.origins.contains(&"人工".to_string()));
+    assert!(all_mcp.filter_options.origins.contains(&"MCP".to_string()));
+    assert!(
+        all_mcp
+            .filter_options
+            .origins
+            .contains(&"MCP · Cursor 1.5".to_string())
+    );
+    assert!(
+        all_mcp
+            .filter_options
+            .origins
+            .contains(&"MCP · 赵六 / Claude Desktop".to_string())
+    );
+
+    let all_mcp_upper = cmd_list_audit_log(&state, "", Some("MCP"), None, None, None, "seq", true)
+        .expect("按 MCP 筛选");
+    assert_eq!(all_mcp_upper.records.len(), 2);
+
+    let by_cursor_kw = cmd_list_audit_log(&state, "Cursor 1.5", None, None, None, None, "seq", true)
+        .expect("按 Cursor 1.5 关键词搜索");
+    assert_eq!(by_cursor_kw.records.len(), 1);
+    assert_eq!(by_cursor_kw.records[0].origin_label, "MCP · Cursor 1.5");
+    assert_eq!(
+        by_cursor_kw.records[0].mcp_user.as_deref(),
+        Some("Cursor 1.5")
+    );
+
+    let by_claude_kw =
+        cmd_list_audit_log(&state, "Claude Desktop", None, None, None, None, "seq", true)
+            .expect("按 Claude Desktop 关键词搜索");
+    assert_eq!(by_claude_kw.records.len(), 1);
+    assert_eq!(
+        by_claude_kw.records[0].origin_label,
+        "MCP · 赵六 / Claude Desktop"
+    );
+    assert_eq!(
+        by_claude_kw.records[0].mcp_user.as_deref(),
+        Some("赵六 / Claude Desktop")
+    );
+
+    // 5. 校验桌面端 list_findings 同步携带 originLabel 与 mcpUser。
+    let findings = cmd_list_findings(&state, None, None, Some("Cursor"), "seq", false)
+        .expect("按 Cursor 搜索取证发现");
+    assert_eq!(findings.groups.len(), 1);
+    assert!(
+        findings.groups[0]
+            .records
+            .iter()
+            .any(|r| r.origin_label.as_deref() == Some("MCP · Cursor 1.5")
+                && r.mcp_user.as_deref() == Some("Cursor 1.5"))
+    );
+
+    // 6. 生成复核包并验签通过。
+    let bundle_res = cmd_build_review_bundle(&state, None, None).expect("生成复核包");
+    let verified = verify_bundle(Path::new(&bundle_res.path), None).expect("复核包验签通过");
+    assert!(verified >= 5);
+
+    let _ = cmd_stop_mcp_http(&state);
     let _ = cmd_close_case(&state);
 }

@@ -141,9 +141,14 @@ export const FindingsModule: React.FC<FindingsModuleProps> = ({
       const rows: [string, unknown][] = [
         ['时间', rec.timestamp],
         ['操作来源', originLabel],
-        ['操作人员', rec.actor],
-        ['结果', rec.result],
       ];
+      if (rec.mcpUser) {
+        rows.push(['MCP 使用者', rec.mcpUser]);
+      }
+      rows.push(
+        ['操作人员', rec.actor],
+        ['结果', rec.result]
+      );
       for (const [fieldKey, label] of DETAIL_FIELD_LABELS) {
         const val = rec.details?.[fieldKey];
         if (val !== undefined && val !== null && val !== '') {

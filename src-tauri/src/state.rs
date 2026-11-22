@@ -404,6 +404,9 @@ pub struct FindingRecordDto {
     pub origin: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin_label: Option<String>,
+    /// MCP 使用者/客户端标识（仅来源为 MCP 且已知使用者/客户端时填充）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_user: Option<String>,
     pub actor: String,
     pub result: String,
     pub details: serde_json::Map<String, Value>,
@@ -496,6 +499,9 @@ pub struct AuditRecordDto {
     pub timestamp: String,
     pub origin: String,
     pub origin_label: String,
+    /// MCP 使用者/客户端标识（仅来源为 MCP 且已知使用者/客户端时填充）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_user: Option<String>,
     pub actor: String,
     pub action: String,
     pub action_title: String,

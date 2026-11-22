@@ -414,13 +414,14 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
-/* ---------- Semantic Pills (ForensicItemDelegate) ---------- */
+/* ---------- 语义胶囊徽章样式 ---------- */
 .td-pill {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   height: 20px;
   max-width: 100%;
+  min-width: 0;
   padding: 0 8px;
   border-radius: 4px;
   border: 1px solid transparent;
@@ -429,8 +430,16 @@ button {
   line-height: 18px;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
   vertical-align: middle;
+}
+
+/* 胶囊内部文本容器：短文本居中，超长文本从左对齐并优雅显示省略号 */
+.td-pill-label {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .td-pill--ok {

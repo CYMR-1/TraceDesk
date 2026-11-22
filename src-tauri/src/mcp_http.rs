@@ -26,7 +26,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tracedesk_mcp::{
     CaseService, DEFAULT_HOST, DEFAULT_HTTP_PATH, DEFAULT_PORT, MAX_HTTP_BODY_BYTES, McpServer,
-    TOOL_CATALOG, normalize_http_path, validate_loopback_host, verify_dns_rebinding,
+    TOOL_CATALOG, normalize_http_path, request_context_from_http_headers, validate_loopback_host,
+    verify_dns_rebinding,
 };
 use uuid::Uuid;
 
@@ -518,7 +519,9 @@ fn handle_client_connection(
         let session_id = req
             .headers
             .get("mcp-session-id")
-            .cloned()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
             .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
 
         match req.method.as_str() {
@@ -537,6 +540,8 @@ fn handle_client_connection(
                 );
             }
             "DELETE" => {
+                // 会话结束时同步清理会话对应的 clientInfo 缓存。
+                server.remove_session(&session_id);
                 let _ = write_http_response(
                     &mut stream,
                     200,
@@ -587,9 +592,12 @@ fn handle_client_connection(
                     }
                 };
 
+                // 提取 HTTP 请求头（X-MCP-User / X-MCP-Client / X-Client-Name / 非通用 User-Agent）与会话标识。
+                let req_ctx = request_context_from_http_headers(&req.headers, session_id.clone());
                 let target_dirs = extract_target_case_dirs(&parsed, &app_state.app_paths.cases_dir);
-                let resp_opt = app_state
-                    .coordinate_mcp_call(&target_dirs, || server.handle_jsonrpc_value(parsed));
+                let resp_opt = app_state.coordinate_mcp_call(&target_dirs, || {
+                    server.handle_jsonrpc_value_with_context(parsed, &req_ctx)
+                });
 
                 match resp_opt {
                     None => {

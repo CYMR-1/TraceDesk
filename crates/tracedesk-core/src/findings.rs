@@ -94,10 +94,11 @@ impl AuditOrigin {
     }
 }
 
-/// Single entry in `audit.jsonl` (`core-contract.md` §1.2).
+/// `audit.jsonl` 中的单条审计记录（`core-contract.md` §1.2）。
 ///
-/// `origin` is `Option<String>` to remain 100% compatible with legacy cases that lack the
-/// `origin` key; newly written records always explicitly populate `origin`.
+/// `origin` 与 `mcp_client` 均为可选字段，以 100% 兼容不包含这两个字段的历史案件记录；
+/// 新写入记录始终显式填充 `origin`，且仅当来源为 MCP 并存在使用者/客户端标识时才写入 `mcp_client`
+/// （人工操作不写此键，保持与历史人工记录完全一致）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditRecord {
     pub seq: u64,
@@ -105,6 +106,9 @@ pub struct AuditRecord {
     pub actor: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// MCP 使用者/客户端标识（人工操作为 `None` 且序列化时省略该键）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_client: Option<String>,
     pub action: String,
     pub subject: String,
     pub result: String,
@@ -114,8 +118,41 @@ pub struct AuditRecord {
     pub hash: String,
 }
 
-/// Resolve the effective [`AuditOrigin`] of an [`AuditRecord`], supporting legacy records without
-/// an explicit `origin` field (`core-contract.md` §1.2).
+/// 从旧版 `actor` 字段中剥离 `(MCP)` / `（MCP）` 标记（大小写不敏感），并规范化空白字符。
+fn strip_mcp_marker(raw: &str) -> String {
+    let mut current = raw.trim().to_string();
+    loop {
+        let lower = current.to_lowercase();
+        let found = lower
+            .find("(mcp)")
+            .map(|pos| (pos, "(mcp)".len()))
+            .or_else(|| lower.find("（mcp）").map(|pos| (pos, "（mcp）".len())));
+        let Some((pos, len)) = found else {
+            break;
+        };
+        if current.len() == lower.len()
+            && current.is_char_boundary(pos)
+            && current.is_char_boundary(pos + len)
+        {
+            current.replace_range(pos..pos + len, " ");
+        } else {
+            let replaced = current
+                .replace("(MCP)", " ")
+                .replace("(mcp)", " ")
+                .replace("(Mcp)", " ")
+                .replace("（MCP）", " ")
+                .replace("（mcp）", " ")
+                .replace("（Mcp）", " ");
+            if replaced == current {
+                break;
+            }
+            current = replaced;
+        }
+    }
+    current.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 解析 [`AuditRecord`] 的有效审计来源（[`AuditOrigin`]），兼容无显式 `origin` 字段的历史记录。
 pub fn audit_origin(record: &AuditRecord) -> AuditOrigin {
     match record.origin.as_deref() {
         Some("manual") => return AuditOrigin::Manual,
@@ -130,9 +167,40 @@ pub fn audit_origin(record: &AuditRecord) -> AuditOrigin {
     }
 }
 
-/// Return the Chinese display label (`"人工"` or `"MCP"`) for an audit record's origin.
-pub fn audit_origin_label(record: &AuditRecord) -> &'static str {
-    audit_origin(record).label()
+/// 提取审计记录对应的 MCP 使用者/客户端名称。
+///
+/// - 人工操作固定返回 `None`；
+/// - MCP 操作优先取非空 `mcp_client`（排除泛化 `"MCP"`）；
+/// - 兼容旧版无 `mcp_client` 记录：从 `actor` 去除 `(MCP)` 后若非空且不等于 `"MCP"` 则取该名称。
+pub fn audit_mcp_user(record: &AuditRecord) -> Option<String> {
+    if audit_origin(record) != AuditOrigin::Mcp {
+        return None;
+    }
+    if let Some(raw_client) = record.mcp_client.as_deref() {
+        let cleaned = raw_client.trim();
+        if !cleaned.is_empty() && !cleaned.eq_ignore_ascii_case("MCP") {
+            return Some(cleaned.to_string());
+        }
+    }
+    let legacy = strip_mcp_marker(&record.actor);
+    if !legacy.is_empty() && !legacy.eq_ignore_ascii_case("MCP") {
+        Some(legacy)
+    } else {
+        None
+    }
+}
+
+/// 返回审计记录来源的中文展示标签：
+/// - `manual` → `"人工"`
+/// - `mcp` → 若能解析出具体使用者/客户端 `<who>` 则返回 `"MCP · <who>"`，否则返回 `"MCP"`。
+pub fn audit_origin_label(record: &AuditRecord) -> String {
+    match audit_origin(record) {
+        AuditOrigin::Manual => AuditOrigin::Manual.label().to_string(),
+        AuditOrigin::Mcp => match audit_mcp_user(record) {
+            Some(who) => format!("MCP · {who}"),
+            None => AuditOrigin::Mcp.label().to_string(),
+        },
+    }
 }
 
 /// Grouping key for findings (`(subject, offset, inode, deleted, image_sha256)`).

@@ -14,11 +14,12 @@ use serde_json::{Map, Value, json};
 use tracedesk_core::{
     AppPaths, AuditOrigin, AuditRecord, BrowserFilter, BrowserIndex, BuildBundleOptions, Case,
     CoreError, PageWindow, PreviewEncoding, Provenance, StatusFilter, TREE_GROUP_SIZE,
-    TREE_GROUP_THRESHOLD, TimelineFilter, TimelineIndex, assess_coverage, audit_origin,
-    audit_origin_label, build_bundle, canonical_json, case_folder_name, compute_legacy_carry,
-    decode_image_preview, display_timestamp, find_matches_in_reader, format_unix_east8_stack,
-    normalize_event_filter, parse_pattern, preview_rows, preview_text, save_json_atomic,
-    source_status, verify_bundle, windows_filename,
+    TREE_GROUP_THRESHOLD, TimelineFilter, TimelineIndex, assess_coverage, audit_mcp_user,
+    audit_origin, audit_origin_label, build_bundle, canonical_json, case_folder_name,
+    compute_legacy_carry, decode_image_preview, display_timestamp, find_matches_in_reader,
+    findings_text, format_unix_east8_stack, normalize_event_filter, parse_pattern, preview_rows,
+    preview_text, record_note, render_report, save_json_atomic, source_status,
+    verify_audit_chain_at, verify_bundle, windows_filename,
 };
 use tracedesk_engines::{InventoryEntry, PartitionInfo};
 use zip::write::SimpleFileOptions;
@@ -204,12 +205,13 @@ fn audit_head_no_newline_tamper_detection_and_legacy_origin() {
     let err2 = case.check_audit().unwrap_err();
     assert!(matches!(err2, CoreError::AuditTampered(_)));
 
-    // Legacy origin derivation without `origin` field.
+    // 历史兼容：无 `origin` 与 `mcp_client` 字段时按 `actor` 推导来源及使用者。
     let legacy_mcp = AuditRecord {
         seq: 1,
         timestamp: "2026-01-01T08:00:00+08:00".to_string(),
         actor: "AI 助手 (MCP)".to_string(),
         origin: None,
+        mcp_client: None,
         action: "CASE_CREATE".to_string(),
         subject: "X".to_string(),
         result: "成功".to_string(),
@@ -218,13 +220,25 @@ fn audit_head_no_newline_tamper_detection_and_legacy_origin() {
         hash: "a".repeat(64),
     };
     assert_eq!(audit_origin(&legacy_mcp), AuditOrigin::Mcp);
-    assert_eq!(audit_origin_label(&legacy_mcp), "MCP");
+    assert_eq!(audit_mcp_user(&legacy_mcp).as_deref(), Some("AI 助手"));
+    assert_eq!(audit_origin_label(&legacy_mcp), "MCP · AI 助手");
+
+    // 泛化 MCP 标识（无具体使用者名）时保持展示为 "MCP"。
+    let legacy_generic_mcp = AuditRecord {
+        actor: "MCP".to_string(),
+        origin: Some("mcp".to_string()),
+        ..legacy_mcp.clone()
+    };
+    assert_eq!(audit_origin(&legacy_generic_mcp), AuditOrigin::Mcp);
+    assert_eq!(audit_mcp_user(&legacy_generic_mcp), None);
+    assert_eq!(audit_origin_label(&legacy_generic_mcp), "MCP");
 
     let legacy_manual = AuditRecord {
         actor: "普通取证员".to_string(),
         ..legacy_mcp
     };
     assert_eq!(audit_origin(&legacy_manual), AuditOrigin::Manual);
+    assert_eq!(audit_mcp_user(&legacy_manual), None);
     assert_eq!(audit_origin_label(&legacy_manual), "人工");
 }
 
@@ -675,4 +689,119 @@ fn review_bundle_missing_material_handling_and_tamper_detection() {
     assert!(paths.find_tsk_bin().is_some());
     assert!(paths.verify_bundle_script().is_some());
     let _ = AtomicBool::new(false);
+}
+
+#[test]
+fn mcp_client_audit_chain_reporting_and_verify_bundle_compat() {
+    let paths = AppPaths::discover();
+    let demo_dd = paths.evidence_dir.join("demo.dd");
+    assert!(demo_dd.is_file(), "缺少测试镜像 demo.dd");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cases_dir = tmp.path().join("cases");
+    let folder = {
+        let mut manual_case = Case::create(
+            &cases_dir,
+            "MCP-WHO-001",
+            "张取证",
+            "MCP来源标记测试",
+            None,
+            None,
+            AuditOrigin::Manual,
+        )
+        .expect("创建人工案件");
+        manual_case.load_image(&demo_dd, None, None, None).expect("载入镜像");
+        manual_case
+            .scan_partitions(None, None, None)
+            .expect("扫描分区");
+        let dir = manual_case.folder().to_path_buf();
+        manual_case.close();
+        dir
+    };
+
+    // 校验人工记录绝不写入 `mcp_client` 键，确保与历史人工记录字节级一致。
+    let audit_before_mcp = fs::read_to_string(folder.join("audit.jsonl")).expect("读取人工审计链");
+    assert!(
+        !audit_before_mcp.contains("\"mcp_client\""),
+        "人工操作记录不应包含 mcp_client 键：{audit_before_mcp}"
+    );
+
+    // 以 MCP 身份并携带使用者/客户端标识打开同一案件，记录取证发现并构建复核包。
+    let bundle_res = {
+        let mut mcp_case = Case::open_with_mcp_client(
+            &folder,
+            Some("张三"),
+            AuditOrigin::Mcp,
+            Some("张三 / Cursor 1.2"),
+        )
+        .expect("以 MCP 身份打开案件");
+        assert_eq!(mcp_case.mcp_client(), Some("张三 / Cursor 1.2"));
+
+        let target_entry = mcp_case
+            .displayed_entries()
+            .iter()
+            .find(|e| e.path.ends_with("CASE.TXT") && !e.deleted)
+            .cloned()
+            .expect("定位 CASE.TXT");
+        let note_rec = record_note(&mut mcp_case, &target_entry, "由 MCP 协同标记的关键发现")
+            .expect("写入 MCP 取证笔记");
+        assert_eq!(note_rec.mcp_client.as_deref(), Some("张三 / Cursor 1.2"));
+        assert_eq!(
+            audit_mcp_user(&note_rec).as_deref(),
+            Some("张三 / Cursor 1.2")
+        );
+        assert_eq!(audit_origin_label(&note_rec), "MCP · 张三 / Cursor 1.2");
+
+        // 校验纯文本取证发现与 Markdown 报告均展示 “MCP · 张三 / Cursor 1.2”。
+        let records = mcp_case.check_audit().expect("核验含 mcp_client 的审计链");
+        let plain = findings_text(&records);
+        assert!(plain.contains("[MCP · 张三 / Cursor 1.2]"), "findings_text={plain}");
+
+        let report_md = render_report(mcp_case.data(), &records, "通过：测试校验");
+        assert!(
+            report_md.contains("| MCP · 张三 / Cursor 1.2 |"),
+            "报告审计日志摘要应包含具体 MCP 使用者：{report_md}"
+        );
+        assert!(
+            report_md.contains("[MCP · 张三 / Cursor 1.2]"),
+            "报告文件取证发现应包含具体 MCP 使用者：{report_md}"
+        );
+
+        let bundle = build_bundle(&mut mcp_case, &BuildBundleOptions::default(), None)
+            .expect("生成含 mcp_client 审计记录的复核包");
+        mcp_case.close();
+        bundle
+    };
+
+    // 原生 Rust 核验复核包与审计哈希链必须 100% 通过。
+    let verified = verify_bundle(&bundle_res.bundle_path, Some(&bundle_res.sha256))
+        .expect("Rust verify_bundle 验签通过");
+    assert!(verified >= 5);
+
+    // 独立核验磁盘审计链可反序列化全部历史人工记录 + 新 MCP 记录。
+    let disk_records = verify_audit_chain_at(&folder).expect("磁盘审计链验签通过");
+    assert!(disk_records.iter().any(|r| r.origin.as_deref() == Some("manual") && r.mcp_client.is_none()));
+    assert!(
+        disk_records
+            .iter()
+            .any(|r| r.mcp_client.as_deref() == Some("张三 / Cursor 1.2"))
+    );
+
+    // 若本机存在 Python 3，则同步用内嵌 `verify_bundle.py` 进行跨语言验签。
+    let py_script = tmp.path().join("verify_bundle.py");
+    fs::write(&py_script, tracedesk_core::EMBEDDED_VERIFY_BUNDLE_PY).expect("写出 verify_bundle.py");
+    for py_bin in ["python", "python3"] {
+        if let Ok(output) = std::process::Command::new(py_bin)
+            .arg(&py_script)
+            .arg(&bundle_res.bundle_path)
+            .arg("--sha256")
+            .arg(&bundle_res.sha256)
+            .output()
+            && output.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains("核验通过"), "verify_bundle.py 输出异常：{stdout}");
+            break;
+        }
+    }
 }

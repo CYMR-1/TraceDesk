@@ -15,8 +15,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::service::{McpError, McpResult};
-use crate::tools::McpServer;
+use crate::service::{McpError, McpResult, sanitize_mcp_identity};
+use crate::tools::{McpRequestContext, McpServer};
 
 /// 默认 Streamable HTTP 监听地址（仅本机回环）。
 pub const DEFAULT_HOST: &str = "127.0.0.1";
@@ -99,6 +99,90 @@ pub fn check_port_available(host: &str, port: u16) -> McpResult<()> {
         Err(err) => Err(McpError::IoError(format!(
             "端口 {clean_host}:{port} 已被占用或无法监听，请更换端口后重试（{err}）。"
         ))),
+    }
+}
+
+/// 通用 HTTP 客户端或浏览器 `User-Agent` 首段标识黑名单（不作为 MCP 客户端名称回退）。
+const GENERIC_USER_AGENT_TOKENS: &[&str] = &[
+    "mozilla",
+    "curl",
+    "wget",
+    "python-requests",
+    "python-urllib",
+    "python-httpx",
+    "httpx",
+    "aiohttp",
+    "urllib",
+    "go-http-client",
+    "node-fetch",
+    "undici",
+    "node",
+    "axios",
+    "got",
+    "reqwest",
+    "hyper",
+    "okhttp",
+    "java",
+    "apache-httpclient",
+    "libwww-perl",
+    "ruby",
+    "php",
+    "winhttp",
+    "powershell",
+    "windows-powershell",
+    "postmanruntime",
+    "insomnia",
+];
+
+/// 从 HTTP `User-Agent` 头提取非通用客户端名称作为补充回退；通用库/浏览器 UA 返回 `None`。
+pub fn extract_user_agent_client(raw_ua: &str) -> Option<String> {
+    let sanitized = sanitize_mcp_identity(raw_ua)?;
+    let first_token = sanitized
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if first_token.is_empty()
+        || GENERIC_USER_AGENT_TOKENS
+            .iter()
+            .any(|generic| *generic == first_token)
+    {
+        return None;
+    }
+    Some(sanitized)
+}
+
+/// 从小写键 HTTP 请求头与当前会话 ID 构建 [`McpRequestContext`]。
+///
+/// 优先识别 `X-MCP-User` 与 `X-MCP-Client` / `X-Client-Name`，并以非通用 `User-Agent` 作为补充回退。
+pub fn request_context_from_http_headers(
+    headers: &HashMap<String, String>,
+    session_id: String,
+) -> McpRequestContext {
+    let header_user = headers
+        .get("x-mcp-user")
+        .and_then(|v| sanitize_mcp_identity(v));
+    let header_client = headers
+        .get("x-mcp-client")
+        .and_then(|v| sanitize_mcp_identity(v))
+        .or_else(|| {
+            headers
+                .get("x-client-name")
+                .and_then(|v| sanitize_mcp_identity(v))
+        });
+    let user_agent_client = headers
+        .get("user-agent")
+        .and_then(|v| extract_user_agent_client(v));
+
+    McpRequestContext {
+        session_id: Some(session_id),
+        header_user,
+        header_client,
+        user_agent_client,
     }
 }
 
@@ -440,7 +524,9 @@ fn handle_client_connection(
         let session_id = req
             .headers
             .get("mcp-session-id")
-            .cloned()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
             .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
 
         match req.method.as_str() {
@@ -459,6 +545,7 @@ fn handle_client_connection(
                 );
             }
             "DELETE" => {
+                server.remove_session(&session_id);
                 let _ = write_http_response(
                     &mut stream,
                     200,
@@ -510,7 +597,8 @@ fn handle_client_connection(
                     }
                 };
 
-                match server.handle_jsonrpc_value(parsed) {
+                let ctx = request_context_from_http_headers(&req.headers, session_id.clone());
+                match server.handle_jsonrpc_value_with_context(parsed, &ctx) {
                     None => {
                         // Notification or client response -> HTTP 202 Accepted with empty body.
                         let _ = write_http_response(
@@ -554,6 +642,8 @@ fn handle_client_connection(
             break;
         }
     }
+    // 主动优雅关闭写半部，避免 Windows 上对端读取响应尾时出现 WSAECONNRESET。
+    let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
 /// 可随时优雅关闭的本地 Streamable HTTP MCP 服务句柄。

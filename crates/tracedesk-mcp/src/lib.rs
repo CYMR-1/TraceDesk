@@ -18,8 +18,9 @@ use tracedesk_core::AppPaths;
 
 pub use http::{
     DEFAULT_HOST, DEFAULT_HTTP_PATH, DEFAULT_PORT, LOOPBACK_HOSTS, MAX_HTTP_BODY_BYTES,
-    McpHttpServerHandle, check_port_available, normalize_http_path, run_http_blocking,
-    validate_loopback_host, verify_dns_rebinding,
+    McpHttpServerHandle, check_port_available, extract_user_agent_client, normalize_http_path,
+    request_context_from_http_headers, run_http_blocking, validate_loopback_host,
+    verify_dns_rebinding,
 };
 pub use runtime::{
     LocalHttpMcpManager, McpStatusSnapshot, build_claude_config, build_cli_command,
@@ -27,14 +28,16 @@ pub use runtime::{
     mcp_executable_path,
 };
 pub use service::{
-    CaseService, McpError, McpResult, force_release_case_lock, format_entry, normalize_entry_path,
-    paginate,
+    CaseService, DEFAULT_MCP_CLIENT_LABEL, McpError, McpResult, compose_mcp_client,
+    force_release_case_lock, format_entry, normalize_entry_path, normalize_explicit_user,
+    paginate, sanitize_mcp_identity,
 };
 pub use stdio::{run_stdio, run_stdio_loop};
 pub use tools::{
-    DEFAULT_PROTOCOL_VERSION, McpResourceContent, McpResourceDefinition, McpServer, McpTextContent,
-    McpToolAnnotations, McpToolCallOutput, McpToolDefinition, ResponseFormat, SERVER_INSTRUCTIONS,
-    SERVER_NAME, SERVER_VERSION, TOOL_CATALOG, ToolCatalogItem, WORKFLOW_GUIDE_MARKDOWN,
+    DEFAULT_PROTOCOL_VERSION, McpRequestContext, McpResourceContent, McpResourceDefinition,
+    McpServer, McpTextContent, McpToolAnnotations, McpToolCallOutput, McpToolDefinition,
+    ResponseFormat, SERVER_INSTRUCTIONS, SERVER_NAME, SERVER_VERSION, TOOL_CATALOG,
+    ToolCatalogItem, WORKFLOW_GUIDE_MARKDOWN, parse_initialize_client_info,
 };
 
 /// 便捷构建绑定指定案件库根目录与默认操作人的 [`McpServer`]。
