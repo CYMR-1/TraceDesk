@@ -106,7 +106,7 @@ cargo test --workspace
 3. **浏览与预览**：左侧按镜像/分区/目录展示完整树，右上列表支持后缀、路径关键词和状态筛选与分页（双击页码跳页），右下支持 9 种文本编码（ASCII、UTF-8、UTF-16LE/BE、GBK、GB18030、Big5、Windows-1252、ISO-8859-1）、十六进制与安全图片缩放预览（单张上限 32 MiB / 4000 万像素，显示副本最长边缩至 4096 px）。所有时间统一展示东八区（UTC+8），未记录时间不误显为 1970 年。
 4. **校验与导出**：点击“校验完整性”后选择现存或已删除文件导出至 `exports/`（重名放入 `同名副本-*` 子目录保留原名），导出前后均校验原镜像并记录副本 SHA-256。
 5. **取证发现与内容搜索**：右键文件可记录取证发现、计算单文件 SHA-256 或与本地副本比对；“内容搜索与复核”支持 UTF-8 / UTF-16LE / GBK / HEX 精确字节并行搜索、流式实时展示、三态全选、分区偏移筛选、排除与批量保存为取证发现；“取证发现”页支持按文件归组查看并一键批量导出副本与汇总清单。
-6. **时间线、审计、报告与复核包**：在“MACB 时间线”“审计日志”中双击打开双栏详情（区分 `[人工]`/`[MCP]` 来源与前后哈希），点击“生成 Markdown 报告”输出 10 章节中文报告，点击“导出复核包”按需勾选导出副本与搜索记录生成 ZIP64 复核包及 `.zip.sha256`（包内同时附带独立 `verify_bundle.py`，也可使用 `tracedesk-cli verify-bundle` 毫秒级核验）。
+6. **时间线、审计、报告与复核包**：在“MACB 时间线”“审计日志”中双击打开双栏详情（区分 `[人工]` 与 `[MCP · <使用者>]` 来源、支持按调用方精筛并展示前后哈希），点击“生成 Markdown 报告”输出 10 章节中文报告，点击“导出复核包”按需勾选导出副本与搜索记录生成 ZIP64 复核包及 `.zip.sha256`（包内同时附带独立 `verify_bundle.py`，也可使用 `tracedesk-cli verify-bundle` 毫秒级核验）。
 
 ## 大容量镜像（≥1 GiB）
 
@@ -121,7 +121,7 @@ cargo test --workspace
 ## 证据保护边界
 
 - **只读与目录隔离**：源镜像只读打开；TSK 仅开放 `mmls`、`fsstat`、`fls`、`icat`、`img_stat`、`img_cat` 六项读取白名单且一律以参数数组调用（无 shell）；严格拒绝加载位于案件库目录内的镜像文件。Windows 共享只读句柄用于应用层防误写，不能替代硬件写保护器；跨物理介质隔离需由操作人员将案件库与源镜像部署于不同设备。
-- **审计哈希链边界**：审计日志 `audit.jsonl` 无修改/删除入口，单条记录含 `seq`、`timestamp`、`actor`、`origin`（`manual`/`mcp`）、`action`、`subject`、`result`、`details`、`previous`、`hash`，每次落盘同步更新精确 64 字节 `audit.head` 锚点。可检测单独修改、删除或截断，但不能防御对案件目录具备完整写权限者同时重写三份文件。本原型不是通过 SF/T 0146-2023 认证的产品。
+- **审计哈希链边界**：审计日志 `audit.jsonl` 无修改/删除入口，单条记录含 `seq`、`timestamp`、`actor`、`origin`（`manual`/`mcp`）、`action`、`subject`、`result`、`details`、`previous`、`hash`，每次落盘同步更新精确 64 字节 `audit.head` 锚点；当来源为 `mcp` 时，自动采集的使用者与客户端身份同步写入审计字段并纳入 SHA-256 哈希链。可检测单独修改、删除或截断，但不能防御对案件目录具备完整写权限者同时重写三份文件。本原型不是通过 SF/T 0146-2023 认证的产品。
 - **格式与解析范围**：支持 512 字节扇区的 RAW 与分段 EWF1（`.E01` 起，支持 `.E99` 后字母续段，无需解压拼接，自动读取同名 Guymager `.info` 参照）；自定义 FAT 空间区域映射仅支持 RAW；内容搜索针对清单内可读文件与删除记录，不解压归档文档、不扫描未分配空间；未实现无目录项雕刻、加密卷解密或异常分区修复。
 
 ## MCP 服务端接入
@@ -135,6 +135,8 @@ TraceDesk 内置原生标准 Model Context Protocol（MCP）服务端 `tracedesk
 - **导出与报告**：`tracedesk_export_file`、`tracedesk_export_findings`、`tracedesk_generate_report`、`tracedesk_build_review_bundle`
 
 所有受控写操作以 `origin="mcp"` 记入案件 SHA-256 审计链（桌面端人工操作为 `origin="manual"`），单次调用结束后立即释放 `case.lock`；Streamable HTTP 模式仅允许绑定回环地址（`127.0.0.1` / `localhost` / `::1`）并启用 DNS 重绑定校验（非法 `Host` 返回 `421`、非法 `Origin` 返回 `403`、请求体上限 `16 MiB`）。
+
+当审计日志来源为 MCP 时，服务端会自动采集并标记使用者与客户端身份：按优先级结合 `initialize` 握手的 `clientInfo`（并按 `Mcp-Session-Id` 或 `stdio` 会话关联）、HTTP 请求头 `X-MCP-User` / `X-MCP-Client`（或 `X-Client-Name`）及非通用 `User-Agent`，以及命令行 `--actor`、环境变量 `TRACEDESK_MCP_ACTOR` 与工具参数 `actor` 综合识别调用方；最终统一以 `MCP · <使用者>`（同时具备使用者与客户端时为 `MCP · <使用者> / <客户端>`）展示在桌面端审计日志（支持按具体调用方筛选与检索）、取证发现、Markdown 报告与 `tracedesk_query_audit_log` 输出中，并完整纳入 `audit.jsonl` 的 SHA-256 哈希链防篡改保护。
 
 ### 命令行启动
 
