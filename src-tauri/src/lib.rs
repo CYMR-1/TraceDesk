@@ -1,4 +1,4 @@
-//! TraceDesk Tauri 2 desktop workbench host library (`tracedesk_desktop_lib`).
+//! TraceDesk Tauri 2 桌面工作台宿主库（`tracedesk_desktop_lib`）。
 
 pub mod commands;
 pub mod mcp_http;
@@ -14,8 +14,8 @@ use tracedesk_core::now;
 
 pub use state::AppState;
 
-/// Append a timestamped diagnostic line to `<logs_dir>/startup.log`
-/// (falling back to `%TEMP%/TraceDesk/logs/startup.log` if the project log directory is not writable).
+/// 向 `<logs_dir>/startup.log` 追加一条带时间戳的诊断日志
+/// （若项目日志目录不可写，则回退至 `%TEMP%/TraceDesk/logs/startup.log`）。
 fn append_startup_log(logs_dir: &Path, level: &str, message: &str) -> Option<PathBuf> {
     let candidates = [
         logs_dir.to_path_buf(),
@@ -58,8 +58,8 @@ fn show_windows_error_dialog(title: &str, body: &str) {
 
     let wide_body: Vec<u16> = OsStr::new(body).encode_wide().chain(Some(0)).collect();
     let wide_title: Vec<u16> = OsStr::new(title).encode_wide().chain(Some(0)).collect();
-    // SAFETY: Both buffers are valid NUL-terminated UTF-16 strings for the duration of the call,
-    // and passing a NULL owner HWND is explicitly documented by Win32 MessageBoxW.
+    // SAFETY: 两个缓冲区在本次调用期间均为有效的以 NUL 结尾的 UTF-16 字符串，
+    // 且 Win32 `MessageBoxW` 文档明确允许传入空的所属窗口句柄（NULL HWND）。
     unsafe {
         MessageBoxW(
             std::ptr::null_mut(),
@@ -108,7 +108,7 @@ fn install_panic_logger(logs_dir: PathBuf) {
     }));
 }
 
-/// Build and run the TraceDesk Tauri 2 desktop application.
+/// 构建并运行 TraceDesk Tauri 2 桌面应用程序。
 pub fn run() {
     let app_state = AppState::new();
     let logs_dir = app_state.app_paths.logs_dir.clone();
@@ -153,7 +153,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            // §3.1 App 状态与案件管理 Commands
+            // §3.1 应用状态与案件管理命令
             commands::get_app_paths,
             commands::suggest_case_dir,
             commands::create_case,
@@ -162,7 +162,7 @@ pub fn run() {
             commands::release_case_lock,
             commands::get_case_snapshot,
             commands::list_recent_cases,
-            // §3.2 证据镜像与文件浏览 Commands
+            // §3.2 证据镜像与文件浏览命令
             commands::load_image,
             commands::verify_integrity,
             commands::fix_hash,
@@ -177,7 +177,7 @@ pub fn run() {
             commands::get_tree_children,
             commands::query_files_page,
             commands::locate_file_in_scope,
-            // §3.3 文件预览、导出与取证发现 Commands
+            // §3.3 文件预览、导出与取证发现命令
             commands::preview_file_page,
             commands::preview_file_image,
             commands::export_file,
@@ -185,7 +185,7 @@ pub fn run() {
             commands::examine_file,
             commands::list_findings,
             commands::export_findings,
-            // §3.4 时间线、审计、内容搜索与复核包 Commands
+            // §3.4 时间线、审计、内容搜索与复核包命令
             commands::build_timeline,
             commands::query_timeline_page,
             commands::list_audit_log,
@@ -198,7 +198,7 @@ pub fn run() {
             commands::inspect_review_bundle,
             commands::prepare_review_bundle,
             commands::build_review_bundle,
-            // §3.5 MCP 托管与系统工具 Commands
+            // §3.5 MCP 托管与系统工具命令
             commands::get_mcp_status,
             commands::start_mcp_http,
             commands::stop_mcp_http,

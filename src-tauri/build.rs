@@ -17,10 +17,11 @@ fn main() {
     println!("cargo:rerun-if-changed=../frontend/dist/index.html");
     tauri_build::build();
 
-    // On Windows, `tauri_build::build()` links `resource.lib` (containing the Common Controls v6
-    // manifest required by `comctl32!TaskDialogIndirect` from `tauri-plugin-dialog`/`rfd`) only
-    // into bin targets (`rustc-link-arg-bins`). Integration test binaries in `tests/` also link
-    // against `tracedesk_desktop_lib`, so pass `resource.lib` to test targets as well.
+    // 在 Windows 平台上，`tauri_build::build()` 仅将 `resource.lib`（包含
+    // `tauri-plugin-dialog`/`rfd` 调用 `comctl32!TaskDialogIndirect` 所需的
+    // Common Controls v6 清单）链接到可执行目标（`rustc-link-arg-bins`）。
+    // `tests/` 下的集成测试二进制同样会链接 `tracedesk_desktop_lib`，因此需将
+    // `resource.lib` 一并传递给测试目标。
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some()
         && let Ok(out_dir) = std::env::var("OUT_DIR")
     {
