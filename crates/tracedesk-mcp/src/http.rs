@@ -314,7 +314,7 @@ fn read_chunked_body<R: BufRead>(reader: &mut R) -> Result<Vec<u8>, HttpParseErr
         let chunk_len = usize::from_str_radix(hex_part, 16)
             .map_err(|_| HttpParseError::BadRequest("invalid chunk size in HTTP body"))?;
         if chunk_len == 0 {
-            // Consume trailing headers up to empty line.
+            // 读取并跳过尾部 chunked trailer 头直至遇到空行。
             while let Some(trailer) = read_crlf_line(reader, 4096)? {
                 if trailer.is_empty() {
                     break;
@@ -478,7 +478,7 @@ fn handle_client_connection(
             .is_some_and(|c| c.eq_ignore_ascii_case("close"))
             || shutdown.load(Ordering::Relaxed);
 
-        // 1. DNS Rebinding Protection
+        // 1. DNS 重绑定防护校验
         if let Err((code, reason, msg)) = verify_dns_rebinding(
             &configured_host,
             port,
@@ -498,7 +498,7 @@ fn handle_client_connection(
             break;
         }
 
-        // 2. Endpoint path matching (root "/" must NOT fall back to "/mcp")
+        // 2. 端点路径匹配（根路径 "/" 绝不能回退匹配到 "/mcp"）
         let raw_path = req.target.split('?').next().unwrap_or("/");
         let norm_req_path = normalize_request_path(raw_path);
         if norm_req_path != expected_path {
@@ -520,7 +520,7 @@ fn handle_client_connection(
             continue;
         }
 
-        // 3. Dispatch HTTP Method
+        // 3. 按 HTTP 方法分发请求
         let session_id = req
             .headers
             .get("mcp-session-id")
@@ -557,7 +557,7 @@ fn handle_client_connection(
                 );
             }
             "GET" => {
-                // Stateless JSON response mode does not use standalone GET SSE streams (MCP spec §2.1 -> 405).
+                // 无状态 JSON 响应模式不支持独立的 GET SSE 流（依据 MCP 规范 §2.1 返回 405）。
                 let _ = write_http_response(
                     &mut stream,
                     405,
@@ -600,7 +600,7 @@ fn handle_client_connection(
                 let ctx = request_context_from_http_headers(&req.headers, session_id.clone());
                 match server.handle_jsonrpc_value_with_context(parsed, &ctx) {
                     None => {
-                        // Notification or client response -> HTTP 202 Accepted with empty body.
+                        // 通知消息或客户端响应 -> 返回 HTTP 202 Accepted 与空响应体。
                         let _ = write_http_response(
                             &mut stream,
                             202,
@@ -763,7 +763,7 @@ impl McpHttpServerHandle {
     pub fn stop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         if let Some(handle) = self.join_handle.take() {
-            // Wake the blocking `accept()` immediately by making a local loopback connect.
+            // 发起一次本机回环连接，立即唤醒阻塞中的 `accept()`。
             let _ = TcpStream::connect_timeout(&self.bind_addr, Duration::from_millis(50));
             let _ = handle.join();
         }

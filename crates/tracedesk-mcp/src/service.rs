@@ -292,8 +292,8 @@ fn compute_case_cache_key(folder: &Path) -> Option<CaseDataCacheKey> {
     let case_json_sha256 = sha256_hex(&raw_bytes);
     let root_val: Value = serde_json::from_slice(&raw_bytes).ok()?;
     let obj = root_val.as_object()?;
-    // If legacy inline `inventory` is non-empty without `inventory_file`, skip cache key so `Case::open`
-    // performs the automatic `.jsonl.gz` migration first.
+    // 若旧版内联 `inventory` 非空且尚未生成 `inventory_file`，则跳过缓存键，以便 `Case::open`
+    // 优先执行自动 `.jsonl.gz` 迁移。
     let inventory_file = obj
         .get("inventory_file")
         .and_then(Value::as_str)
@@ -609,9 +609,8 @@ impl CaseService {
             }
         }
 
-        // Cache miss or disk file changed: release probe lock, open full Case (which validates
-        // metadata, audit chain, and migrates inline inventory if needed), populate cache, and run `f`
-        // while `case` still holds `case.lock`.
+        // 缓存未命中或磁盘文件已变更：先释放探测锁，再完整打开 `Case`（自动校验元数据、审计链
+        // 并在需要时迁移内联清单），随后刷新缓存并在 `case` 持有 `case.lock` 期间执行 `f`。
         lease.unlock();
         let mut case = self.open_case(case_dir, actor)?;
         let records = case.check_audit()?;
@@ -1302,7 +1301,7 @@ impl CaseService {
             Value::Object(out)
         };
 
-        // Fast path: check cached view first; if not in `browsing_directories` mode, filter directly!
+        // 快速路径：优先检查只读缓存视图；若不处于 `browsing_directories` 模式则直接筛选返回。
         let quick_browse_needed = self.with_read_case_view(case_dir, actor, |folder, view| {
             let Some(ref _ev) = view.data.evidence else {
                 return Err(McpError::ValueError(
@@ -1325,7 +1324,7 @@ impl CaseService {
             return Ok(result);
         }
 
-        // Large-image quick browse path.
+        // 大镜像按目录快速浏览路径。
         let mut case = self.open_case(case_dir, actor)?;
         let Some(ref ev) = case.data().evidence else {
             return Err(McpError::ValueError(

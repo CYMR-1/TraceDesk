@@ -710,7 +710,7 @@ where
     }
 }
 
-/* -------------------- Markdown Renderers (100% aligned with server.py) -------------------- */
+/* -------------------- Markdown 渲染器（与 server.py 100% 对齐） -------------------- */
 
 pub fn render_cases_md(data: &Value) -> String {
     let cases_root = data.get("cases_root").and_then(Value::as_str).unwrap_or("");
@@ -1367,7 +1367,7 @@ pub fn render_simple_kv_md(title: &str, data: &Value) -> String {
     lines.join("\n")
 }
 
-/* -------------------- MCP Protocol Definition Types -------------------- */
+/* -------------------- MCP 协议定义类型 -------------------- */
 
 /// MCP 工具注解（`ToolAnnotations`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
