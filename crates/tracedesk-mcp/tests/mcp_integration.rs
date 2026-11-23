@@ -21,9 +21,10 @@ use tracedesk_core::{
     verify_bundle,
 };
 use tracedesk_mcp::{
-    DEFAULT_MCP_CLIENT_LABEL, LocalHttpMcpManager, MAX_HTTP_BODY_BYTES, McpHttpServerHandle,
-    McpServer, TOOL_CATALOG, TransportMode, build_claude_config, build_cli_command,
-    build_cursor_config, build_http_config, build_stdio_config, create_server,
+    ACTIVITY_LOG_FILENAME, ActivityLogTailer, DEFAULT_MCP_CLIENT_LABEL, FileActivitySink,
+    LocalHttpMcpManager, MAX_HTTP_BODY_BYTES, McpActivityRecord, McpActivityStore,
+    McpHttpServerHandle, McpServer, TOOL_CATALOG, TransportMode, build_claude_config,
+    build_cli_command, build_cursor_config, build_http_config, build_stdio_config, create_server,
     force_release_case_lock, format_config_json, parse_cli_args, run_stdio_loop,
     validate_loopback_host,
 };
@@ -1772,4 +1773,243 @@ fn test_mcp_caller_identity_stdio_http_headers_and_actor_combination() {
     let bundle_path = PathBuf::from(bundle["bundle_path"].as_str().expect("bundle_path"));
     let bundle_sha = bundle["sha256"].as_str().expect("sha256");
     verify_bundle(&bundle_path, Some(bundle_sha)).expect("复核包验签通过");
+}
+
+#[test]
+fn test_stdio_and_http_activity_telemetry_lifecycle_and_jsonl_tailing() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cases_dir = tmp.path().join("cases");
+    let logs_dir = tmp.path().join("logs");
+    fs::create_dir_all(&cases_dir).expect("mkdir cases");
+    fs::create_dir_all(&logs_dir).expect("mkdir logs");
+    let log_path = logs_dir.join(ACTIVITY_LOG_FILENAME);
+
+    let (image_path, _) = prepare_demo_image(&tmp.path().join("evidence"));
+
+    // 1. 验证 stdio 传输产生完整的 started -> completed / failed 遥测事件（含 initialize、tools/call、resources/read）。
+    let stdio_server = create_server(Some(cases_dir.clone()), None)
+        .with_activity_sink(Arc::new(FileActivitySink::new(log_path.clone())));
+
+    let stdio_input = [
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "clientInfo": { "name": "Antigravity", "version": "1.0" }
+            }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_create_case",
+                "arguments": {
+                    "number": "TELEM-01",
+                    "examiner": "取证员甲",
+                    "target": "测试磁盘",
+                    "response_format": "json"
+                }
+            }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "resources/read",
+            "params": { "uri": "tracedesk://guide/workflow" }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "resources/read",
+            "params": { "uri": "tracedesk://unknown/resource" }
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_get_case_summary",
+                "arguments": { "case_dir": "NON_EXISTENT_DIR" }
+            }
+        }),
+    ]
+    .iter()
+    .map(|v| serde_json::to_string(v).expect("serialize request"))
+    .collect::<Vec<_>>()
+    .join("\n")
+        + "\n";
+
+    let mut out_buf = Vec::new();
+    run_stdio_loop(&stdio_server, Cursor::new(stdio_input.as_bytes()), &mut out_buf)
+        .expect("run_stdio_loop");
+
+    let out_text = String::from_utf8(out_buf).expect("utf8 stdio output");
+    let out_lines: Vec<Value> = out_text
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("parse stdio resp"))
+        .collect();
+    assert_eq!(out_lines.len(), 5);
+    let created_json: Value = serde_json::from_str(
+        out_lines[1]["result"]["content"][0]["text"]
+            .as_str()
+            .expect("create_case text"),
+    )
+    .expect("create_case json");
+    let created_case_dir = created_json["case_dir"]
+        .as_str()
+        .expect("created case_dir")
+        .to_string();
+
+    // 使用 ActivityLogTailer 读取 JSONL，验证每条调用均有成对的 started 与 completed/failed，且共享 callId。
+    let mut tailer = ActivityLogTailer::new(log_path.clone(), 0);
+    let raw_events = tailer.poll_new_records();
+    assert_eq!(raw_events.len(), 10, "5 次调用应产生 10 条开始/结束事件");
+
+    // 校验每对事件共享 callId 但事件 id 唯一。
+    for pair in raw_events.as_chunks::<2>().0 {
+        assert_eq!(pair[0].phase, "started");
+        assert!(matches!(pair[1].phase.as_str(), "completed" | "failed"));
+        assert_eq!(pair[0].call_id, pair[1].call_id);
+        assert_ne!(pair[0].id, pair[1].id);
+        assert_eq!(pair[0].transport, "stdio");
+        assert_eq!(pair[1].transport, "stdio");
+        assert_eq!(pair[1].client, "Antigravity 1.0");
+        assert!(pair[0].timestamp.ends_with("+08:00"));
+        assert!(pair[1].duration_ms.is_some());
+    }
+
+    // 校验 initialize、create_case、resources/read 成功与失败语义字段。
+    assert_eq!(raw_events[1].method, "initialize");
+    assert_eq!(raw_events[1].tool_title, "客户端握手初始化");
+    assert_eq!(raw_events[1].category, "协议会话");
+    assert!(raw_events[1].read_only);
+
+    assert_eq!(raw_events[3].tool_name.as_deref(), Some("tracedesk_create_case"));
+    assert_eq!(raw_events[3].tool_title, "新建案件");
+    assert!(!raw_events[3].read_only);
+    assert_eq!(raw_events[3].case_number.as_deref(), Some("TELEM-01"));
+    assert!(raw_events[3].case_dir.is_some());
+
+    assert_eq!(raw_events[5].method, "resources/read");
+    assert_eq!(raw_events[5].tool_name.as_deref(), Some("tracedesk://guide/workflow"));
+    assert_eq!(raw_events[5].tool_title, "读取 MCP 资源");
+    assert_eq!(raw_events[5].phase, "completed");
+
+    assert_eq!(raw_events[7].method, "resources/read");
+    assert_eq!(raw_events[7].phase, "failed");
+    assert!(raw_events[7].error.as_deref().is_some_and(|e| e.contains("未知的 MCP 资源")));
+
+    assert_eq!(raw_events[9].tool_name.as_deref(), Some("tracedesk_get_case_summary"));
+    assert_eq!(raw_events[9].phase, "failed");
+    assert!(raw_events[9].error.is_some());
+
+    // 2. 验证独立 streamable-http 传输写入 transport="streamable-http" 遥测记录。
+    let port = free_local_port();
+    let http_server = create_server(Some(cases_dir.clone()), None)
+        .with_activity_sink(Arc::new(FileActivitySink::new(log_path.clone())));
+    let mut http_handle =
+        McpHttpServerHandle::start(http_server, "127.0.0.1", port, "/mcp").expect("start http");
+    let host_hdr = format!("127.0.0.1:{port}");
+    let (status, _, _) = send_http(
+        port,
+        "POST",
+        "/mcp",
+        &[
+            ("Host", &host_hdr),
+            ("Content-Type", "application/json"),
+            ("X-MCP-Client", "Cursor"),
+        ],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_load_image",
+                "arguments": {
+                    "case_dir": created_case_dir,
+                    "image_path": image_path.to_string_lossy(),
+                    "scan_all": false,
+                    "response_format": "json"
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(status, 200);
+    http_handle.stop();
+
+    // 增量尾随读取应仅拿到新增的 2 条 streamable-http 事件。
+    let delta_events = tailer.poll_new_records();
+    assert_eq!(delta_events.len(), 2);
+    assert_eq!(delta_events[0].phase, "started");
+    assert_eq!(delta_events[1].phase, "completed");
+    assert_eq!(delta_events[1].transport, "streamable-http");
+    assert_eq!(delta_events[1].client, "Cursor");
+    assert_eq!(delta_events[1].tool_name.as_deref(), Some("tracedesk_load_image"));
+    assert_eq!(delta_events[1].case_number.as_deref(), Some("TELEM-01"));
+
+    // 3. 验证外部真实 tracedesk-mcp 子进程在 stdio 模式下默认通过 TRACEDESK_LOGS_DIR 写入 mcp-activity.jsonl。
+    let exe_path = PathBuf::from(env!("CARGO_BIN_EXE_tracedesk-mcp"));
+    let mut child = Command::new(&exe_path)
+        .args(["--transport", "stdio", "--cases-dir"])
+        .arg(&cases_dir)
+        .env("TRACEDESK_LOGS_DIR", &logs_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn tracedesk-mcp");
+    {
+        let mut child_in = child.stdin.take().expect("child stdin");
+        let reqs = format!(
+            "{}\n{}\n",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 101,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "clientInfo": { "name": "ExternalCli", "version": "2.0" }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 102,
+                "method": "tools/call",
+                "params": {
+                    "name": "tracedesk_list_cases",
+                    "arguments": { "limit": 5, "response_format": "json" }
+                }
+            })
+        );
+        child_in.write_all(reqs.as_bytes()).expect("write child stdin");
+    }
+    let output = child.wait_with_output().expect("wait child");
+    assert!(output.status.success(), "child stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let subproc_events = tailer.poll_new_records();
+    assert_eq!(subproc_events.len(), 4);
+    assert_eq!(subproc_events[3].transport, "stdio");
+    assert_eq!(subproc_events[3].client, "ExternalCli 2.0");
+    assert_eq!(subproc_events[3].tool_name.as_deref(), Some("tracedesk_list_cases"));
+    assert_eq!(subproc_events[3].phase, "completed");
+
+    // 4. 将全部记录加载进 McpActivityStore，校验按 callId 合并后的统计与最新倒序。
+    let mut store = McpActivityStore::new(500);
+    let loaded_bytes = store.load_from_file(&log_path);
+    assert!(loaded_bytes > 0);
+    let snapshot = store.snapshot(None, None, None, None, None);
+    assert_eq!(snapshot.activities.len(), 8);
+    assert_eq!(snapshot.stats.total_calls, 8);
+    assert_eq!(snapshot.stats.running_calls, 0);
+    assert_eq!(snapshot.stats.succeeded_calls, 6);
+    assert_eq!(snapshot.stats.failed_calls, 2);
+    assert_eq!(snapshot.activities[0].client, "ExternalCli 2.0");
+    // 校验所有记录均为合法 McpActivityRecord 并按 camelCase 序列化。
+    let _: McpActivityRecord = snapshot.activities[0].clone();
 }

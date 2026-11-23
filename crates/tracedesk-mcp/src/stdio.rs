@@ -33,6 +33,7 @@ pub fn run_stdio_loop<R: BufRead, W: Write>(
     };
     let ctx = McpRequestContext {
         session_id: Some(session_id),
+        transport: Some("stdio".to_string()),
         ..Default::default()
     };
 
@@ -56,8 +57,9 @@ pub fn run_stdio_loop<R: BufRead, W: Write>(
     Ok(())
 }
 
-/// 在进程标准输入/输出 (`stdin` / `stdout`) 上启动阻塞式 MCP `stdio` 传输服务。
+/// 在进程标准输入/输出 (`stdin` / `stdout`) 上启动阻塞式 MCP `stdio` 传输服务（默认启用文件遥测）。
 pub fn run_stdio(server: &McpServer) -> McpResult<()> {
+    server.ensure_default_file_activity_sink();
     let stdin = io::stdin();
     let stdout = io::stdout();
     let reader = BufReader::new(stdin.lock());

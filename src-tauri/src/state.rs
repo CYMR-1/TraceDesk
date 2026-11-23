@@ -5,17 +5,25 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::thread::JoinHandle;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
+use tauri::{AppHandle, Emitter};
 use tracedesk_core::{
     AppPaths, AuditOrigin, BrowserIndex, Case, EvidenceInfo, TimelineIndex, can_export,
     coverage_text, deleted_source_note, display_iso_time, display_timestamp, entry_name,
-    entry_status, source_status,
+    entry_status, resolve_clean, source_status,
 };
 use tracedesk_engines::InventoryEntry;
+use tracedesk_mcp::{
+    ACTIVITY_LOG_FILENAME, ActivityLogTailer, DEFAULT_ACTIVITY_STORE_CAPACITY, McpActivityRecord,
+    McpActivitySnapshot, McpActivityStore, append_activity_record, truncate_activity_log,
+};
+
+pub use tracedesk_mcp::{McpActivityStats, McpToolStat};
 
 use crate::mcp_http::{LocalMcpHttpServer, default_tool_catalog};
 
@@ -1169,6 +1177,16 @@ pub struct AppState {
     pub hash_worker: Mutex<Option<JoinHandle<()>>>,
     pub searches: Mutex<HashMap<String, SearchSessionState>>,
     pub mcp_server: Mutex<LocalMcpHttpServer>,
+    /// MCP 实时活动内存环形队列（按 `callId` 合并，上限 500 条）。
+    pub mcp_activities: Mutex<McpActivityStore>,
+    /// 跨进程 `logs/mcp-activity.jsonl` 增量字节偏移尾随读取器。
+    pub mcp_tailer: Mutex<ActivityLogTailer>,
+    /// 后台遥测日志尾随线程退出信号。
+    pub mcp_tailer_cancel: Arc<AtomicBool>,
+    /// 后台遥测日志尾随线程句柄。
+    pub mcp_tailer_worker: Mutex<Option<JoinHandle<()>>>,
+    /// Tauri 应用句柄，用于向前端实时推送 `mcp:activity` 与 `mcp:case-updated` 事件。
+    pub app_handle: Mutex<Option<AppHandle>>,
 }
 
 impl AppState {
@@ -1178,6 +1196,11 @@ impl AppState {
 
     pub fn with_paths(app_paths: AppPaths) -> Arc<Self> {
         let _ = std::fs::create_dir_all(&app_paths.cases_dir);
+        let log_path = app_paths.logs_dir.join(ACTIVITY_LOG_FILENAME);
+        let mut activity_store = McpActivityStore::new(DEFAULT_ACTIVITY_STORE_CAPACITY);
+        let initial_offset = activity_store.load_from_file(&log_path);
+        let tailer = ActivityLogTailer::new(log_path, initial_offset);
+
         Arc::new(Self {
             app_paths,
             case_lock: Mutex::new(None),
@@ -1190,7 +1213,196 @@ impl AppState {
             hash_worker: Mutex::new(None),
             searches: Mutex::new(HashMap::new()),
             mcp_server: Mutex::new(LocalMcpHttpServer::new()),
+            mcp_activities: Mutex::new(activity_store),
+            mcp_tailer: Mutex::new(tailer),
+            mcp_tailer_cancel: Arc::new(AtomicBool::new(false)),
+            mcp_tailer_worker: Mutex::new(None),
+            app_handle: Mutex::new(None),
         })
+    }
+
+    /// 返回当前应用对应的 MCP 遥测日志路径（`<logs_dir>/mcp-activity.jsonl`）。
+    pub fn activity_log_path(&self) -> PathBuf {
+        self.app_paths.logs_dir.join(ACTIVITY_LOG_FILENAME)
+    }
+
+    /// 注册 Tauri `AppHandle`（在应用 `setup` 阶段调用），开启前端实时事件推送。
+    pub fn set_app_handle(&self, handle: AppHandle) {
+        if let Ok(mut guard) = self.app_handle.lock() {
+            *guard = Some(handle);
+        }
+    }
+
+    fn current_app_handle(&self) -> Option<AppHandle> {
+        self.app_handle.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// 记录由桌面内嵌 `desktop-http` 产生的 MCP 活动：
+    /// 写入内存环形队列 + 落盘 `mcp-activity.jsonl` + 零延迟推送 `mcp:activity` 事件。
+    /// 若 `emit_case_updated_now` 为 `true`，同步检查并推送 `mcp:case-updated`。
+    pub fn record_desktop_mcp_activity(
+        &self,
+        record: McpActivityRecord,
+        emit_case_updated_now: bool,
+    ) -> bool {
+        let accepted = self
+            .mcp_activities
+            .lock()
+            .ok()
+            .is_some_and(|mut store| store.ingest(record.clone()));
+
+        // 无论是否重复，均由本进程直写落盘，读写失败绝不阻断 MCP 正常执行。
+        let _ = append_activity_record(&self.activity_log_path(), &record);
+
+        if accepted {
+            if let Some(app) = self.current_app_handle() {
+                let _ = app.emit("mcp:activity", &record);
+            }
+            if emit_case_updated_now {
+                let _ = self.emit_case_updated_if_matching(&record);
+            }
+        }
+        accepted
+    }
+
+    /// 当非只读写入工具成功完成且作用于当前打开案件时，向前端推送 `mcp:case-updated` 事件。
+    pub fn emit_case_updated_if_matching(&self, record: &McpActivityRecord) -> bool {
+        if record.phase != "completed" || record.read_only {
+            return false;
+        }
+        let Some(raw_case_dir) = record
+            .case_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            return false;
+        };
+
+        let matched_open_case_dir = self.view.read().ok().and_then(|view| {
+            let open_folder = view.case_folder.as_ref()?;
+            let resolved_rec = resolve_clean(Path::new(raw_case_dir));
+            let resolved_open = resolve_clean(open_folder);
+            if same_case_path(&resolved_rec, &resolved_open) {
+                let display_dir = view
+                    .snapshot
+                    .as_ref()
+                    .map(|s| s.case_dir.clone())
+                    .unwrap_or_else(|| resolved_open.to_string_lossy().into_owned());
+                Some(display_dir)
+            } else {
+                None
+            }
+        });
+
+        let Some(case_dir_str) = matched_open_case_dir else {
+            return false;
+        };
+
+        if let Some(app) = self.current_app_handle() {
+            let tool_name = record
+                .tool_name
+                .as_deref()
+                .unwrap_or(record.method.as_str());
+            let _ = app.emit(
+                "mcp:case-updated",
+                json!({
+                    "caseDir": case_dir_str,
+                    "toolName": tool_name,
+                    "client": record.client,
+                    "timestamp": record.timestamp,
+                }),
+            );
+        }
+        true
+    }
+
+    /// 轮询一次 `logs/mcp-activity.jsonl` 的字节增量，将外部 `stdio` / `streamable-http`
+    /// 进程写入的新事件吸收进内存队列并实时推送给前端。返回本次新吸收的事件条数。
+    pub fn poll_activity_log_once(&self) -> usize {
+        let new_records = match self.mcp_tailer.lock() {
+            Ok(mut tailer) => tailer.poll_new_records(),
+            Err(_) => return 0,
+        };
+        if new_records.is_empty() {
+            return 0;
+        }
+        let app_opt = self.current_app_handle();
+        let mut ingested = 0usize;
+        for rec in new_records {
+            let accepted = self
+                .mcp_activities
+                .lock()
+                .ok()
+                .is_some_and(|mut store| store.ingest(rec.clone()));
+            if !accepted {
+                continue;
+            }
+            ingested += 1;
+            if let Some(ref app) = app_opt {
+                let _ = app.emit("mcp:activity", &rec);
+            }
+            let _ = self.emit_case_updated_if_matching(&rec);
+        }
+        ingested
+    }
+
+    /// 启动极轻量的后台尾随线程（每 350ms 检查一次 `logs/mcp-activity.jsonl` 字节偏移增量），
+    /// 幂等防重入，并在 [`AppState::shutdown_all`] 时优雅退出。
+    pub fn start_activity_tailer(self: &Arc<Self>) {
+        let Ok(mut worker_guard) = self.mcp_tailer_worker.lock() else {
+            return;
+        };
+        if worker_guard.as_ref().is_some_and(|h| !h.is_finished()) {
+            return;
+        }
+        self.mcp_tailer_cancel.store(false, Ordering::SeqCst);
+        let cancel = Arc::clone(&self.mcp_tailer_cancel);
+        let st = Arc::clone(self);
+        if let Ok(handle) = thread::Builder::new()
+            .name("tracedesk-mcp-tailer".to_string())
+            .spawn(move || {
+                while !cancel.load(Ordering::Relaxed) {
+                    st.poll_activity_log_once();
+                    // 将 350ms 拆分为 7 段 50ms 休眠，保证关闭应用时毫秒级响应退出信号。
+                    for _ in 0..7 {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                }
+            })
+        {
+            *worker_guard = Some(handle);
+        }
+    }
+
+    /// 查询合并后的 MCP 实时活动快照（先同步最新增量日志再应用筛选与统计）。
+    pub fn list_mcp_activities(
+        &self,
+        limit: Option<usize>,
+        client: Option<&str>,
+        status: Option<&str>,
+        transport: Option<&str>,
+        keyword: Option<&str>,
+    ) -> McpActivitySnapshot {
+        self.poll_activity_log_once();
+        self.mcp_activities
+            .lock()
+            .map(|store| store.snapshot(limit, client, status, transport, keyword))
+            .unwrap_or_default()
+    }
+
+    /// 清空内存活动队列并截断 `logs/mcp-activity.jsonl`，同时重置尾随偏移。
+    pub fn clear_mcp_activities(&self) {
+        if let Ok(mut store) = self.mcp_activities.lock() {
+            store.clear();
+        }
+        let _ = truncate_activity_log(&self.activity_log_path());
+        if let Ok(mut tailer) = self.mcp_tailer.lock() {
+            tailer.reset();
+        }
     }
 
     /// 检查是否存在正在运行的后台任务（分区扫描、大镜像哈希校验或内容搜索）。
@@ -1221,11 +1433,12 @@ impl AppState {
         }
     }
 
-    /// 取消全部活跃后台操作（分区扫描、哈希校验、内容搜索）并停止内嵌 HTTP MCP 服务。
+    /// 取消全部活跃后台操作（分区扫描、哈希校验、内容搜索、MCP 遥测尾随线程）并停止内嵌 HTTP MCP 服务。
     pub fn shutdown_all(&self) {
         self.scan_cancel.store(true, Ordering::Relaxed);
         self.hash_cancel.store(true, Ordering::Relaxed);
         self.task_cancel.store(true, Ordering::Relaxed);
+        self.mcp_tailer_cancel.store(true, Ordering::SeqCst);
 
         if let Ok(mut searches) = self.searches.lock() {
             for session in searches.values_mut() {
@@ -1235,6 +1448,11 @@ impl AppState {
         }
         if let Ok(mut worker) = self.hash_worker.lock()
             && let Some(handle) = worker.take()
+        {
+            let _ = handle.join();
+        }
+        if let Ok(mut tailer_worker) = self.mcp_tailer_worker.lock()
+            && let Some(handle) = tailer_worker.take()
         {
             let _ = handle.join();
         }

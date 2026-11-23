@@ -183,6 +183,7 @@ pub fn request_context_from_http_headers(
         header_user,
         header_client,
         user_agent_client,
+        transport: Some("streamable-http".to_string()),
     }
 }
 
@@ -695,6 +696,8 @@ impl McpHttpServerHandle {
         };
         let url = format!("http://{url_host}:{actual_port}{clean_path}");
 
+        // 独立 Streamable HTTP 服务默认启用跨进程文件遥测写入。
+        server.ensure_default_file_activity_sink();
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_bg = Arc::clone(&shutdown);
         let server_arc = Arc::new(server);

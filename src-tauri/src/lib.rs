@@ -128,6 +128,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(Arc::clone(&app_state))
         .setup(move |app| {
+            // 绑定 Tauri AppHandle 并启动 MCP 跨进程遥测日志后台尾随线程（350ms 轻量轮询）。
+            let st = app.state::<Arc<AppState>>();
+            st.set_app_handle(app.handle().clone());
+            st.start_activity_tailer();
+
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -198,10 +203,12 @@ pub fn run() {
             commands::inspect_review_bundle,
             commands::prepare_review_bundle,
             commands::build_review_bundle,
-            // §3.5 MCP 托管与系统工具命令
+            // §3.5 MCP 托管、实时遥测监控与系统工具命令
             commands::get_mcp_status,
             commands::start_mcp_http,
             commands::stop_mcp_http,
+            commands::list_mcp_activities,
+            commands::clear_mcp_activities,
             commands::open_in_os,
             commands::check_busy_before_close,
             commands::get_guide_pages,

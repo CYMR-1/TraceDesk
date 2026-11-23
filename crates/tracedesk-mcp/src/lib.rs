@@ -1,10 +1,12 @@
 //! TraceDesk MCP 服务端库（`tracedesk_mcp`）：
 //! - 19 个标准电子数据取证 MCP 工具与 2 个 MCP 资源（`tools`）
 //! - 单次调用自动加锁与立即释放 `case.lock`、只读视图/时间线缓存、`origin="mcp"` 审计写入（`service`）
+//! - MCP 实时过程监控、跨进程 JSONL 遥测与聚合统计（`activity`）
 //! - `stdio` 行分隔 JSON-RPC 2.0 传输（`stdio`）
 //! - 本地回环 `streamable-http` 传输、DNS 重绑定防护（`Host` / `Origin` 校验）与 `McpHttpServerHandle`（`http`）
 //! - 桌面端进程内 `LocalHttpMcpManager` 与 Claude / Cursor / 通用客户端接入配置生成（`runtime`）
 
+pub mod activity;
 pub mod http;
 pub mod runtime;
 pub mod service;
@@ -15,6 +17,15 @@ use std::env;
 use std::path::PathBuf;
 
 use tracedesk_core::AppPaths;
+
+pub use activity::{
+    ACTIVITY_LOG_FILENAME, ActivityLogTailer, CallbackActivitySink,
+    DEFAULT_ACTIVITY_STORE_CAPACITY, FileActivitySink, KEEP_ACTIVITY_LOG_LINES,
+    MAX_ACTIVITY_LOG_LINES, MAX_PREVIEW_BYTES, McpActivityRecord, McpActivitySink,
+    McpActivitySnapshot, McpActivityStats, McpActivityStore, McpToolStat, append_activity_record,
+    compute_activity_stats, default_activity_log_path, default_file_activity_sink,
+    now_east8_millis, trim_activity_log_if_needed, truncate_activity_log, truncate_preview,
+};
 
 pub use http::{
     DEFAULT_HOST, DEFAULT_HTTP_PATH, DEFAULT_PORT, LOOPBACK_HOSTS, MAX_HTTP_BODY_BYTES,
@@ -218,6 +229,7 @@ pub fn run_with_config(cfg: McpCliConfig) -> McpResult<()> {
         return Ok(());
     }
     let server = McpServer::new(Some(cfg.cases_dir), cfg.actor);
+    server.ensure_default_file_activity_sink();
     match cfg.transport {
         TransportMode::Stdio => run_stdio(&server),
         TransportMode::StreamableHttp => {

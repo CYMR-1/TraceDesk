@@ -14,15 +14,15 @@ use tracedesk_desktop_lib::AppState;
 use tracedesk_desktop_lib::commands::{
     cmd_bookmark_search_hits, cmd_build_review_bundle, cmd_build_timeline,
     cmd_cancel_content_search, cmd_cancel_scan_partitions, cmd_cancel_verify_integrity,
-    cmd_check_busy_before_close, cmd_close_case, cmd_create_case, cmd_examine_file,
-    cmd_export_file, cmd_export_findings, cmd_export_fsstat, cmd_generate_report,
+    cmd_check_busy_before_close, cmd_clear_mcp_activities, cmd_close_case, cmd_create_case,
+    cmd_examine_file, cmd_export_file, cmd_export_findings, cmd_export_fsstat, cmd_generate_report,
     cmd_get_app_paths, cmd_get_case_snapshot, cmd_get_guide_pages, cmd_get_mcp_status,
     cmd_get_tree_children, cmd_inspect_bundle_materials, cmd_list_audit_log, cmd_list_findings,
-    cmd_list_recent_cases, cmd_load_image, cmd_load_search_record, cmd_locate_file_in_scope,
-    cmd_open_case, cmd_preview_file_image, cmd_preview_file_page, cmd_query_files_page,
-    cmd_query_timeline_page, cmd_record_finding_note, cmd_register_source, cmd_scan_all_partitions,
-    cmd_start_content_search, cmd_start_mcp_http, cmd_stop_mcp_http, cmd_suggest_case_dir,
-    cmd_verify_integrity,
+    cmd_list_mcp_activities, cmd_list_recent_cases, cmd_load_image, cmd_load_search_record,
+    cmd_locate_file_in_scope, cmd_open_case, cmd_preview_file_image, cmd_preview_file_page,
+    cmd_query_files_page, cmd_query_timeline_page, cmd_record_finding_note, cmd_register_source,
+    cmd_scan_all_partitions, cmd_start_content_search, cmd_start_mcp_http, cmd_stop_mcp_http,
+    cmd_suggest_case_dir, cmd_verify_integrity,
 };
 
 fn repo_root() -> PathBuf {
@@ -849,4 +849,282 @@ fn desktop_embedded_mcp_http_caller_identity_and_audit_filter() {
 
     let _ = cmd_stop_mcp_http(&state);
     let _ = cmd_close_case(&state);
+}
+
+#[test]
+fn desktop_mcp_activity_telemetry_tailing_filter_and_clear() {
+    use tracedesk_mcp::{McpActivityRecord, append_activity_record, now_east8_millis};
+
+    let tmp = tempdir().expect("create tempdir");
+    let cases_dir = tmp.path().join("cases");
+    let logs_dir = tmp.path().join("logs");
+    std::fs::create_dir_all(&cases_dir).expect("mkdir cases");
+    std::fs::create_dir_all(&logs_dir).expect("mkdir logs");
+
+    let mut paths = AppPaths::from_root(repo_root());
+    paths.cases_dir = cases_dir.clone();
+    paths.logs_dir = logs_dir.clone();
+    let state = AppState::with_paths(paths.clone());
+
+    // 启动后台尾随线程，测试其随 AppState 正常运行并在 shutdown_all 优雅退出。
+    state.start_activity_tailer();
+
+    // 1. 新建案件并加载 demo.dd，随后启动桌面内嵌 desktop-http MCP 服务。
+    let snap = cmd_create_case(
+        &state,
+        &cases_dir.to_string_lossy(),
+        "TELEM-DESK-01",
+        "桌面测试员",
+        "FAT16镜像",
+        None,
+    )
+    .expect("create_case");
+    let _ = cmd_load_image(&state, &demo_image_path().to_string_lossy(), None).expect("load_image");
+    let _ = cmd_scan_all_partitions(&state, None).expect("scan_all");
+
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = probe.local_addr().expect("local_addr").port();
+    drop(probe);
+    let _ = cmd_start_mcp_http(&state, port).expect("start_mcp_http");
+    let host = format!("127.0.0.1:{port}");
+
+    // 2. 通过 desktop-http 执行 initialize、只读工具、写入工具、资源读取与一次失败工具调用。
+    let init_body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "clientInfo": { "name": "Antigravity", "version": "1.0" }
+        }
+    })
+    .to_string();
+    let (code_init, hdrs_init, _) = send_raw_http_with_headers(
+        port,
+        &format!(
+            "POST /mcp HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {init_body}",
+            init_body.len()
+        ),
+    );
+    assert_eq!(code_init, 200);
+    let sid = hdrs_init
+        .get("mcp-session-id")
+        .cloned()
+        .expect("Mcp-Session-Id");
+
+    let send_with_sid = |body: &str| {
+        send_raw_http_with_headers(
+            port,
+            &format!(
+                "POST /mcp HTTP/1.1\r\n\
+                 Host: {host}\r\n\
+                 Mcp-Session-Id: {sid}\r\n\
+                 Content-Type: application/json\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n\
+                 {body}",
+                body.len()
+            ),
+        )
+    };
+
+    // 2a. 只读工具：案件总览
+    let (c1, _, _) = send_with_sid(
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_get_case_summary",
+                "arguments": { "case_dir": snap.case_dir, "response_format": "json" }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(c1, 200);
+
+    // 2b. 受控写入工具：记录取证发现（作用于当前打开案件）
+    let (c2, _, _) = send_with_sid(
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_record_finding",
+                "arguments": {
+                    "case_dir": snap.case_dir,
+                    "path": "DOCS/CASE.TXT",
+                    "partition_offset": 2048,
+                    "note": "桌面内嵌 HTTP 实时过程监控测试",
+                    "response_format": "json"
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(c2, 200);
+
+    // 2c. 失败调用：未知工具名
+    let (c3, _, _) = send_with_sid(
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_non_existent_tool",
+                "arguments": {}
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(c3, 200);
+
+    // 2d. 资源读取
+    let (c4, _, _) = send_with_sid(
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "resources/read",
+            "params": { "uri": "tracedesk://guide/workflow" }
+        })
+        .to_string(),
+    );
+    assert_eq!(c4, 200);
+
+    // 3. 模拟外部独立 stdio 进程向 logs/mcp-activity.jsonl 追加 started -> completed 事件。
+    let log_path = state.activity_log_path();
+    assert!(log_path.is_file(), "desktop-http 应同步落盘 mcp-activity.jsonl");
+    let ext_call_id = "ext-stdio-call-001".to_string();
+    let ext_started = McpActivityRecord {
+        id: "ext-evt-start".to_string(),
+        call_id: ext_call_id.clone(),
+        timestamp: now_east8_millis(),
+        phase: "started".to_string(),
+        transport: "stdio".to_string(),
+        client: "Cursor".to_string(),
+        session_id: Some("stdio-sess-9".to_string()),
+        method: "tools/call".to_string(),
+        tool_name: Some("tracedesk_search_content".to_string()),
+        tool_title: "搜索文件内容".to_string(),
+        category: "文件分析".to_string(),
+        read_only: false,
+        case_dir: Some(snap.case_dir.clone()),
+        case_number: Some("TELEM-DESK-01".to_string()),
+        params_summary: "query=\"accountNum\" · encoding=\"UTF-8\"".to_string(),
+        params_json: "{\n  \"query\": \"accountNum\"\n}".to_string(),
+        duration_ms: None,
+        result_summary: "执行中...".to_string(),
+        response_preview: None,
+        error: None,
+    };
+    let ext_done = McpActivityRecord {
+        id: "ext-evt-done".to_string(),
+        call_id: ext_call_id,
+        timestamp: now_east8_millis(),
+        phase: "completed".to_string(),
+        duration_ms: Some(135),
+        result_summary: "执行成功（返回 1,024 字符）".to_string(),
+        response_preview: Some("# 搜索结果\n命中 3 处".to_string()),
+        ..ext_started.clone()
+    };
+    append_activity_record(&log_path, &ext_started).expect("append ext started");
+    append_activity_record(&log_path, &ext_done).expect("append ext done");
+
+    // 稍候让后台 350ms 尾随线程（或即时刷新）吸收外部记录，同时确保 desktop-http 记录不重复。
+    std::thread::sleep(Duration::from_millis(450));
+
+    // 4. 校验 list_mcp_activities 全量合并、JSON camelCase 契约、多维筛选与统计。
+    let full = cmd_list_mcp_activities(&state, None, None, None, None, None)
+        .expect("list_mcp_activities");
+    assert_eq!(full.activities.len(), 6, "5 次 desktop-http + 1 次外部 stdio 合并后应为 6 条");
+    assert_eq!(full.stats.total_calls, 6);
+    assert_eq!(full.stats.running_calls, 0);
+    assert_eq!(full.stats.succeeded_calls, 5);
+    assert_eq!(full.stats.failed_calls, 1);
+    assert_eq!(full.stats.read_only_calls, 4);
+    assert_eq!(full.stats.write_calls, 2);
+    assert!(full.stats.active_clients.contains(&"Antigravity 1.0".to_string()));
+    assert!(full.stats.active_clients.contains(&"Cursor".to_string()));
+    assert_eq!(
+        full.stats
+            .tool_stats
+            .get("tracedesk_search_content")
+            .map(|s| (s.calls, s.failures, s.avg_duration_ms)),
+        Some((1, 0, 135))
+    );
+
+    // 校验 JSON 字段严格符合 camelCase 前端契约。
+    let full_json = serde_json::to_value(&full).expect("serialize McpActivitySnapshot");
+    assert_eq!(full_json["stats"]["totalCalls"], 6);
+    assert_eq!(full_json["stats"]["runningCalls"], 0);
+    assert_eq!(full_json["stats"]["succeededCalls"], 5);
+    assert_eq!(full_json["stats"]["failedCalls"], 1);
+    assert_eq!(full_json["stats"]["readOnlyCalls"], 4);
+    assert_eq!(full_json["stats"]["writeCalls"], 2);
+    assert!(full_json["stats"]["toolStats"]["tracedesk_record_finding"]["calls"] == 1);
+    assert_eq!(full_json["activities"][0]["transport"], "stdio");
+    assert_eq!(full_json["activities"][0]["toolTitle"], "搜索文件内容");
+    assert_eq!(full_json["activities"][0]["paramsSummary"], "query=\"accountNum\" · encoding=\"UTF-8\"");
+
+    // 4a. 按传输方式 + 状态 + 客户端 + 关键词 + limit 筛选。
+    let only_desktop_failed = cmd_list_mcp_activities(
+        &state,
+        Some(10),
+        Some("Antigravity 1.0"),
+        Some("failed"),
+        Some("desktop-http"),
+        Some("non_existent"),
+    )
+    .expect("filter failed");
+    assert_eq!(only_desktop_failed.activities.len(), 1);
+    assert_eq!(only_desktop_failed.stats.failed_calls, 1);
+
+    let only_stdio = cmd_list_mcp_activities(&state, None, Some("Cursor"), None, Some("stdio"), None)
+        .expect("filter stdio");
+    assert_eq!(only_stdio.activities.len(), 1);
+    assert_eq!(only_stdio.activities[0].case_number.as_deref(), Some("TELEM-DESK-01"));
+
+    let limited = cmd_list_mcp_activities(&state, Some(2), None, None, None, None)
+        .expect("limit 2");
+    assert_eq!(limited.activities.len(), 2);
+    assert_eq!(limited.stats.total_calls, 6);
+
+    // 5. 验证新启动的 AppState 会自动从 logs/mcp-activity.jsonl 加载历史记录。
+    let reloaded_state = AppState::with_paths(paths);
+    let reloaded_snap = cmd_list_mcp_activities(&reloaded_state, None, None, None, None, None)
+        .expect("reloaded list");
+    assert_eq!(reloaded_snap.activities.len(), 6);
+    reloaded_state.shutdown_all();
+
+    // 6. 校验 clear_mcp_activities 清空内存与日志文件，且清空后尾随读取可自动重置并捕获新记录。
+    let cleared = cmd_clear_mcp_activities(&state).expect("clear_mcp_activities");
+    assert_eq!(cleared["cleared"], true);
+    let after_clear = cmd_list_mcp_activities(&state, None, None, None, None, None)
+        .expect("after clear");
+    assert!(after_clear.activities.is_empty());
+    assert_eq!(after_clear.stats.total_calls, 0);
+    assert_eq!(std::fs::metadata(&log_path).expect("log meta").len(), 0);
+
+    let post_clear_rec = McpActivityRecord {
+        id: "post-clear-evt".to_string(),
+        call_id: "post-clear-call".to_string(),
+        timestamp: now_east8_millis(),
+        phase: "completed".to_string(),
+        duration_ms: Some(12),
+        ..ext_done
+    };
+    append_activity_record(&log_path, &post_clear_rec).expect("append after clear");
+    let after_new = cmd_list_mcp_activities(&state, None, None, None, None, None)
+        .expect("after new external record");
+    assert_eq!(after_new.activities.len(), 1);
+    assert_eq!(after_new.activities[0].call_id, "post-clear-call");
+
+    // 7. shutdown_all 优雅退出尾随线程与内嵌 HTTP 服务。
+    state.shutdown_all();
+    assert!(!cmd_get_mcp_status(&state, Some(port)).expect("status").running);
 }
