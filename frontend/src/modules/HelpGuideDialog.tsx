@@ -22,7 +22,7 @@ const GUIDE_PAGES: readonly GuidePage[] = [
     title: '用演示镜像走一遍流程',
     navLabel: '快速上手：演示镜像',
     summary: '用项目内置的 FAT16 演示镜像，5 步走通建案、浏览、预览、导出校验与报告生成闭环。',
-    image: 'assets/guide/01_quickstart.png',
+    image: 'assets/guide/01_quickstart.webp',
     caption: '图 1 · 工作台分区布局与演示流程五大核心入口（点击查看大图）',
     content: `1. 点击顶部 ① **新建案件**。编号可填 \`DEMO-01\`，取证人员填自己的姓名，对象填“FAT16 演示镜像”。选择案件上级目录，确认案件目录地址后点击 **创建案件**。
 2. 点击右侧 ② **加载镜像**，选择项目里的 \`evidence/demo.dd\`。等待文件树自动建立后，在左侧 ③ 展开偏移 **2048 扇区** 的分区，进入 **DOCS**，选中 **CASE.TXT**。
@@ -34,7 +34,7 @@ const GUIDE_PAGES: readonly GuidePage[] = [
     title: '创建案件、加载镜像与登记来源',
     navLabel: '建案、加载与来源',
     summary: '确保源镜像与案件库分离存放，在“镜像与文件系统”页核对固定摘要、卷声明范围与交付方摘要比对结果。',
-    image: 'assets/guide/02_case_and_source.png',
+    image: 'assets/guide/02_case_and_source.webp',
     caption: '图 2 · 镜像与文件系统页：固定摘要、覆盖范围评估与来源登记（点击查看大图）',
     content: `1. 启动 TraceDesk 桌面工作台。点击 ① **新建案件**，填写案件编号、取证人员和取证对象；选择上级目录，并可直接修改案件文件夹名。
 2. 每个案件固定分析一份镜像，源镜像必须放在案件库目录之外（例如案件放在 \`cases\`，镜像放在同级 \`evidence\`）。点击 ② **加载镜像**，选择 RAW 镜像或分段 EWF 的 **.E01 首段**（所有续段需位于同一目录）。
@@ -47,7 +47,7 @@ const GUIDE_PAGES: readonly GuidePage[] = [
     title: '大镜像、完整索引与 SHA-256',
     navLabel: '大镜像与 SHA-256',
     summary: '逻辑容量达到 1 GiB 时自动切换为按需目录浏览，可边浏览边在后台校验基线，按需建立完整索引。',
-    image: 'assets/guide/03_large_image.png',
+    image: 'assets/guide/03_large_image.webp',
     caption: '图 3 · 大容量镜像按需目录浏览、完整索引与后台校验入口（点击查看大图）',
     content: `- **先浏览，不阻塞**　小于 1 GiB 的镜像会自动固定摘要并扫描全部分区；达到 1 GiB 时先打开首个可读根目录，并在 ① 保管状态条标明“整镜像 SHA-256 待固定”。双击目录深入浏览，点击左侧 ② **返回上级目录** 回退。
 - **按需建立完整索引**　需要全案内容搜索或 MACB 时间线时，点击左侧 ③ **建立完整文件索引**。写入完成前可随时点 **取消建立索引**，已有目录结果会保留；完成后清单压缩保存至 \`inventory-*.jsonl.gz\`，重开案件直接复用。
@@ -60,7 +60,7 @@ const GUIDE_PAGES: readonly GuidePage[] = [
     title: '定位目录、筛选文件与多格式预览',
     navLabel: '浏览、筛选与预览',
     summary: '左侧保留完整目录树，筛选仅过滤当前范围列表；下方支持文本（9 编码）、图片与十六进制分页预览。',
-    image: 'assets/guide/04_browse_preview.png',
+    image: 'assets/guide/04_browse_preview.webp',
     caption: '图 4 · 文件树、条件筛选栏与十六进制/多编码分页预览（点击查看大图）',
     content: `1. 在左侧树选择镜像、分区或目录，可用 ① **全部展开 / 全部折叠** 控制层级。遇到跨分区同名文件，结合 **分区偏移、路径、inode** 精准区分。
 2. 在 ② 筛选栏输入后缀（如 \`.txt\`）或路径关键词，或在状态下拉框选择 **现存文件 / 已删除**，按回车或点击 **筛选**；点击 **重置** 恢复当前范围。筛选不裁剪左侧完整树。
@@ -72,7 +72,7 @@ const GUIDE_PAGES: readonly GuidePage[] = [
     title: '搜索文件内容并实时复核命中',
     navLabel: '内容搜索与复核',
     summary: '支持 UTF-8、UTF-16LE、GBK 与 HEX 精确字节检索，结果实时流式展示，搜索期间即可筛选、排除并保存为取证发现。',
-    image: 'assets/guide/05_content_search.png',
+    image: 'assets/guide/05_content_search.webp',
     caption: '图 5 · 内容搜索与复核页：实时流式命中、三态全选与批量保存（点击查看大图）',
     content: `1. 切换到 **内容搜索与复核**。在 ① 输入搜索文字或十六进制字节，选择编码与范围（**全部文件** 或 **文件浏览中选中的文件**；大镜像全案搜索需先建立完整索引），点击 **搜索**。运行中按钮自动切换为 **取消搜索**。
 2. 用演示镜像验证：选择编码 **HEX**，输入 \`6E 6F 74 65\`，点击 **搜索**，即可在 ④ 命中 \`DOCS/CASE.TXT\`，**文件内字节偏移为 5**（从文件开头的 0 起算）。
@@ -86,7 +86,7 @@ const GUIDE_PAGES: readonly GuidePage[] = [
     title: '导出副本、恢复删除文件与取证发现',
     navLabel: '导出与取证发现',
     summary: '导出前后自动复核原镜像，支持已删除文件可读字节恢复；右键文件工具与“取证发现”页形成结构化证据归档。',
-    image: 'assets/guide/06_export_findings.png',
+    image: 'assets/guide/06_export_findings.webp',
     caption: '图 6 · 取证发现页：表头筛选排序、一键批量导出与分栏取证详情（点击查看大图）',
     content: `1. **导出文件副本**：在 **文件浏览** 选中现存或已删除文件，点击 **导出所选文件**。副本保存至案件 \`exports\` 目录（重名时放入 \`同名副本-*\` 子目录保留原名），并记录副本 SHA-256。
 2. **恢复已删除文件**：将状态切为 **已删除**，选中记录核对能否预览、目录记录大小及恢复提示后再导出。若提示“部分导出”、inode 已重分配或 FAT 起始簇已被占用，应如实记录实际字节数并结合内容研判。
@@ -97,7 +97,7 @@ const GUIDE_PAGES: readonly GuidePage[] = [
     title: 'MACB 时间线与审计日志核验',
     navLabel: '时间线与审计日志',
     summary: '通过 MACB 时间线还原文件活动脉络，在审计日志中追踪人工与 MCP 全部操作并核验 SHA-256 哈希链。',
-    image: 'assets/guide/07_timeline_audit.png',
+    image: 'assets/guide/07_timeline_audit.webp',
     caption: '图 7 · 审计日志页：人工/MCP 来源筛选、正倒序切换与哈希链详情（点击查看大图）',
     content: `1. 在 ① 模块标签栏切换 **MACB 时间线** 与 **审计日志**。大案件首次进入时间线时点击 **生成时间线** 在后台整理事件，序号在翻页与筛选后保持不变。
 2. **理解 MACB 四时间**：**M** 为内容修改，**A** 为访问，**C** 为元数据变更，**B** 为创建。FAT 不保存 C 时间，查看创建时间请看 B 列；界面统一显示 UTC+8，解释 FAT 等无时区时间时请核对源设备时区。
@@ -110,7 +110,7 @@ const GUIDE_PAGES: readonly GuidePage[] = [
     title: '生成报告与交付可核验复核包',
     navLabel: '报告与复核包',
     summary: '生成结构化 Markdown 取证报告，并通过材料选择窗口按需构建可独立离线核验的复核包 ZIP。',
-    image: 'assets/guide/08_report_bundle.png',
+    image: 'assets/guide/08_report_bundle.webp',
     caption: '图 8 · 复核包材料选择弹窗：缺失中文清单提示、双标签勾选与导出（点击查看大图）',
     content: `1. **生成 Markdown 报告**：先在 **取证发现** 和 **镜像与文件系统** 核对内容，再点击顶部 **生成 Markdown 报告**。程序会执行完整性校验并将分节报告写入案件 \`reports\` 目录。
 2. **按需选择复核包材料**：点击顶部 **导出复核包**。若案件存在历史导出副本或搜索记录，会弹出材料选择窗口：当部分本地文件已被清理或隔离时，顶部 ① 会给出清晰中文缺失清单，并支持下方 ④ **复制缺失清单**。
@@ -125,7 +125,7 @@ tracedesk-verify "复核包路径.zip" --sha256 交付方提供的64位摘要
     title: 'MCP 服务端接入与 AI 协同',
     navLabel: 'MCP 服务端接入',
     summary: '内置标准 MCP 服务端 tracedesk_mcp（19 工具 + 2 资源），支持在桌面端一键复制配置、启停本地 HTTP 服务与释放案件锁。',
-    image: 'assets/guide/09_mcp_dialog.png',
+    image: 'assets/guide/09_mcp_dialog.webp',
     caption: '图 9 · MCP 服务配置弹窗：案件锁释放、本地 HTTP 启停与客户端配置（点击查看大图）',
     content: `1. 点击工作台顶部 **MCP 服务** 按钮打开配置窗口。所有 MCP 工具均遵守源镜像只读保护，受控写操作会以 **MCP** 来源（\`origin="mcp"\`）写入案件 SHA-256 审计链，可在 **审计日志** 中按人工/MCP 筛选核查。
 2. **释放桌面端案件锁**：当桌面端已打开某案件并持有 \`case.lock\` 时，顶部 ① 会出现提示条。点击 **释放当前案件锁** 即可关闭当前案件，供外部 AI 客户端安全接入同一案件。

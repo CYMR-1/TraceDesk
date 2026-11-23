@@ -2760,7 +2760,7 @@ pub fn cmd_get_guide_pages() -> Result<Vec<GuidePageDto>, String> {
             title: "用演示镜像走一遍流程".to_string(),
             nav_label: "快速上手：演示镜像".to_string(),
             summary: "用项目内置的 FAT16 演示镜像，5 步走通建案、浏览、预览、导出校验与报告生成闭环。".to_string(),
-            image: "/assets/guide/01_quickstart.png".to_string(),
+            image: "/assets/guide/01_quickstart.webp".to_string(),
             caption: "图 1 · 工作台分区布局与演示流程五大核心入口（点击查看大图）".to_string(),
         },
         GuidePageDto {
@@ -2768,7 +2768,7 @@ pub fn cmd_get_guide_pages() -> Result<Vec<GuidePageDto>, String> {
             title: "创建案件、加载镜像与登记来源".to_string(),
             nav_label: "建案、加载与来源".to_string(),
             summary: "确保源镜像与案件库分离存放，在“镜像与文件系统”页核对固定摘要、卷声明范围与交付方摘要比对结果。".to_string(),
-            image: "/assets/guide/02_case_and_source.png".to_string(),
+            image: "/assets/guide/02_case_and_source.webp".to_string(),
             caption: "图 2 · 镜像与文件系统页：固定摘要、覆盖范围评估与来源登记（点击查看大图）".to_string(),
         },
         GuidePageDto {
@@ -2776,7 +2776,7 @@ pub fn cmd_get_guide_pages() -> Result<Vec<GuidePageDto>, String> {
             title: "大镜像、完整索引与 SHA-256".to_string(),
             nav_label: "大镜像与 SHA-256".to_string(),
             summary: "逻辑容量达到 1 GiB 时自动切换为按需目录浏览，可边浏览边在后台校验基线，按需建立完整索引。".to_string(),
-            image: "/assets/guide/03_large_image.png".to_string(),
+            image: "/assets/guide/03_large_image.webp".to_string(),
             caption: "图 3 · 大容量镜像按需目录浏览、完整索引与后台校验入口（点击查看大图）".to_string(),
         },
         GuidePageDto {
@@ -2784,7 +2784,7 @@ pub fn cmd_get_guide_pages() -> Result<Vec<GuidePageDto>, String> {
             title: "定位目录、筛选文件与多格式预览".to_string(),
             nav_label: "浏览、筛选与预览".to_string(),
             summary: "左侧保留完整目录树，筛选仅过滤当前范围列表；下方支持文本（9 编码）、图片与十六进制分页预览。".to_string(),
-            image: "/assets/guide/04_browse_preview.png".to_string(),
+            image: "/assets/guide/04_browse_preview.webp".to_string(),
             caption: "图 4 · 文件树、条件筛选栏与十六进制/多编码分页预览（点击查看大图）".to_string(),
         },
         GuidePageDto {
@@ -2792,7 +2792,7 @@ pub fn cmd_get_guide_pages() -> Result<Vec<GuidePageDto>, String> {
             title: "搜索文件内容并实时复核命中".to_string(),
             nav_label: "内容搜索与复核".to_string(),
             summary: "支持 UTF-8、UTF-16LE、GBK 与 HEX 精确字节检索，结果实时流式展示，搜索期间即可筛选、排除并保存为取证发现。".to_string(),
-            image: "/assets/guide/05_content_search.png".to_string(),
+            image: "/assets/guide/05_content_search.webp".to_string(),
             caption: "图 5 · 内容搜索与复核页：实时流式命中、三态全选与批量保存（点击查看大图）".to_string(),
         },
         GuidePageDto {
@@ -2800,7 +2800,7 @@ pub fn cmd_get_guide_pages() -> Result<Vec<GuidePageDto>, String> {
             title: "导出副本、恢复删除文件与取证发现".to_string(),
             nav_label: "导出与取证发现".to_string(),
             summary: "导出前后自动复核原镜像，支持已删除文件可读字节恢复；右键文件工具与“取证发现”页形成结构化证据归档。".to_string(),
-            image: "/assets/guide/06_export_findings.png".to_string(),
+            image: "/assets/guide/06_export_findings.webp".to_string(),
             caption: "图 6 · 取证发现页：表头筛选排序、一键批量导出与分栏取证详情（点击查看大图）".to_string(),
         },
         GuidePageDto {
@@ -2808,7 +2808,7 @@ pub fn cmd_get_guide_pages() -> Result<Vec<GuidePageDto>, String> {
             title: "MACB 时间线与审计日志核验".to_string(),
             nav_label: "时间线与审计日志".to_string(),
             summary: "通过 MACB 时间线还原文件活动脉络，在审计日志中追踪人工与 MCP 全部操作并核验 SHA-256 哈希链。".to_string(),
-            image: "/assets/guide/07_timeline_audit.png".to_string(),
+            image: "/assets/guide/07_timeline_audit.webp".to_string(),
             caption: "图 7 · 审计日志页：人工/MCP 来源筛选、正倒序切换与哈希链详情（点击查看大图）".to_string(),
         },
         GuidePageDto {
@@ -2816,7 +2816,7 @@ pub fn cmd_get_guide_pages() -> Result<Vec<GuidePageDto>, String> {
             title: "生成报告与交付可核验复核包".to_string(),
             nav_label: "报告与复核包".to_string(),
             summary: "生成结构化 Markdown 取证报告，并通过材料选择窗口按需构建可独立离线核验的复核包 ZIP。".to_string(),
-            image: "/assets/guide/08_report_bundle.png".to_string(),
+            image: "/assets/guide/08_report_bundle.webp".to_string(),
             caption: "图 8 · 复核包材料选择弹窗：缺失中文清单提示、双标签勾选与导出（点击查看大图）".to_string(),
         },
         GuidePageDto {
@@ -2824,7 +2824,7 @@ pub fn cmd_get_guide_pages() -> Result<Vec<GuidePageDto>, String> {
             title: "MCP 服务端接入与 AI 协同".to_string(),
             nav_label: "MCP 服务端接入".to_string(),
             summary: "内置标准 MCP 服务端 tracedesk_mcp（19 工具 + 2 资源），采用仅写入瞬间短锁机制，支持在桌面端实时监控外部 stdio 与 HTTP 客户端并自动同步界面。".to_string(),
-            image: "/assets/guide/09_mcp_dialog.png".to_string(),
+            image: "/assets/guide/09_mcp_dialog.webp".to_string(),
             caption: "图 9 · MCP 服务配置与实时监控：客户端配置、本地 HTTP 启停与实时协同（点击查看大图）".to_string(),
         },
     ])

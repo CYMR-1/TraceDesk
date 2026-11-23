@@ -3,12 +3,17 @@ name = "tracedesk-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# 默认开启安全图片预览（桌面端启用；CLI 与 MCP 可通过 default-features = false 裁剪 image/base64）
+default = ["image-preview"]
+image-preview = ["dep:image", "dep:base64"]
+
 [dependencies]
-base64 = "0.22"
+base64 = { version = "0.22", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 encoding_rs = "0.8"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "webp", "tiff", "ico"] }
+image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg", "bmp", "gif", "webp", "tiff", "ico"] }
 memchr = "2"
 rayon = "1.10"
 regex = "1"

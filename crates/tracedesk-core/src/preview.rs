@@ -4,12 +4,18 @@
 //! （对应 `core-contract.md` §3.7，与 `forensic/core/preview.py` 和 `forensic/ui/preview.py` 保持一致）。
 
 use std::fs::File;
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+#[cfg(feature = "image-preview")]
+use std::io::Cursor;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "image-preview")]
 use base64::Engine as _;
+#[cfg(feature = "image-preview")]
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+#[cfg(feature = "image-preview")]
 use image::imageops::FilterType;
+#[cfg(feature = "image-preview")]
 use image::{AnimationDecoder, ImageFormat, ImageReader};
 use serde::{Deserialize, Serialize};
 use tracedesk_engines::{InventoryEntry, TskCli, VolumeReader, deleted_source_note};
@@ -142,6 +148,7 @@ pub struct PreviewPageResult {
 }
 
 /// 适用于桌面端 / Web 端渲染的解码图片预览结果。
+#[cfg(feature = "image-preview")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImagePreviewResult {
@@ -532,16 +539,26 @@ fn step_legacy_carry(encoding: PreviewEncoding, buf: &[u8]) -> Vec<u8> {
 }
 
 /// 通过扩展名白名单或魔数头嗅探判断文件是否属于图片预览候选对象（对应 `core-contract.md` §3.7）。
+/// 未启用 `image-preview` 特性时仅按扩展名白名单判断。
 pub fn is_image_candidate(path: &str, head_bytes: &[u8]) -> bool {
     let lower = path.to_ascii_lowercase();
     if IMAGE_SUFFIXES.iter().any(|ext| lower.ends_with(ext)) {
         return true;
     }
-    !head_bytes.is_empty() && image::guess_format(head_bytes).is_ok()
+    #[cfg(feature = "image-preview")]
+    {
+        !head_bytes.is_empty() && image::guess_format(head_bytes).is_ok()
+    }
+    #[cfg(not(feature = "image-preview"))]
+    {
+        let _ = head_bytes;
+        false
+    }
 }
 
 /// 在严格的 32 MiB / 4000 万像素安全上限下解码图片载荷，支持 4096 px 降采样、
 /// 动图首帧处理及 PNG base64 Data URL 生成（对应 `core-contract.md` §3.7）。
+#[cfg(feature = "image-preview")]
 pub fn decode_image_preview(
     raw_bytes: &[u8],
     entry: &InventoryEntry,
@@ -618,6 +635,7 @@ pub fn decode_image_preview(
     }
 }
 
+#[cfg(feature = "image-preview")]
 fn detect_animated(raw_bytes: &[u8], format: Option<ImageFormat>) -> bool {
     match format {
         Some(ImageFormat::Gif) => {
@@ -903,6 +921,7 @@ impl PreviewSession {
     }
 
     /// 将完整条目解码为图片预览（受 32 MiB / 4000 万像素 / 4096 px 安全上限约束）。
+    #[cfg(feature = "image-preview")]
     pub fn read_image(&mut self) -> CoreResult<ImagePreviewResult> {
         let size = self.readable_size();
         if self.entry.size > MAX_IMAGE_BYTES || size > MAX_IMAGE_BYTES {
@@ -927,6 +946,7 @@ pub fn preview_entry_page(
 }
 
 /// 一次性便捷函数：解码 `image` 内 `entry` 的图片预览。
+#[cfg(feature = "image-preview")]
 pub fn preview_entry_image(
     image: &Path,
     entry: &InventoryEntry,

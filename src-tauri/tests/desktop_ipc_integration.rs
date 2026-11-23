@@ -114,8 +114,8 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
 
     let guides = cmd_get_guide_pages().expect("get_guide_pages");
     assert_eq!(guides.len(), 9);
-    assert_eq!(guides[0].image, "/assets/guide/01_quickstart.png");
-    assert_eq!(guides[8].image, "/assets/guide/09_mcp_dialog.png");
+    assert_eq!(guides[0].image, "/assets/guide/01_quickstart.webp");
+    assert_eq!(guides[8].image, "/assets/guide/09_mcp_dialog.webp");
 
     // 2. 新建案件及快照 JSON 字段
     assert!(cmd_get_case_snapshot(&state).unwrap().is_none());

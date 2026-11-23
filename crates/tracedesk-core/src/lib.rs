@@ -63,11 +63,13 @@ pub use formatting::{
 };
 pub use paths::{AppPaths, is_within, resolve_clean, strip_verbatim_prefix};
 pub use preview::{
-    HexRow, IMAGE_SUFFIXES, ImagePreviewResult, MAX_IMAGE_BYTES, MAX_IMAGE_DIM, MAX_IMAGE_PIXELS,
-    PAGE_BYTES, PREVIEW_ENCODINGS, PageWindow, PreviewEncoding, PreviewPageResult, PreviewSession,
-    ROW_BYTES, compute_legacy_carry, decode_image_preview, is_image_candidate, page_characters,
-    preview_entry_image, preview_entry_page, preview_rows, preview_text,
+    HexRow, IMAGE_SUFFIXES, MAX_IMAGE_BYTES, MAX_IMAGE_DIM, MAX_IMAGE_PIXELS, PAGE_BYTES,
+    PREVIEW_ENCODINGS, PageWindow, PreviewEncoding, PreviewPageResult, PreviewSession, ROW_BYTES,
+    compute_legacy_carry, is_image_candidate, page_characters, preview_entry_page, preview_rows,
+    preview_text,
 };
+#[cfg(feature = "image-preview")]
+pub use preview::{ImagePreviewResult, decode_image_preview, preview_entry_image};
 pub use reporting::render_report;
 pub use review::{
     BuildBundleOptions, BuildBundleResult, BundleExportRow, BundleSearchRow,

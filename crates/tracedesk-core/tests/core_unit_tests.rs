@@ -8,18 +8,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
+#[cfg(feature = "image-preview")]
 use image::codecs::gif::GifEncoder;
+#[cfg(feature = "image-preview")]
 use image::{Delay, Frame, ImageBuffer, ImageFormat, Rgba};
 use serde_json::{Map, Value, json};
+#[cfg(feature = "image-preview")]
+use tracedesk_core::decode_image_preview;
 use tracedesk_core::{
     AppPaths, AuditOrigin, AuditRecord, BrowserFilter, BrowserIndex, BuildBundleOptions, Case,
     CoreError, PageWindow, PreviewEncoding, Provenance, StatusFilter, TREE_GROUP_SIZE,
     TREE_GROUP_THRESHOLD, TimelineFilter, TimelineIndex, assess_coverage, audit_mcp_user,
     audit_origin, audit_origin_label, build_bundle, canonical_json, case_folder_name,
-    compute_legacy_carry, decode_image_preview, display_timestamp, find_matches_in_reader,
-    findings_text, format_unix_east8_stack, normalize_event_filter, parse_pattern, preview_rows,
-    preview_text, record_note, render_report, save_json_atomic, source_status,
-    verify_audit_chain_at, verify_bundle, windows_filename,
+    compute_legacy_carry, display_timestamp, find_matches_in_reader, findings_text,
+    format_unix_east8_stack, normalize_event_filter, parse_pattern, preview_rows, preview_text,
+    record_note, render_report, save_json_atomic, source_status, verify_audit_chain_at,
+    verify_bundle, windows_filename,
 };
 use tracedesk_engines::{InventoryEntry, PartitionInfo};
 use zip::write::SimpleFileOptions;
@@ -490,64 +494,67 @@ fn preview_cross_page_gbk_gb18030_utf16_and_image_caps() {
     assert_eq!(hex[0].offset_hex, "00001000");
 
     // 4. 图片预览：有效 PNG、超大尺寸降采样（>4096px）、动图 GIF 首帧以及损坏数据拦截。
-    let img_entry = make_entry("PIC.PNG", 2048, "1", 1000, false, false);
-    let mut small_png = Vec::new();
-    let small_buf: ImageBuffer<Rgba<u8>, Vec<u8>> =
-        ImageBuffer::from_pixel(32, 16, Rgba([38, 116, 196, 255]));
-    small_buf
-        .write_to(&mut Cursor::new(&mut small_png), ImageFormat::Png)
-        .unwrap();
-    let res_ok = decode_image_preview(&small_png, &img_entry, "");
-    assert!(res_ok.ok);
-    assert_eq!(res_ok.width, Some(32));
-    assert_eq!(res_ok.height, Some(16));
-    assert!(!res_ok.animated);
-    assert!(res_ok.data_url.as_deref().unwrap().starts_with("data:image/png;base64,"));
-
-    // 超宽尺寸 5000 x 100（50 万像素 <= 4000 万像素，单边 > 4096px -> 缩放至宽 4096）
-    let mut wide_png = Vec::new();
-    let wide_buf: ImageBuffer<Rgba<u8>, Vec<u8>> =
-        ImageBuffer::from_pixel(5000, 100, Rgba([20, 140, 80, 255]));
-    wide_buf
-        .write_to(&mut Cursor::new(&mut wide_png), ImageFormat::Png)
-        .unwrap();
-    let res_wide = decode_image_preview(&wide_png, &img_entry, "");
-    assert!(res_wide.ok);
-    assert_eq!(res_wide.width, Some(5000));
-    assert_eq!(res_wide.display_width, Some(4096));
-
-    // 多帧动图 GIF -> `animated == true`，正常解码首帧。
-    let mut gif_bytes = Vec::new();
+    #[cfg(feature = "image-preview")]
     {
-        let mut enc = GifEncoder::new(&mut gif_bytes);
-        let f1 = Frame::from_parts(
-            ImageBuffer::from_pixel(8, 8, Rgba([255, 0, 0, 255])),
-            0,
-            0,
-            Delay::from_numer_denom_ms(100, 1),
-        );
-        let f2 = Frame::from_parts(
-            ImageBuffer::from_pixel(8, 8, Rgba([0, 255, 0, 255])),
-            0,
-            0,
-            Delay::from_numer_denom_ms(100, 1),
-        );
-        enc.encode_frames([f1, f2]).unwrap();
+        let img_entry = make_entry("PIC.PNG", 2048, "1", 1000, false, false);
+        let mut small_png = Vec::new();
+        let small_buf: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(32, 16, Rgba([38, 116, 196, 255]));
+        small_buf
+            .write_to(&mut Cursor::new(&mut small_png), ImageFormat::Png)
+            .unwrap();
+        let res_ok = decode_image_preview(&small_png, &img_entry, "");
+        assert!(res_ok.ok);
+        assert_eq!(res_ok.width, Some(32));
+        assert_eq!(res_ok.height, Some(16));
+        assert!(!res_ok.animated);
+        assert!(res_ok.data_url.as_deref().unwrap().starts_with("data:image/png;base64,"));
+
+        // 超宽尺寸 5000 x 100（50 万像素 <= 4000 万像素，单边 > 4096px -> 缩放至宽 4096）
+        let mut wide_png = Vec::new();
+        let wide_buf: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(5000, 100, Rgba([20, 140, 80, 255]));
+        wide_buf
+            .write_to(&mut Cursor::new(&mut wide_png), ImageFormat::Png)
+            .unwrap();
+        let res_wide = decode_image_preview(&wide_png, &img_entry, "");
+        assert!(res_wide.ok);
+        assert_eq!(res_wide.width, Some(5000));
+        assert_eq!(res_wide.display_width, Some(4096));
+
+        // 多帧动图 GIF -> `animated == true`，正常解码首帧。
+        let mut gif_bytes = Vec::new();
+        {
+            let mut enc = GifEncoder::new(&mut gif_bytes);
+            let f1 = Frame::from_parts(
+                ImageBuffer::from_pixel(8, 8, Rgba([255, 0, 0, 255])),
+                0,
+                0,
+                Delay::from_numer_denom_ms(100, 1),
+            );
+            let f2 = Frame::from_parts(
+                ImageBuffer::from_pixel(8, 8, Rgba([0, 255, 0, 255])),
+                0,
+                0,
+                Delay::from_numer_denom_ms(100, 1),
+            );
+            enc.encode_frames([f1, f2]).unwrap();
+        }
+        let res_gif = decode_image_preview(&gif_bytes, &img_entry, "");
+        assert!(res_gif.ok);
+        assert!(res_gif.animated);
+
+        // 损坏图片字节应被明确拒绝。
+        let res_corrupt = decode_image_preview(b"not a valid image", &img_entry, "");
+        assert!(!res_corrupt.ok);
+        assert!(res_corrupt.error.unwrap().contains("损坏或格式不受支持"));
+
+        // 超过 32 MiB 的图片应在解码前直接拒绝。
+        let huge_entry = make_entry("HUGE.PNG", 2048, "2", 33 * 1024 * 1024, false, false);
+        let res_huge = decode_image_preview(&[], &huge_entry, "");
+        assert!(!res_huge.ok);
+        assert!(res_huge.error.unwrap().contains("32 MiB"));
     }
-    let res_gif = decode_image_preview(&gif_bytes, &img_entry, "");
-    assert!(res_gif.ok);
-    assert!(res_gif.animated);
-
-    // 损坏图片字节应被明确拒绝。
-    let res_corrupt = decode_image_preview(b"not a valid image", &img_entry, "");
-    assert!(!res_corrupt.ok);
-    assert!(res_corrupt.error.unwrap().contains("损坏或格式不受支持"));
-
-    // 超过 32 MiB 的图片应在解码前直接拒绝。
-    let huge_entry = make_entry("HUGE.PNG", 2048, "2", 33 * 1024 * 1024, false, false);
-    let res_huge = decode_image_preview(&[], &huge_entry, "");
-    assert!(!res_huge.ok);
-    assert!(res_huge.error.unwrap().contains("32 MiB"));
 }
 
 #[test]

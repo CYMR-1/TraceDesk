@@ -11,3 +11,18 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+
+# Release 编译体积与性能平衡配置：全链路 LTO + 去符号 + 体积优先 + abort
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"
+opt-level = "s"
+panic = "abort"
+
+# 核心取证引擎与核心算法保持最高速度优化（不影响扫描/哈希/SIMD 搜索吞吐）
+[profile.release.package.tracedesk-engines]
+opt-level = 3
+
+[profile.release.package.tracedesk-core]
+opt-level = 3
