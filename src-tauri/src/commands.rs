@@ -9,8 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use tauri::{AppHandle, Emitter, State};
+use tracedesk_mcp::McpActivitySnapshot;
 use tracedesk_core::{
     AuditOrigin, BrowserFilter, BuildBundleOptions, Case, CoreError, EvidenceInfo, FindingGroup,
     PreviewEncoding, Provenance, SearchHit, SearchOptions, SearchRecord, StatusFilter,
@@ -2611,6 +2612,24 @@ pub fn cmd_stop_mcp_http(state: &Arc<AppState>) -> Result<McpStatus, String> {
     Ok(state.build_mcp_status(Some(port)))
 }
 
+/// 查询合并后的 MCP 实时活动与聚合统计（支持客户端、状态、传输方式与关键词筛选）。
+pub fn cmd_list_mcp_activities(
+    state: &Arc<AppState>,
+    limit: Option<usize>,
+    client: Option<&str>,
+    status: Option<&str>,
+    transport: Option<&str>,
+    keyword: Option<&str>,
+) -> Result<McpActivitySnapshot, String> {
+    Ok(state.list_mcp_activities(limit, client, status, transport, keyword))
+}
+
+/// 清空内存中的 MCP 活动流并截断跨进程遥测日志 `logs/mcp-activity.jsonl`。
+pub fn cmd_clear_mcp_activities(state: &Arc<AppState>) -> Result<Value, String> {
+    state.clear_mcp_activities();
+    Ok(json!({ "cleared": true }))
+}
+
 pub fn cmd_open_in_os(
     state: &Arc<AppState>,
     path: &str,
@@ -3302,6 +3321,30 @@ pub async fn stop_mcp_http(state: State<'_, Arc<AppState>>) -> Result<McpStatus,
     tauri::async_runtime::spawn_blocking(move || cmd_stop_mcp_http(&st))
         .await
         .map_err(|e| format!("后台任务执行异常：{e}"))?
+}
+
+#[tauri::command]
+pub async fn list_mcp_activities(
+    state: State<'_, Arc<AppState>>,
+    limit: Option<usize>,
+    client: Option<String>,
+    status: Option<String>,
+    transport: Option<String>,
+    keyword: Option<String>,
+) -> Result<McpActivitySnapshot, String> {
+    cmd_list_mcp_activities(
+        &state,
+        limit,
+        client.as_deref(),
+        status.as_deref(),
+        transport.as_deref(),
+        keyword.as_deref(),
+    )
+}
+
+#[tauri::command]
+pub async fn clear_mcp_activities(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
+    cmd_clear_mcp_activities(&state)
 }
 
 #[tauri::command]

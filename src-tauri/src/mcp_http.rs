@@ -12,6 +12,7 @@
 //!   以及每连接独立工作线程，确保耗时工具不会阻塞 accept 循环。
 //! - 当 `tools/call` 指向桌面端 UI 当前打开的案件时，与活跃的 [`AppState`] 平滑协调 `case.lock`。
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
@@ -23,13 +24,44 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedesk_mcp::{
-    CaseService, DEFAULT_HOST, DEFAULT_HTTP_PATH, DEFAULT_PORT, MAX_HTTP_BODY_BYTES, McpServer,
-    TOOL_CATALOG, normalize_http_path, request_context_from_http_headers, validate_loopback_host,
-    verify_dns_rebinding,
+    CallbackActivitySink, CaseService, DEFAULT_HOST, DEFAULT_HTTP_PATH, DEFAULT_PORT,
+    MAX_HTTP_BODY_BYTES, McpActivityRecord, McpServer, TOOL_CATALOG, normalize_http_path,
+    request_context_from_http_headers, validate_loopback_host, verify_dns_rebinding,
 };
 use uuid::Uuid;
 
 use crate::state::{AppState, ToolCatalogItem};
+
+thread_local! {
+    /// 暂存当前连接线程上已完成但需等待 `coordinate_mcp_call` 重新同步 `ViewCache` 后再推送的写入活动记录。
+    static DEFERRED_CASE_UPDATES: RefCell<Vec<McpActivityRecord>> = const { RefCell::new(Vec::new()) };
+}
+
+fn push_deferred_case_update(record: McpActivityRecord) {
+    DEFERRED_CASE_UPDATES.with(|cell| {
+        cell.borrow_mut().push(record);
+    });
+}
+
+fn drain_deferred_case_updates() -> Vec<McpActivityRecord> {
+    DEFERRED_CASE_UPDATES.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+}
+
+/// 线程局部延迟事件守卫，确保请求处理结束或异常退出时自动清空暂存队列。
+struct DeferredCaseUpdateGuard;
+
+impl DeferredCaseUpdateGuard {
+    fn enter() -> Self {
+        let _ = drain_deferred_case_updates();
+        Self
+    }
+}
+
+impl Drop for DeferredCaseUpdateGuard {
+    fn drop(&mut self) {
+        let _ = drain_deferred_case_updates();
+    }
+}
 
 /// 直接从 [`tracedesk_mcp::TOOL_CATALOG`] 统一生成 19 个工具的目录。
 pub fn default_tool_catalog() -> Vec<ToolCatalogItem> {
@@ -126,10 +158,18 @@ impl LocalMcpHttpServer {
             .map_err(|err| format!("配置本地 MCP HTTP 监听套接字失败：{err}"))?;
 
         let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
-        let mcp_server = Arc::new(McpServer::new(
-            Some(app_state.app_paths.cases_dir.clone()),
-            None,
-        ));
+        let st_for_sink = Arc::clone(&app_state);
+        let mcp_server = Arc::new(
+            McpServer::new(Some(app_state.app_paths.cases_dir.clone()), None).with_activity_sink(
+                Arc::new(CallbackActivitySink::new(move |record: McpActivityRecord| {
+                    let is_completed_write = record.phase == "completed" && !record.read_only;
+                    st_for_sink.record_desktop_mcp_activity(record.clone(), false);
+                    if is_completed_write {
+                        push_deferred_case_update(record);
+                    }
+                })),
+            ),
+        );
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let running = Arc::new(AtomicBool::new(true));
@@ -590,12 +630,20 @@ fn handle_client_connection(
                     }
                 };
 
-                // 提取 HTTP 请求头（X-MCP-User / X-MCP-Client / X-Client-Name / 非通用 User-Agent）与会话标识。
-                let req_ctx = request_context_from_http_headers(&req.headers, session_id.clone());
+                // 提取 HTTP 请求头（X-MCP-User / X-MCP-Client / X-Client-Name / 非通用 User-Agent）与会话标识，并标记传输为 desktop-http。
+                let mut req_ctx =
+                    request_context_from_http_headers(&req.headers, session_id.clone());
+                req_ctx.transport = Some("desktop-http".to_string());
                 let target_dirs = extract_target_case_dirs(&parsed, &app_state.app_paths.cases_dir);
+                let _deferred_guard = DeferredCaseUpdateGuard::enter();
                 let resp_opt = app_state.coordinate_mcp_call(&target_dirs, || {
                     server.handle_jsonrpc_value_with_context(parsed, &req_ctx)
                 });
+                // 在 `coordinate_mcp_call` 重新打开桌面案件并刷新 `ViewCache` 之后再推送 `mcp:case-updated`，
+                // 防止前端立即拉取快照时读到刷新前的旧视图。
+                for completed_write in drain_deferred_case_updates() {
+                    let _ = app_state.emit_case_updated_if_matching(&completed_write);
+                }
 
                 match resp_opt {
                     None => {

@@ -2,13 +2,20 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedesk_core::{PAGE_BYTES, PREVIEW_ENCODINGS, format_commas};
 
-use crate::service::{CaseService, McpError, McpResult, sanitize_mcp_identity};
+use crate::activity::{
+    MAX_PREVIEW_BYTES, McpActivityRecord, McpActivitySink, default_file_activity_sink,
+    extract_case_info_from_output, format_error_summary, format_params_json,
+    format_success_result_summary, lookup_tool_meta, new_activity_id, now_east8_millis,
+    resolve_case_context, summarize_params, truncate_preview, unwrap_params_for_display,
+};
+use crate::service::{CaseService, McpError, McpResult, compose_mcp_client, sanitize_mcp_identity};
 
 /// MCP 服务端固定名称（`mcp-contract.md` §1.1）。
 pub const SERVER_NAME: &str = "tracedesk_mcp";
@@ -1920,6 +1927,8 @@ pub struct McpRequestContext {
     pub header_client: Option<String>,
     /// 非通用 `User-Agent` 提取的客户端标识（作为 `initialize.clientInfo` 缺失时的补充回退）。
     pub user_agent_client: Option<String>,
+    /// 传输方式标识（`"desktop-http"` / `"streamable-http"` / `"stdio"`）。
+    pub transport: Option<String>,
 }
 
 /// 从 MCP `initialize` 请求的 `params.clientInfo` 解析客户端标识（如 `"Cursor 1.2"` 或 `"claude-code"`）。
@@ -2013,6 +2022,7 @@ pub struct McpServer {
     tools: Arc<Vec<McpToolDefinition>>,
     resources: Arc<Vec<McpResourceDefinition>>,
     clients: Arc<Mutex<ClientRegistry>>,
+    activity_sink: Arc<RwLock<Option<Arc<dyn McpActivitySink>>>>,
 }
 
 impl McpServer {
@@ -2027,7 +2037,42 @@ impl McpServer {
             tools: Arc::new(build_tool_definitions()),
             resources: Arc::new(build_resource_definitions()),
             clients: Arc::new(Mutex::new(ClientRegistry::default())),
+            activity_sink: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// 链式配置实时活动遥测接收器。
+    pub fn with_activity_sink(self, sink: Arc<dyn McpActivitySink>) -> Self {
+        self.set_activity_sink(Some(sink));
+        self
+    }
+
+    /// 动态设置或移除实时活动遥测接收器。
+    pub fn set_activity_sink(&self, sink: Option<Arc<dyn McpActivitySink>>) {
+        if let Ok(mut guard) = self.activity_sink.write() {
+            *guard = sink;
+        }
+    }
+
+    /// 检查当前服务是否已绑定实时活动遥测接收器。
+    pub fn has_activity_sink(&self) -> bool {
+        self.activity_sink
+            .read()
+            .ok()
+            .is_some_and(|g| g.is_some())
+    }
+
+    /// 若尚未设置遥测接收器，则自动启用默认的跨进程 JSONL 文件遥测接收器（`<app_root>/logs/mcp-activity.jsonl`）。
+    pub fn ensure_default_file_activity_sink(&self) {
+        if let Ok(mut guard) = self.activity_sink.write()
+            && guard.is_none()
+        {
+            *guard = Some(default_file_activity_sink());
+        }
+    }
+
+    fn current_activity_sink(&self) -> Option<Arc<dyn McpActivitySink>> {
+        self.activity_sink.read().ok().and_then(|g| g.clone())
     }
 
     pub fn service(&self) -> &Arc<CaseService> {
@@ -2650,12 +2695,53 @@ impl McpServer {
             return None;
         }
 
+        let sink = self.current_activity_sink();
+        let transport = ctx
+            .transport
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("stdio")
+            .to_string();
+
         match method {
             "initialize" => {
+                let started_at = Instant::now();
                 let client_info = parse_initialize_client_info(&params);
                 if let Ok(mut guard) = self.clients.lock() {
                     guard.record_initialize(ctx.session_id.as_deref(), client_info);
                 }
+                let client_label = compose_mcp_client(
+                    ctx.header_user.as_deref(),
+                    self.resolve_client_for_context(ctx).as_deref(),
+                );
+                let call_id = new_activity_id();
+                let params_summary = summarize_params("initialize", &params);
+                let params_json = format_params_json(&params);
+                if let Some(ref activity_sink) = sink {
+                    activity_sink.emit(McpActivityRecord {
+                        id: new_activity_id(),
+                        call_id: call_id.clone(),
+                        timestamp: now_east8_millis(),
+                        phase: "started".to_string(),
+                        transport: transport.clone(),
+                        client: client_label.clone(),
+                        session_id: ctx.session_id.clone(),
+                        method: "initialize".to_string(),
+                        tool_name: None,
+                        tool_title: "客户端握手初始化".to_string(),
+                        category: "协议会话".to_string(),
+                        read_only: true,
+                        case_dir: None,
+                        case_number: None,
+                        params_summary: params_summary.clone(),
+                        params_json: params_json.clone(),
+                        duration_ms: None,
+                        result_summary: "执行中...".to_string(),
+                        response_preview: None,
+                        error: None,
+                    });
+                }
+
                 let requested_version = params
                     .get("protocolVersion")
                     .and_then(Value::as_str)
@@ -2664,26 +2750,55 @@ impl McpServer {
                     "2024-11-05" | "2025-03-26" | "2025-06-18" => requested_version,
                     _ => DEFAULT_PROTOCOL_VERSION,
                 };
-                Some(jsonrpc_result(
-                    id,
-                    json!({
-                        "protocolVersion": negotiated,
-                        "capabilities": {
-                            "tools": {
-                                "listChanged": false
-                            },
-                            "resources": {
-                                "subscribe": false,
-                                "listChanged": false
-                            }
+                let result_val = json!({
+                    "protocolVersion": negotiated,
+                    "capabilities": {
+                        "tools": {
+                            "listChanged": false
                         },
-                        "serverInfo": {
-                            "name": SERVER_NAME,
-                            "version": SERVER_VERSION
-                        },
-                        "instructions": SERVER_INSTRUCTIONS
-                    }),
-                ))
+                        "resources": {
+                            "subscribe": false,
+                            "listChanged": false
+                        }
+                    },
+                    "serverInfo": {
+                        "name": SERVER_NAME,
+                        "version": SERVER_VERSION
+                    },
+                    "instructions": SERVER_INSTRUCTIONS
+                });
+
+                if let Some(ref activity_sink) = sink {
+                    let preview_raw = to_pretty_json(&result_val);
+                    activity_sink.emit(McpActivityRecord {
+                        id: new_activity_id(),
+                        call_id,
+                        timestamp: now_east8_millis(),
+                        phase: "completed".to_string(),
+                        transport,
+                        client: client_label,
+                        session_id: ctx.session_id.clone(),
+                        method: "initialize".to_string(),
+                        tool_name: None,
+                        tool_title: "客户端握手初始化".to_string(),
+                        category: "协议会话".to_string(),
+                        read_only: true,
+                        case_dir: None,
+                        case_number: None,
+                        params_summary,
+                        params_json,
+                        duration_ms: Some(started_at.elapsed().as_millis() as u64),
+                        result_summary: format_success_result_summary(
+                            "initialize",
+                            &preview_raw,
+                            Some(negotiated),
+                        ),
+                        response_preview: Some(truncate_preview(&preview_raw, MAX_PREVIEW_BYTES)),
+                        error: None,
+                    });
+                }
+
+                Some(jsonrpc_result(id, result_val))
             }
             "notifications/initialized" | "initialized" | "ping" => {
                 Some(jsonrpc_result(id, json!({})))
@@ -2696,18 +2811,147 @@ impl McpServer {
                 }),
             )),
             "tools/call" => {
-                let Some(tool_name) = params.get("name").and_then(Value::as_str) else {
-                    return Some(jsonrpc_error(
-                        id,
-                        -32602,
-                        "Invalid params: tools/call requires string 'name'",
-                    ));
-                };
+                let started_at = Instant::now();
+                let call_id = new_activity_id();
+                let client_label = compose_mcp_client(
+                    ctx.header_user.as_deref(),
+                    self.resolve_client_for_context(ctx).as_deref(),
+                );
+                let tool_name_opt = params.get("name").and_then(Value::as_str);
                 let args = params
                     .get("arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
+                let display_args = unwrap_params_for_display(&args);
+                let (tool_title, category, read_only) = tool_name_opt
+                    .map(lookup_tool_meta)
+                    .unwrap_or_else(|| ("未知工具调用".to_string(), "未知工具".to_string(), true));
+                let (mut case_dir, mut case_number) =
+                    resolve_case_context(&args, self.service.cases_root());
+                let params_summary = summarize_params("tools/call", &display_args);
+                let params_json = format_params_json(&display_args);
+
+                if let Some(ref activity_sink) = sink {
+                    activity_sink.emit(McpActivityRecord {
+                        id: new_activity_id(),
+                        call_id: call_id.clone(),
+                        timestamp: now_east8_millis(),
+                        phase: "started".to_string(),
+                        transport: transport.clone(),
+                        client: client_label.clone(),
+                        session_id: ctx.session_id.clone(),
+                        method: "tools/call".to_string(),
+                        tool_name: tool_name_opt.map(str::to_string),
+                        tool_title: tool_title.clone(),
+                        category: category.clone(),
+                        read_only,
+                        case_dir: case_dir.clone(),
+                        case_number: case_number.clone(),
+                        params_summary: params_summary.clone(),
+                        params_json: params_json.clone(),
+                        duration_ms: None,
+                        result_summary: "执行中...".to_string(),
+                        response_preview: None,
+                        error: None,
+                    });
+                }
+
+                let Some(tool_name) = tool_name_opt else {
+                    let err_msg = "Invalid params: tools/call requires string 'name'";
+                    if let Some(ref activity_sink) = sink {
+                        activity_sink.emit(McpActivityRecord {
+                            id: new_activity_id(),
+                            call_id,
+                            timestamp: now_east8_millis(),
+                            phase: "failed".to_string(),
+                            transport,
+                            client: client_label,
+                            session_id: ctx.session_id.clone(),
+                            method: "tools/call".to_string(),
+                            tool_name: None,
+                            tool_title,
+                            category,
+                            read_only,
+                            case_dir,
+                            case_number,
+                            params_summary,
+                            params_json,
+                            duration_ms: Some(started_at.elapsed().as_millis() as u64),
+                            result_summary: format_error_summary(err_msg),
+                            response_preview: Some(err_msg.to_string()),
+                            error: Some(err_msg.to_string()),
+                        });
+                    }
+                    return Some(jsonrpc_error(id, -32602, err_msg));
+                };
+
                 let output = self.call_tool_with_context(tool_name, args, ctx);
+                if let Some(ref activity_sink) = sink {
+                    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                    let resp_text = output.text();
+                    if output.is_error {
+                        let truncated_err = truncate_preview(resp_text, MAX_PREVIEW_BYTES);
+                        activity_sink.emit(McpActivityRecord {
+                            id: new_activity_id(),
+                            call_id,
+                            timestamp: now_east8_millis(),
+                            phase: "failed".to_string(),
+                            transport,
+                            client: client_label,
+                            session_id: ctx.session_id.clone(),
+                            method: "tools/call".to_string(),
+                            tool_name: Some(tool_name.to_string()),
+                            tool_title,
+                            category,
+                            read_only,
+                            case_dir,
+                            case_number,
+                            params_summary,
+                            params_json,
+                            duration_ms: Some(elapsed_ms),
+                            result_summary: format_error_summary(resp_text),
+                            response_preview: Some(truncated_err.clone()),
+                            error: Some(truncated_err),
+                        });
+                    } else {
+                        if case_dir.is_none() || case_number.is_none() {
+                            let (out_dir, out_num) = extract_case_info_from_output(resp_text);
+                            if case_dir.is_none() {
+                                case_dir = out_dir;
+                            }
+                            if case_number.is_none() {
+                                case_number = out_num;
+                            }
+                        }
+                        activity_sink.emit(McpActivityRecord {
+                            id: new_activity_id(),
+                            call_id,
+                            timestamp: now_east8_millis(),
+                            phase: "completed".to_string(),
+                            transport,
+                            client: client_label,
+                            session_id: ctx.session_id.clone(),
+                            method: "tools/call".to_string(),
+                            tool_name: Some(tool_name.to_string()),
+                            tool_title,
+                            category,
+                            read_only,
+                            case_dir,
+                            case_number,
+                            params_summary,
+                            params_json,
+                            duration_ms: Some(elapsed_ms),
+                            result_summary: format_success_result_summary(
+                                "tools/call",
+                                resp_text,
+                                None,
+                            ),
+                            response_preview: Some(truncate_preview(resp_text, MAX_PREVIEW_BYTES)),
+                            error: None,
+                        });
+                    }
+                }
+
                 Some(jsonrpc_result(
                     id,
                     serde_json::to_value(output).unwrap_or_else(|_| json!({})),
@@ -2720,21 +2964,141 @@ impl McpServer {
                 }),
             )),
             "resources/read" => {
-                let Some(uri) = params.get("uri").and_then(Value::as_str) else {
-                    return Some(jsonrpc_error(
-                        id,
-                        -32602,
-                        "Invalid params: resources/read requires string 'uri'",
-                    ));
+                let started_at = Instant::now();
+                let call_id = new_activity_id();
+                let client_label = compose_mcp_client(
+                    ctx.header_user.as_deref(),
+                    self.resolve_client_for_context(ctx).as_deref(),
+                );
+                let uri_opt = params.get("uri").and_then(Value::as_str);
+                let params_summary = summarize_params("resources/read", &params);
+                let params_json = format_params_json(&params);
+
+                if let Some(ref activity_sink) = sink {
+                    activity_sink.emit(McpActivityRecord {
+                        id: new_activity_id(),
+                        call_id: call_id.clone(),
+                        timestamp: now_east8_millis(),
+                        phase: "started".to_string(),
+                        transport: transport.clone(),
+                        client: client_label.clone(),
+                        session_id: ctx.session_id.clone(),
+                        method: "resources/read".to_string(),
+                        tool_name: uri_opt.map(str::to_string),
+                        tool_title: "读取 MCP 资源".to_string(),
+                        category: "协议会话".to_string(),
+                        read_only: true,
+                        case_dir: None,
+                        case_number: None,
+                        params_summary: params_summary.clone(),
+                        params_json: params_json.clone(),
+                        duration_ms: None,
+                        result_summary: "执行中...".to_string(),
+                        response_preview: None,
+                        error: None,
+                    });
+                }
+
+                let Some(uri) = uri_opt else {
+                    let err_msg = "Invalid params: resources/read requires string 'uri'";
+                    if let Some(ref activity_sink) = sink {
+                        activity_sink.emit(McpActivityRecord {
+                            id: new_activity_id(),
+                            call_id,
+                            timestamp: now_east8_millis(),
+                            phase: "failed".to_string(),
+                            transport,
+                            client: client_label,
+                            session_id: ctx.session_id.clone(),
+                            method: "resources/read".to_string(),
+                            tool_name: None,
+                            tool_title: "读取 MCP 资源".to_string(),
+                            category: "协议会话".to_string(),
+                            read_only: true,
+                            case_dir: None,
+                            case_number: None,
+                            params_summary,
+                            params_json,
+                            duration_ms: Some(started_at.elapsed().as_millis() as u64),
+                            result_summary: format_error_summary(err_msg),
+                            response_preview: Some(err_msg.to_string()),
+                            error: Some(err_msg.to_string()),
+                        });
+                    }
+                    return Some(jsonrpc_error(id, -32602, err_msg));
                 };
+
                 match self.read_resource(uri) {
-                    Ok(content) => Some(jsonrpc_result(
-                        id,
-                        json!({
-                            "contents": [content]
-                        }),
-                    )),
-                    Err(err) => Some(jsonrpc_error(id, -32602, &err.to_string())),
+                    Ok(content) => {
+                        if let Some(ref activity_sink) = sink {
+                            let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                            activity_sink.emit(McpActivityRecord {
+                                id: new_activity_id(),
+                                call_id,
+                                timestamp: now_east8_millis(),
+                                phase: "completed".to_string(),
+                                transport,
+                                client: client_label,
+                                session_id: ctx.session_id.clone(),
+                                method: "resources/read".to_string(),
+                                tool_name: Some(uri.to_string()),
+                                tool_title: "读取 MCP 资源".to_string(),
+                                category: "协议会话".to_string(),
+                                read_only: true,
+                                case_dir: None,
+                                case_number: None,
+                                params_summary,
+                                params_json,
+                                duration_ms: Some(elapsed_ms),
+                                result_summary: format_success_result_summary(
+                                    "resources/read",
+                                    &content.text,
+                                    None,
+                                ),
+                                response_preview: Some(truncate_preview(
+                                    &content.text,
+                                    MAX_PREVIEW_BYTES,
+                                )),
+                                error: None,
+                            });
+                        }
+                        Some(jsonrpc_result(
+                            id,
+                            json!({
+                                "contents": [content]
+                            }),
+                        ))
+                    }
+                    Err(err) => {
+                        let err_text = err.to_string();
+                        if let Some(ref activity_sink) = sink {
+                            let elapsed_ms = started_at.elapsed().as_millis() as u64;
+                            let truncated_err = truncate_preview(&err_text, MAX_PREVIEW_BYTES);
+                            activity_sink.emit(McpActivityRecord {
+                                id: new_activity_id(),
+                                call_id,
+                                timestamp: now_east8_millis(),
+                                phase: "failed".to_string(),
+                                transport,
+                                client: client_label,
+                                session_id: ctx.session_id.clone(),
+                                method: "resources/read".to_string(),
+                                tool_name: Some(uri.to_string()),
+                                tool_title: "读取 MCP 资源".to_string(),
+                                category: "协议会话".to_string(),
+                                read_only: true,
+                                case_dir: None,
+                                case_number: None,
+                                params_summary,
+                                params_json,
+                                duration_ms: Some(elapsed_ms),
+                                result_summary: format_error_summary(&err_text),
+                                response_preview: Some(truncated_err.clone()),
+                                error: Some(truncated_err),
+                            });
+                        }
+                        Some(jsonrpc_error(id, -32602, &err_text))
+                    }
                 }
             }
             "resources/templates/list" => Some(jsonrpc_result(
