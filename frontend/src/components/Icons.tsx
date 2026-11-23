@@ -23,7 +23,15 @@ export type UiIconName =
   | 'collapse'
   | 'document_preview'
   | 'copy'
-  | 'lock_open';
+  | 'lock_open'
+  | 'refresh'
+  | 'trash'
+  | 'check_circle'
+  | 'x_circle'
+  | 'activity'
+  | 'settings'
+  | 'list'
+  | 'arrow_right';
 
 export type EntryIconKind = 'folder' | 'disk' | 'file' | 'image' | 'table' | 'system';
 
@@ -207,6 +215,70 @@ export const UiIcon: React.FC<UiIconProps> = ({
             <rect x="3.2" y="7.4" width="9.6" height="6.4" rx="1.5" fill="none" />
             <path d="M5.4 7.4 L5.4 4.9 C5.4 2.2 10.2 2.0 10.7 4.5" fill="none" />
             <circle cx="8.0" cy="10.6" r="0.9" fill={color} stroke="none" />
+          </>
+        );
+      case 'refresh':
+        return (
+          <>
+            <path d="M13.2 8.0 A5.2 5.2 0 1 1 11.7 4.3" fill="none" />
+            <polyline points="11.9,2.1 11.9,4.7 9.3,4.7" fill="none" />
+          </>
+        );
+      case 'trash':
+        return (
+          <>
+            <line x1="2.8" y1="4.2" x2="13.2" y2="4.2" />
+            <path d="M5.8 4.2 L6.3 2.5 L9.7 2.5 L10.2 4.2" fill="none" />
+            <path d="M4.2 4.2 L4.8 12.6 Q4.9 13.6 5.9 13.6 L10.1 13.6 Q11.1 13.6 11.2 12.6 L11.8 4.2" fill="none" />
+            <line x1="6.8" y1="6.8" x2="6.8" y2="11.0" />
+            <line x1="9.2" y1="6.8" x2="9.2" y2="11.0" />
+          </>
+        );
+      case 'check_circle':
+        return (
+          <>
+            <circle cx="8" cy="8" r="5.8" fill={softFill} />
+            <polyline points="5.4,8.2 7.2,10.0 10.8,6.2" fill="none" />
+          </>
+        );
+      case 'x_circle':
+        return (
+          <>
+            <circle cx="8" cy="8" r="5.8" fill={softFill} />
+            <line x1="5.8" y1="5.8" x2="10.2" y2="10.2" />
+            <line x1="10.2" y1="5.8" x2="5.8" y2="10.2" />
+          </>
+        );
+      case 'activity':
+        return (
+          <polyline points="1.8,8.4 4.6,8.4 6.4,3.4 9.6,12.6 11.4,8.4 14.2,8.4" fill="none" />
+        );
+      case 'settings':
+        return (
+          <>
+            <circle cx="8" cy="8" r="2.2" fill="none" />
+            <path
+              d="M8 2.2 L8 3.6 M8 12.4 L8 13.8 M2.2 8 L3.6 8 M12.4 8 L13.8 8 M3.9 3.9 L4.9 4.9 M11.1 11.1 L12.1 12.1 M12.1 3.9 L11.1 4.9 M4.9 11.1 L3.9 12.1"
+              fill="none"
+            />
+          </>
+        );
+      case 'list':
+        return (
+          <>
+            <circle cx="3.2" cy="4.4" r="0.8" fill={color} stroke="none" />
+            <line x1="5.6" y1="4.4" x2="13.2" y2="4.4" />
+            <circle cx="3.2" cy="8.0" r="0.8" fill={color} stroke="none" />
+            <line x1="5.6" y1="8.0" x2="13.2" y2="8.0" />
+            <circle cx="3.2" cy="11.6" r="0.8" fill={color} stroke="none" />
+            <line x1="5.6" y1="11.6" x2="13.2" y2="11.6" />
+          </>
+        );
+      case 'arrow_right':
+        return (
+          <>
+            <line x1="3.0" y1="8.0" x2="12.6" y2="8.0" />
+            <polyline points="9.2,4.6 12.8,8.0 9.2,11.4" fill="none" />
           </>
         );
       default:

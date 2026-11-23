@@ -19,7 +19,11 @@ import type {
   HexRowDto,
   ListAuditLogResponse,
   ListFindingsResponse,
+  ListMcpActivitiesParams,
   LocateFileResponse,
+  McpActivityRecord,
+  McpActivitySnapshot,
+  McpCaseUpdatedEvent,
   McpStatus,
   PreviewEncoding,
   PreviewImageResponse,
@@ -39,6 +43,7 @@ import type {
   TreeChildrenResponse,
   TreeNodeDto,
 } from '../types/ipc';
+import { computeMcpActivityStats } from '../utils/mcpActivity';
 
 type EventName =
   | 'task:progress'
@@ -46,7 +51,9 @@ type EventName =
   | 'hash:finished'
   | 'search:hits'
   | 'search:progress'
-  | 'search:finished';
+  | 'search:finished'
+  | 'mcp:activity'
+  | 'mcp:case-updated';
 
 type EventPayloadMap = {
   'task:progress': TaskProgressEvent;
@@ -55,6 +62,8 @@ type EventPayloadMap = {
   'search:hits': SearchHitsEvent;
   'search:progress': SearchProgressEvent;
   'search:finished': SearchFinishedEvent;
+  'mcp:activity': McpActivityRecord;
+  'mcp:case-updated': McpCaseUpdatedEvent;
 };
 
 type Listener<K extends EventName> = (payload: EventPayloadMap[K]) => void;
@@ -66,6 +75,8 @@ const listeners: { [K in EventName]: Set<Listener<K>> } = {
   'search:hits': new Set(),
   'search:progress': new Set(),
   'search:finished': new Set(),
+  'mcp:activity': new Set(),
+  'mcp:case-updated': new Set(),
 };
 
 export function demoListen<K extends EventName>(event: K, handler: Listener<K>): () => void {
@@ -511,6 +522,324 @@ const demoTimelineRows: TimelineRowDto[] = [
   { number: 7, time: '2026-03-10 09:30:40', event: 'M 内容修改', status: '现存', offset: 2048, inode: '11', path: 'LEDGER.CSV' },
   { number: 8, time: '2026-03-10 10:00:00', event: 'A 访问', status: '现存', offset: 2048, inode: '5', path: 'DOCS/CASE.TXT' },
 ];
+
+/** 浏览器演示模式下的 MCP 实时操作流示例（按最新时间倒序排列） */
+function buildInitialMcpActivities(): McpActivityRecord[] {
+  const demoCaseDir = 'C:\\TraceDesk\\cases\\DEMO-01-演示人员-FAT16演示镜像';
+  return [
+    {
+      id: 'act-008',
+      callId: 'call-demo-008',
+      timestamp: '2026-03-10 09:46:12.418',
+      phase: 'completed',
+      transport: 'desktop-http',
+      client: 'Antigravity 1.0',
+      sessionId: 'sess-ag-9f2a1c',
+      method: 'tools/call',
+      toolName: 'tracedesk_generate_report',
+      toolTitle: '生成 Markdown 报告',
+      category: '导出与报告',
+      readOnly: false,
+      caseDir: demoCaseDir,
+      caseNumber: 'DEMO-01',
+      paramsSummary: 'case=DEMO-01 · 校验后生成完整报告',
+      paramsJson: JSON.stringify(
+        {
+          case_dir: demoCaseDir,
+          include_audit_summary: true,
+        },
+        null,
+        2
+      ),
+      durationMs: 412,
+      resultSummary: '已完成整镜像复核并生成 reports/report_DEMO-01.md（写入审计链 #11）',
+      responsePreview: JSON.stringify(
+        {
+          ok: true,
+          report_path: `${demoCaseDir}\\reports\\report_DEMO-01.md`,
+          integrity_verified: true,
+          audit_seq: 11,
+        },
+        null,
+        2
+      ),
+      error: null,
+    },
+    {
+      id: 'act-007',
+      callId: 'call-demo-007',
+      timestamp: '2026-03-10 09:45:48.105',
+      phase: 'completed',
+      transport: 'desktop-http',
+      client: 'Antigravity 1.0',
+      sessionId: 'sess-ag-9f2a1c',
+      method: 'tools/call',
+      toolName: 'tracedesk_export_file',
+      toolTitle: '导出单个文件',
+      category: '导出与报告',
+      readOnly: false,
+      caseDir: demoCaseDir,
+      caseNumber: 'DEMO-01',
+      paramsSummary: 'path=DOCS/DRAFT_DEL.TXT · offset=2048 · inode=7（已删除）',
+      paramsJson: JSON.stringify(
+        {
+          case_dir: demoCaseDir,
+          offset: 2048,
+          inode: '7',
+          deleted: true,
+        },
+        null,
+        2
+      ),
+      durationMs: 186,
+      resultSummary: '已恢复导出已删除文件至 exports/DRAFT_DEL.TXT（81 字节）',
+      responsePreview: JSON.stringify(
+        {
+          title: '导出成功',
+          output_path: `${demoCaseDir}\\exports\\DRAFT_DEL.TXT`,
+          bytes_written: 81,
+          sha256: '9c1d4f20a87b3e61d504c2f891a3b7e4c6d0f8123456789abcdef01234567890',
+        },
+        null,
+        2
+      ),
+      error: null,
+    },
+    {
+      id: 'act-006',
+      callId: 'call-demo-006',
+      timestamp: '2026-03-10 09:45:03.729',
+      phase: 'failed',
+      transport: 'desktop-http',
+      client: 'Antigravity 1.0',
+      sessionId: 'sess-ag-9f2a1c',
+      method: 'tools/call',
+      toolName: 'tracedesk_export_file',
+      toolTitle: '导出单个文件',
+      category: '导出与报告',
+      readOnly: false,
+      caseDir: demoCaseDir,
+      caseNumber: 'DEMO-01',
+      paramsSummary: 'path=$MBR · offset=2048 · inode=0',
+      paramsJson: JSON.stringify(
+        {
+          case_dir: demoCaseDir,
+          offset: 2048,
+          inode: '0',
+          path: '$MBR',
+        },
+        null,
+        2
+      ),
+      durationMs: 19,
+      resultSummary: '导出被拒绝：系统保留区域不支持作为常规文件导出',
+      responsePreview: null,
+      error: '条目「$MBR」（模式 v/vrwxrwxrwx）属于文件系统保留区域，不可直接导出；请使用 tracedesk_preview_file 以十六进制方式只读查看。',
+    },
+    {
+      id: 'act-005',
+      callId: 'call-demo-005',
+      timestamp: '2026-03-10 09:44:22.614',
+      phase: 'completed',
+      transport: 'desktop-http',
+      client: 'Antigravity 1.0',
+      sessionId: 'sess-ag-9f2a1c',
+      method: 'tools/call',
+      toolName: 'tracedesk_record_finding',
+      toolTitle: '记录取证发现',
+      category: '取证发现',
+      readOnly: false,
+      caseDir: demoCaseDir,
+      caseNumber: 'DEMO-01',
+      paramsSummary: 'path=DOCS/DRAFT_DEL.TXT · 笔记="命中 transfer_id=TD-2026-0091"',
+      paramsJson: JSON.stringify(
+        {
+          case_dir: demoCaseDir,
+          offset: 2048,
+          inode: '7',
+          deleted: true,
+          note: '命中 transfer_id=TD-2026-0091，已删除草稿包含机密复核记录，需纳入复核包。',
+        },
+        null,
+        2
+      ),
+      durationMs: 64,
+      resultSummary: '已写入结构化取证发现并绑定镜像 SHA-256 基线',
+      responsePreview: JSON.stringify(
+        {
+          saved: true,
+          subject: 'DOCS/DRAFT_DEL.TXT',
+          audit_seq: 9,
+        },
+        null,
+        2
+      ),
+      error: null,
+    },
+    {
+      id: 'act-004',
+      callId: 'call-demo-004',
+      timestamp: '2026-03-10 09:43:51.092',
+      phase: 'completed',
+      transport: 'desktop-http',
+      client: 'Antigravity 1.0',
+      sessionId: 'sess-ag-9f2a1c',
+      method: 'tools/call',
+      toolName: 'tracedesk_search_content',
+      toolTitle: '搜索文件内容',
+      category: '文件分析',
+      readOnly: false,
+      caseDir: demoCaseDir,
+      caseNumber: 'DEMO-01',
+      paramsSummary: 'query="TD-2026-0091" · encoding=UTF-8 · 范围=全案',
+      paramsJson: JSON.stringify(
+        {
+          case_dir: demoCaseDir,
+          query: 'TD-2026-0091',
+          encoding: 'UTF-8',
+        },
+        null,
+        2
+      ),
+      durationMs: 248,
+      resultSummary: '检索 5 个文件，命中 1 处（DOCS/DRAFT_DEL.TXT 字节偏移 36）',
+      responsePreview: JSON.stringify(
+        {
+          visited: 5,
+          total_hits: 1,
+          hits: [
+            {
+              path: 'DOCS/DRAFT_DEL.TXT',
+              offset: 2048,
+              inode: '7',
+              deleted: true,
+              pos: 36,
+            },
+          ],
+        },
+        null,
+        2
+      ),
+      error: null,
+    },
+    {
+      id: 'act-003',
+      callId: 'call-demo-003',
+      timestamp: '2026-03-10 09:42:18.342',
+      phase: 'completed',
+      transport: 'stdio',
+      client: 'Cursor 1.2',
+      sessionId: 'stdio-pid-18420',
+      method: 'tools/call',
+      toolName: 'tracedesk_examine_file',
+      toolTitle: '计算文件哈希/比对',
+      category: '文件分析',
+      readOnly: false,
+      caseDir: demoCaseDir,
+      caseNumber: 'DEMO-01',
+      paramsSummary: 'path=DOCS/CASE.TXT · offset=2048 · inode=5',
+      paramsJson: JSON.stringify(
+        {
+          case_dir: demoCaseDir,
+          offset: 2048,
+          inode: '5',
+        },
+        null,
+        2
+      ),
+      durationMs: 52,
+      resultSummary: '已从只读镜像计算 SHA-256：4d91a3f28b0c7e65…（112 字节）',
+      responsePreview: JSON.stringify(
+        {
+          path: 'DOCS/CASE.TXT',
+          size: 112,
+          sha256: '4d91a3f28b0c7e65d1a9f4c2e38b7a605d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a',
+          source_verification: '通过（与初始固定值一致）',
+        },
+        null,
+        2
+      ),
+      error: null,
+    },
+    {
+      id: 'act-002',
+      callId: 'call-demo-002',
+      timestamp: '2026-03-10 09:41:36.881',
+      phase: 'completed',
+      transport: 'desktop-http',
+      client: 'Antigravity 1.0',
+      sessionId: 'sess-ag-9f2a1c',
+      method: 'tools/call',
+      toolName: 'tracedesk_verify_integrity',
+      toolTitle: '校验完整性',
+      category: '证据镜像',
+      readOnly: false,
+      caseDir: demoCaseDir,
+      caseNumber: 'DEMO-01',
+      paramsSummary: 'case=DEMO-01 · 复算整镜像 SHA-256',
+      paramsJson: JSON.stringify(
+        {
+          case_dir: demoCaseDir,
+        },
+        null,
+        2
+      ),
+      durationMs: 315,
+      resultSummary: '整镜像 SHA-256 校验通过（与初始固定值一致）',
+      responsePreview: JSON.stringify(
+        {
+          ok: true,
+          expected_sha256: DEMO_SHA256,
+          actual_sha256: DEMO_SHA256,
+          checked_at: '2026-03-10 09:41:36',
+        },
+        null,
+        2
+      ),
+      error: null,
+    },
+    {
+      id: 'act-001',
+      callId: 'call-demo-001',
+      timestamp: '2026-03-10 09:41:10.120',
+      phase: 'completed',
+      transport: 'stdio',
+      client: 'Antigravity 1.0',
+      sessionId: 'stdio-pid-18392',
+      method: 'tools/call',
+      toolName: 'tracedesk_get_case_summary',
+      toolTitle: '案件总览',
+      category: '案件管理',
+      readOnly: true,
+      caseDir: demoCaseDir,
+      caseNumber: 'DEMO-01',
+      paramsSummary: 'case=DEMO-01',
+      paramsJson: JSON.stringify(
+        {
+          case_dir: demoCaseDir,
+        },
+        null,
+        2
+      ),
+      durationMs: 28,
+      resultSummary: '已读取案件 DEMO-01 摘要 · 1 个分区 · 7 项文件 · 审计链有效',
+      responsePreview: JSON.stringify(
+        {
+          case_number: 'DEMO-01',
+          examiner: '演示人员',
+          partitions: 1,
+          inventory_count: 7,
+          audit_chain_valid: true,
+        },
+        null,
+        2
+      ),
+      error: null,
+    },
+  ];
+}
+
+let demoMcpActivities: McpActivityRecord[] = buildInitialMcpActivities();
 
 function bytesToHexRows(bytes: Uint8Array, pageOffset: number): HexRowDto[] {
   const rows: HexRowDto[] = [];
@@ -1273,6 +1602,50 @@ export const demoBackend = {
   async stop_mcp_http(): Promise<McpStatus> {
     mcpRunning = false;
     return this.get_mcp_status({ port: mcpPort });
+  },
+
+  async list_mcp_activities(args?: ListMcpActivitiesParams): Promise<McpActivitySnapshot> {
+    const keyword = (args?.keyword || '').trim().toLowerCase();
+    const client = args?.client?.trim() || '';
+    const status = args?.status?.trim() || '';
+    const transport = args?.transport?.trim() || '';
+    const limit = args?.limit && args.limit > 0 ? args.limit : 500;
+
+    let items = demoMcpActivities.filter((item) => {
+      if (client && item.client !== client) return false;
+      if (status && item.phase !== status) return false;
+      if (transport && item.transport !== transport) return false;
+      if (keyword) {
+        const hay = [
+          item.toolTitle,
+          item.toolName ?? '',
+          item.method,
+          item.client,
+          item.caseNumber ?? '',
+          item.paramsSummary,
+          item.resultSummary,
+          item.error ?? '',
+        ]
+          .join(' ')
+          .toLowerCase();
+        if (!hay.includes(keyword)) return false;
+      }
+      return true;
+    });
+
+    if (items.length > limit) {
+      items = items.slice(0, limit);
+    }
+
+    return {
+      activities: items,
+      stats: computeMcpActivityStats(demoMcpActivities),
+    };
+  },
+
+  async clear_mcp_activities(): Promise<{ cleared: boolean }> {
+    demoMcpActivities = [];
+    return { cleared: true };
   },
 
   async open_in_os(): Promise<{ ok: boolean }> {

@@ -424,7 +424,81 @@ export interface McpStatus {
   activeCaseNumber: string | null;
 }
 
+/** MCP 实时监控操作阶段 */
+export type McpActivityPhase = 'started' | 'completed' | 'failed';
+
+/** MCP 传输通道类型 */
+export type McpTransportKind = 'desktop-http' | 'streamable-http' | 'stdio';
+
+/** 单条 MCP 实时调用记录 */
+export interface McpActivityRecord {
+  id: string;
+  callId: string;
+  timestamp: string;
+  phase: McpActivityPhase;
+  transport: McpTransportKind;
+  client: string;
+  sessionId?: string | null;
+  method: string;
+  toolName?: string | null;
+  toolTitle: string;
+  category: string;
+  readOnly: boolean;
+  caseDir?: string | null;
+  caseNumber?: string | null;
+  paramsSummary: string;
+  paramsJson: string;
+  durationMs?: number | null;
+  resultSummary: string;
+  responsePreview?: string | null;
+  error?: string | null;
+}
+
+/** 单个 MCP 工具累计调用统计 */
+export interface McpToolStat {
+  toolName: string;
+  calls: number;
+  failures: number;
+  avgDurationMs: number;
+}
+
+/** MCP 实时监控汇总统计 */
+export interface McpActivityStats {
+  totalCalls: number;
+  runningCalls: number;
+  succeededCalls: number;
+  failedCalls: number;
+  readOnlyCalls: number;
+  writeCalls: number;
+  avgDurationMs: number;
+  activeClients: string[];
+  toolStats: Record<string, McpToolStat>;
+}
+
+/** 查询 MCP 实时活动列表返回快照 */
+export interface McpActivitySnapshot {
+  activities: McpActivityRecord[];
+  stats: McpActivityStats;
+}
+
+/** 查询 MCP 活动记录入参 */
+export interface ListMcpActivitiesParams {
+  limit?: number;
+  client?: string | null;
+  status?: string | null;
+  transport?: string | null;
+  keyword?: string | null;
+}
+
 /* ---------- 流式事件载荷 (§3.6) ---------- */
+
+/** MCP 对案件执行变更后的通知事件 */
+export interface McpCaseUpdatedEvent {
+  caseDir: string;
+  toolName: string;
+  client: string;
+  timestamp: string;
+}
 
 export interface TaskProgressEvent {
   stage: string;
