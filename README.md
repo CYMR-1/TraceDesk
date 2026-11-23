@@ -17,7 +17,7 @@
 | `demo.dd` 端到端闭环总耗时（含真实 TSK） | 1,535.75 ms | **727.74 ms** | **2.11×** |
 | 纯 Rust EWF1 多段并行校验 / SIMD 搜索吞吐 | — | **501.69 MiB/s** / **14.44 GiB/s** | 原生并发 |
 
-三大 Release 原生二进制体积紧凑：`tracedesk-desktop.exe` **19.38 MiB**（已内嵌 `frontend/dist` 生产资源）、`tracedesk-mcp.exe` **5.45 MiB**、`tracedesk-cli.exe` **4.43 MiB**。
+三大 Release 原生二进制体积紧凑：`tracedesk-desktop.exe` **19.71 MiB**（已内嵌 `frontend/dist` 生产资源）、`tracedesk-mcp.exe` **5.59 MiB**、`tracedesk-cli.exe` **4.44 MiB**。
 
 ## 目录导航
 
@@ -26,10 +26,10 @@
 | `Cargo.toml`、`启动取证工作台.bat` | Rust 工作区（5 个成员）与一键构建/启动入口 |
 | `crates/tracedesk-engines/` | 底层只读取证引擎：TSK 白名单、纯 Rust EWF1 并行解码、FAT/NTFS、卷随机读取与 Windows 拒写句柄 |
 | `crates/tracedesk-core/` | 案件隔离、SHA-256 审计链、目录树索引、时间线、9 编码与图片预览、SIMD 并行搜索、报告与 ZIP64 复核包 |
-| `crates/tracedesk-mcp/` | 标准 MCP 服务端 `tracedesk-mcp.exe`（19 工具 + 2 资源，支持 `stdio` 与仅回环 `Streamable HTTP`） |
+| `crates/tracedesk-mcp/` | 标准 MCP 服务端 `tracedesk-mcp.exe`（19 工具 + 2 资源、跨进程实时遥测与统计，支持 `stdio` 与仅回环 `Streamable HTTP`） |
 | `crates/tracedesk-cli/` | 命令行工具 `tracedesk-cli.exe`（`run-demo`、`make-demo`、`verify-bundle`、`bench`） |
-| `src-tauri/` | Tauri 2 原生桌面宿主 `tracedesk-desktop.exe`（38 项 IPC 命令、6 项流式事件与内嵌 HTTP MCP 托管） |
-| `frontend/` | Vite + React 19 + TypeScript 桌面工作台前端（明净瓷白与晴空蓝浅色视觉规范、虚拟表格与 9 份图文引导） |
+| `src-tauri/` | Tauri 2 原生桌面宿主 `tracedesk-desktop.exe`（49 项 IPC 命令、8 项流式事件、跨进程 MCP 遥测尾随与内嵌 HTTP MCP 托管） |
+| `frontend/` | Vite + React 19 + TypeScript 桌面工作台前端（明净瓷白与晴空蓝浅色视觉规范、虚拟表格、MCP 实时监控主工作区与 9 份图文引导） |
 | `scripts/install_tsk.ps1` | 官方 Sleuth Kit 4.15.0 下载与 SHA-256 校验脚本 |
 | `docs/` | 目录结构维护指南、设计与验收说明及实测验证记录 |
 | `evidence/`、`cases/`、`tools/` | 源证据输入、案件输出目录、官方第三方 TSK 工具 |
@@ -107,6 +107,7 @@ cargo test --workspace
 4. **校验与导出**：点击“校验完整性”后选择现存或已删除文件导出至 `exports/`（重名放入 `同名副本-*` 子目录保留原名），导出前后均校验原镜像并记录副本 SHA-256。
 5. **取证发现与内容搜索**：右键文件可记录取证发现、计算单文件 SHA-256 或与本地副本比对；“内容搜索与复核”支持 UTF-8 / UTF-16LE / GBK / HEX 精确字节并行搜索、流式实时展示、三态全选、分区偏移筛选、排除与批量保存为取证发现；“取证发现”页支持按文件归组查看并一键批量导出副本与汇总清单。
 6. **时间线、审计、报告与复核包**：在“MACB 时间线”“审计日志”中双击打开双栏详情（区分 `[人工]` 与 `[MCP · <使用者>]` 来源、支持按调用方精筛并展示前后哈希），点击“生成 Markdown 报告”输出 10 章节中文报告，点击“导出复核包”按需勾选导出副本与搜索记录生成 ZIP64 复核包及 `.zip.sha256`（包内同时附带独立 `verify_bundle.py`，也可使用 `tracedesk-cli verify-bundle` 毫秒级核验）。
+7. **MCP 实时监控**：切换至主工作区 **MCP 实时监控** 标签页（或在顶部 **MCP 服务** 按钮查看实时脉冲指示），即时透视外部 AI 客户端每一步工具调用的起止过程、入参 JSON 与返回预览、19 项工具调用统计及案件热刷新状态。
 
 ## 大容量镜像（≥1 GiB）
 
@@ -149,6 +150,15 @@ TraceDesk 内置原生标准 Model Context Protocol（MCP）服务端 `tracedesk
 ```
 
 支持 `--cases-dir`、`--actor` 参数及环境变量 `TRACEDESK_CASES_DIR`、`TRACEDESK_MCP_ACTOR`。在桌面工作台点击顶部 **MCP 服务** 按钮，可直接一键复制客户端 JSON 配置、启停内嵌本地 HTTP MCP 服务，并在桌面端打开案件时与 MCP 调用平滑协调 `case.lock` 或一键释放案件锁。
+
+### MCP 实时监控与案件自动热刷新
+
+桌面工作台内置 **MCP 实时监控** 主工作区标签页，结合 `crates/tracedesk-mcp/src/activity.rs` 与桌面宿主后台尾随推送，完整可视外部 AI 客户端的实时取证过程：
+
+- **跨进程全通道实时监控**：同时汇聚桌面端内嵌 HTTP（`desktop-http`）、独立 HTTP 进程（`streamable-http`）与外部客户端拉起的独立 `stdio` 子进程三类通道活动。`desktop-http` 通过进程内事件直推前端（`mcp:activity`），独立 `stdio` / `streamable-http` 进程同步追加写入 `logs/mcp-activity.jsonl`（超过 1,200 行自动温和截断保留最近 600 行），桌面端以低开销增量字节尾随线程实时汇聚并按 `callId` 原位更新“执行中 → 成功 / 失败”状态。
+- **单步参数与结果透视**：支持按阶段（执行中/成功/失败）、只读/受控写入、调用方客户端、传输通道与关键词多维筛选；右侧可拖拽分栏展示单步调用的完整时间戳、耗时、来源与目标案件、美化后的入参 JSON、返回结果预览（超 16 KiB 安全截断）及失败错误详情，并支持一键跳转审计日志核查哈希链。
+- **19 工具调用统计与接入配置**：内置四项紧凑遥测指标卡（总调用/执行中、成功率与平均耗时、活跃客户端、只读与受控写入占比）以及“实时操作流 / 接入配置 / 工具清单与调用统计”三合一子视图，集中呈现全部 **19 项 MCP 工具**的累计调用次数、失败次数与平均耗时。
+- **案件自动热刷新**：当任意 MCP 进程对桌面端当前已打开的案件完成受控写入（如加载镜像、扫描分区、记录发现、生成报告或导出复核包）后，宿主自动发出 `mcp:case-updated` 事件并触发当前案件视图平滑热刷新（同步刷新案件快照、文件浏览、发现、时间线与审计日志），无需手动关闭重开案件。
 
 ## 第三方依赖与 AI 参与
 
