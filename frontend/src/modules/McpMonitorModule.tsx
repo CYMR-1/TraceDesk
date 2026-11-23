@@ -1,6 +1,6 @@
 /**
  * 模块 7：MCP 实时监控主工作区 (mcp)
- * - 顶部控制与状态条：本地 Streamable HTTP 启停、活跃客户端胶囊、case.lock 提醒与一键释放、刷新/清空
+ * - 顶部控制与状态条：本地 Streamable HTTP 启停、活跃客户端胶囊、桌面与 MCP 实时协同提示条、刷新/清空
  * - 四项紧凑遥测指标卡：总调用/执行中、成功率与平均耗时、活跃客户端、只读 vs 受控写入
  * - 三合一子视图：
  *   ① 实时操作流（默认）：筛选栏 + 左右可拖拽分栏（时间线步骤流 + 单步详情透视面板）
@@ -39,7 +39,6 @@ interface McpMonitorModuleProps {
   onStatusChange: (next: McpStatus) => void;
   onRefreshAll: () => Promise<void>;
   onClearActivities: () => Promise<void>;
-  onCaseReleased: () => void;
   onJumpToAudit: () => void;
   onRefreshCurrentCase: () => Promise<void>;
 }
@@ -64,7 +63,6 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
   onStatusChange,
   onRefreshAll,
   onClearActivities,
-  onCaseReleased,
   onJumpToAudit,
   onRefreshCurrentCase,
 }) => {
@@ -252,26 +250,6 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
       }
     } catch (err) {
       setErrorMsg(`MCP 服务操作失败：${formatError(err)}`);
-    } finally {
-      setActionBusy(false);
-    }
-  };
-
-  // 一键释放桌面端持有的案件锁 case.lock
-  const handleReleaseCase = async () => {
-    setActionBusy(true);
-    setErrorMsg(null);
-    try {
-      const res = await tauriApi.closeCase();
-      if (res.closed) {
-        const releasedNum = snapshot?.number ?? mcpStatus?.activeCaseNumber ?? '';
-        onCaseReleased();
-        const next = await tauriApi.getMcpStatus({ port });
-        onStatusChange(next);
-        showFeedback(`已关闭案件「${releasedNum}」并释放 case.lock，外部 MCP 客户端可安全写入`);
-      }
-    } catch (err) {
-      setErrorMsg(`释放案件锁失败：${formatError(err)}`);
     } finally {
       setActionBusy(false);
     }
@@ -536,23 +514,22 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
         </div>
       </div>
 
-      {/* 案件锁提示条（桌面端持有 case.lock 时展示） */}
+      {/* 桌面与 MCP 实时协同提示条（仅写入瞬间加短锁，外部 stdio/HTTP 可直接操作并热刷新） */}
       {activeCaseNumber && (
-        <div className="td-mcp-lock-strip">
-          <UiIcon name="warning" size={15} color="var(--warn-fg)" />
+        <div className="td-mcp-collab-strip">
+          <span className="td-mcp-dot td-mcp-dot--online" />
           <span style={{ flex: 1 }}>
-            桌面端当前已打开案件「{activeCaseNumber}」并持有 <code className="td-mono">case.lock</code>
-            。外部 MCP 客户端对该案件执行受控写入前，可先点击右侧按钮一键释放案件锁。
+            桌面与 MCP 实时协同已就绪：案件「{activeCaseNumber}」采用仅写入瞬间短锁，外部 stdio 与 HTTP 客户端可直接操作并实时同步界面
           </span>
           <button
             type="button"
-            className="td-btn td-btn--warningAction"
-            style={{ minHeight: 24, padding: '2px 10px', fontSize: 12 }}
-            disabled={actionBusy}
-            onClick={() => void handleReleaseCase()}
+            className="td-btn td-btn--compact"
+            disabled={refreshing || actionBusy}
+            onClick={() => void onRefreshCurrentCase()}
+            title="立即同步当前案件快照与审计日志"
           >
-            <UiIcon name="lock_open" size={13} color="var(--warn-fg)" />
-            释放当前案件锁
+            <UiIcon name="refresh" size={12} color="#0F766E" />
+            立即同步
           </button>
         </div>
       )}

@@ -12,7 +12,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lru::LruCache;
 use serde::Serialize;
@@ -87,6 +87,9 @@ impl From<std::io::Error> for McpError {
 pub type McpResult<T> = Result<T, McpError>;
 
 const READ_CACHE_CAPACITY: usize = 16;
+
+/// MCP 访问案件 `case.lock` 时的默认短锁排队等待时长（与桌面端仅写入瞬间短锁协同）。
+pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// 当人工使用者与客户端标识均缺失时的默认 MCP 调用方回退标记。
 pub const DEFAULT_MCP_CLIENT_LABEL: &str = "本地 MCP 客户端";
@@ -395,7 +398,7 @@ pub fn paginate<T: Serialize>(items: &[T], limit: usize, offset: usize) -> Value
 
 fn lock_contention_error(folder: &Path) -> McpError {
     McpError::RuntimeError(format!(
-        "案件目录 {} 当前已被 TraceDesk 桌面端或其他进程锁定。请先在桌面端关闭该案件或切换至其他案件后再重试。",
+        "案件目录 {} 当前正被 TraceDesk 桌面端或其他进程写入锁定（等待超时），请稍后重试。",
         folder.display()
     ))
 }
@@ -429,10 +432,12 @@ pub fn force_release_case_lock(case_dir: &Path) -> McpResult<bool> {
     Ok(true)
 }
 
-/// 面向 MCP 工具的案件与证据编排服务，按单次调用安全加锁并及时释放 `case.lock`。
+/// 面向 MCP 工具的案件与证据编排服务，按单次调用以短锁排队安全加锁并及时释放 `case.lock`。
 pub struct CaseService {
     cases_root: PathBuf,
     default_actor: Option<String>,
+    /// 打开或读写案件时等待 `case.lock` 的最大排队超时，默认 3 秒。
+    lock_timeout: Duration,
     cache: Mutex<ServiceCache>,
 }
 
@@ -449,8 +454,20 @@ impl CaseService {
         Self {
             cases_root: resolved_root,
             default_actor: clean_actor,
+            lock_timeout: DEFAULT_LOCK_TIMEOUT,
             cache: Mutex::new(ServiceCache::new()),
         }
+    }
+
+    /// 配置 `case.lock` 短锁排队等待超时（例如测试中可设为 0ms 或短超时快速验证锁冲突）。
+    pub fn with_lock_timeout(mut self, timeout: Duration) -> Self {
+        self.lock_timeout = timeout;
+        self
+    }
+
+    /// 返回当前配置的 `case.lock` 排队等待超时。
+    pub fn lock_timeout(&self) -> Duration {
+        self.lock_timeout
     }
 
     pub fn cases_root(&self) -> &Path {
@@ -532,15 +549,17 @@ impl CaseService {
         (explicit_actor, mcp_client)
     }
 
-    /// 打开案件并持有 `case.lock`（固定 `AuditOrigin::Mcp` 且写入 `mcp_client`），随返回值 `Drop` 自动释放锁。
+    /// 打开案件并按配置的 `lock_timeout` 排队获取 `case.lock`（固定 `AuditOrigin::Mcp` 且写入 `mcp_client`），
+    /// 随返回值 `Drop` 自动释放锁。
     pub fn open_case(&self, case_dir: &str, actor: Option<&str>) -> McpResult<Case> {
         let folder = self.resolve_case_dir(case_dir)?;
         let (explicit_actor, mcp_client) = self.resolve_caller_identity(actor);
-        match Case::open_with_mcp_client(
+        match Case::open_with_mcp_client_and_timeout(
             &folder,
             explicit_actor.as_deref(),
             AuditOrigin::Mcp,
             Some(&mcp_client),
+            self.lock_timeout,
         ) {
             Ok(case) => Ok(case),
             Err(err) if err.is_locked() => Err(lock_contention_error(&folder)),
@@ -579,7 +598,7 @@ impl CaseService {
         arc_records
     }
 
-    /// 在持有 `case.lock` 的前提下获取只读 [`CachedCaseView`]（命中缓存时免除 gunzip 开销）。
+    /// 在短锁排队获取 `case.lock` 的前提下获取只读 [`CachedCaseView`]（命中缓存时免除 gunzip 开销）。
     fn with_read_case_view<F, R>(
         &self,
         case_dir: &str,
@@ -590,7 +609,7 @@ impl CaseService {
         F: FnOnce(&Path, &Arc<CachedCaseView>) -> McpResult<R>,
     {
         let folder = self.resolve_case_dir(case_dir)?;
-        let lease = CaseFileLock::acquire(&folder.join("case.lock"))
+        let lease = CaseFileLock::acquire_with_timeout(&folder.join("case.lock"), self.lock_timeout)
             .map_err(|_| lock_contention_error(&folder))?;
 
         if let Some(expected_key) = compute_case_cache_key(&folder) {

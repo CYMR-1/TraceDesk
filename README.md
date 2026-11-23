@@ -135,7 +135,7 @@ TraceDesk 内置原生标准 Model Context Protocol（MCP）服务端 `tracedesk
 - **发现、时间线与审计**：`tracedesk_record_finding`、`tracedesk_list_findings`、`tracedesk_query_timeline`、`tracedesk_query_audit_log`
 - **导出与报告**：`tracedesk_export_file`、`tracedesk_export_findings`、`tracedesk_generate_report`、`tracedesk_build_review_bundle`
 
-所有受控写操作以 `origin="mcp"` 记入案件 SHA-256 审计链（桌面端人工操作为 `origin="manual"`），单次调用结束后立即释放 `case.lock`；Streamable HTTP 模式仅允许绑定回环地址（`127.0.0.1` / `localhost` / `::1`）并启用 DNS 重绑定校验（非法 `Host` 返回 `421`、非法 `Origin` 返回 `403`、请求体上限 `16 MiB`）。
+所有受控写操作以 `origin="mcp"` 记入案件 SHA-256 审计链（桌面端人工操作为 `origin="manual"`）。桌面端与 MCP 服务统一采用**仅写入瞬间短锁 + 实时自动同步**机制：桌面端打开案件浏览期间不长期占用 `case.lock`，写入瞬间自动排队加短锁并同步磁盘指纹、落盘后立即释放，外部 `stdio` 与 `HTTP` 客户端可直接对当前打开的案件执行读写操作（无需关闭案件或手动释放锁）；Streamable HTTP 模式仅允许绑定回环地址（`127.0.0.1` / `localhost` / `::1`）并启用 DNS 重绑定校验（非法 `Host` 返回 `421`、非法 `Origin` 返回 `403`、请求体上限 `16 MiB`）。
 
 当审计日志来源为 MCP 时，服务端会自动采集并标记使用者与客户端身份：按优先级结合 `initialize` 握手的 `clientInfo`（并按 `Mcp-Session-Id` 或 `stdio` 会话关联）、HTTP 请求头 `X-MCP-User` / `X-MCP-Client`（或 `X-Client-Name`）及非通用 `User-Agent`，以及命令行 `--actor`、环境变量 `TRACEDESK_MCP_ACTOR` 与工具参数 `actor` 综合识别调用方；最终统一以 `MCP · <使用者>`（同时具备使用者与客户端时为 `MCP · <使用者> / <客户端>`）展示在桌面端审计日志（支持按具体调用方筛选与检索）、取证发现、Markdown 报告与 `tracedesk_query_audit_log` 输出中，并完整纳入 `audit.jsonl` 的 SHA-256 哈希链防篡改保护。
 
@@ -149,7 +149,7 @@ TraceDesk 内置原生标准 Model Context Protocol（MCP）服务端 `tracedesk
 .\target\release\tracedesk-mcp.exe --transport streamable-http --host 127.0.0.1 --port 8765 --path /mcp
 ```
 
-支持 `--cases-dir`、`--actor` 参数及环境变量 `TRACEDESK_CASES_DIR`、`TRACEDESK_MCP_ACTOR`。在桌面工作台点击顶部 **MCP 服务** 按钮，可直接一键复制客户端 JSON 配置、启停内嵌本地 HTTP MCP 服务，并在桌面端打开案件时与 MCP 调用平滑协调 `case.lock` 或一键释放案件锁。
+支持 `--cases-dir`、`--actor` 参数及环境变量 `TRACEDESK_CASES_DIR`、`TRACEDESK_MCP_ACTOR`。在桌面工作台点击顶部 **MCP 服务** 按钮，可直接一键复制客户端 JSON 配置、启停内嵌本地 HTTP MCP 服务，并在保持案件打开的同时实时监控外部 `stdio` 与 `HTTP` 客户端协同操作（采用仅写入瞬间短锁，无需手动释放锁）。
 
 ### MCP 实时监控与案件自动热刷新
 

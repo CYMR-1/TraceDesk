@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter};
 use tracedesk_core::{
-    AppPaths, AuditOrigin, BrowserIndex, Case, EvidenceInfo, TimelineIndex, can_export,
-    coverage_text, deleted_source_note, display_iso_time, display_timestamp, entry_name,
-    entry_status, resolve_clean, source_status,
+    AppPaths, BrowserIndex, Case, EvidenceInfo, TimelineIndex, can_export, coverage_text,
+    deleted_source_note, display_iso_time, display_timestamp, entry_name, entry_status,
+    resolve_clean, source_status,
 };
 use tracedesk_engines::InventoryEntry;
 use tracedesk_mcp::{
@@ -1265,7 +1265,31 @@ impl AppState {
         accepted
     }
 
-    /// 当非只读写入工具成功完成且作用于当前打开案件时，向前端推送 `mcp:case-updated` 事件。
+    /// 检测当前桌面端打开案件的磁盘文件（`case.json` 与 `audit.head`/`audit.jsonl`）是否已被外部进程更新；
+    /// 若发生变化则热重载内存 `Case` 数据与清单，并同步刷新 `ViewCache`，返回 `Ok(true)`。
+    pub fn reload_active_case_from_disk(&self) -> Result<bool, String> {
+        let mut case_guard = self
+            .case_lock
+            .lock()
+            .map_err(|_| "案件状态锁异常".to_string())?;
+        let Some(case) = case_guard.as_mut() else {
+            return Ok(false);
+        };
+        let changed = case
+            .sync_from_disk_if_changed()
+            .map_err(|e| e.to_string())?;
+        if changed {
+            let mut view = self
+                .view
+                .write()
+                .map_err(|_| "视图缓存锁异常".to_string())?;
+            view.sync_from_case(case, true);
+        }
+        Ok(changed)
+    }
+
+    /// 当非只读写入工具成功完成且作用于当前打开案件时，先热重载磁盘变更并刷新 `ViewCache`，
+    /// 再向前端推送 `mcp:case-updated` 事件。
     pub fn emit_case_updated_if_matching(&self, record: &McpActivityRecord) -> bool {
         if record.phase != "completed" || record.read_only {
             return false;
@@ -1298,6 +1322,9 @@ impl AppState {
         let Some(case_dir_str) = matched_open_case_dir else {
             return false;
         };
+
+        // 推送前端前先热重载最新磁盘状态与 ViewCache，确保前端立即拉取快照与审计日志时读到最新结果。
+        let _ = self.reload_active_case_from_disk();
 
         if let Some(app) = self.current_app_handle() {
             let tool_name = record
@@ -1471,15 +1498,16 @@ impl AppState {
 
     /// 协调委托给 `tracedesk_mcp::McpServer` 的调用与桌面端当前打开的 [`Case`]。
     ///
-    /// 若 `target_folders` 中存在路径匹配桌面端 UI 当前打开的案件，则先临时关闭桌面端 `Case`
-    /// （释放 `case.lock` 及镜像句柄），在持有 `case_lock` 防止 UI 并发修改的前提下执行 `work()`，
-    /// 随后以 [`AuditOrigin::Manual`] 模式重新打开桌面端 `Case` 并刷新 [`ViewCache`]。
+    /// 桌面端打开案件期间不常驻持有 `case.lock`（仅在写入瞬间加短锁），因此可直接执行 `work()`
+    /// 由 `tracedesk_mcp::CaseService` 按短锁超时自动排队访问；若本次调用作用于桌面端当前打开案件，
+    /// 执行完成后立即热重载磁盘变更并同步刷新 [`ViewCache`]。
     pub fn coordinate_mcp_call<T, F>(&self, target_folders: &[PathBuf], work: F) -> T
     where
         F: FnOnce() -> T,
     {
+        let result = work();
         if target_folders.is_empty() {
-            return work();
+            return result;
         }
 
         let resolved_targets: Vec<PathBuf> = target_folders
@@ -1487,50 +1515,17 @@ impl AppState {
             .map(|p| tracedesk_core::resolve_clean(p))
             .collect();
 
-        let Ok(mut case_guard) = self.case_lock.lock() else {
-            return work();
-        };
-
-        let matched_open_dir = case_guard.as_ref().and_then(|c| {
-            let open_dir = tracedesk_core::resolve_clean(c.folder());
-            resolved_targets
-                .iter()
-                .any(|t| same_case_path(t, &open_dir))
-                .then_some(open_dir)
+        let matches_active = self.view.read().ok().is_some_and(|view| {
+            view.case_folder.as_ref().is_some_and(|open_dir| {
+                let resolved_open = tracedesk_core::resolve_clean(open_dir);
+                resolved_targets
+                    .iter()
+                    .any(|t| same_case_path(t, &resolved_open))
+            })
         });
 
-        let Some(open_dir) = matched_open_dir else {
-            drop(case_guard);
-            return work();
-        };
-
-        let prev_dir_loc = case_guard
-            .as_ref()
-            .and_then(|c| c.directory_location().cloned());
-
-        // 释放桌面端 case.lock，使 tracedesk_mcp::CaseService 能够顺利获取锁。
-        if let Some(mut open_case) = case_guard.take() {
-            open_case.close();
-        }
-
-        let result = work();
-
-        // 以 Manual 模式重新打开桌面端 Case 并刷新 ViewCache。
-        if let Ok(mut reopened) = Case::open(&open_dir, None, AuditOrigin::Manual) {
-            if reopened.browsing_directories()
-                && let Some(loc) = prev_dir_loc
-            {
-                let _ = reopened.browse_directory(
-                    loc.offset,
-                    loc.inode.as_deref(),
-                    &loc.path,
-                    None,
-                );
-            }
-            if let Ok(mut view) = self.view.write() {
-                view.sync_from_case(&reopened, true);
-            }
-            *case_guard = Some(reopened);
+        if matches_active {
+            let _ = self.reload_active_case_from_disk();
         }
         result
     }

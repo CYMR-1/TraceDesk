@@ -1128,3 +1128,197 @@ fn desktop_mcp_activity_telemetry_tailing_filter_and_clear() {
     state.shutdown_all();
     assert!(!cmd_get_mcp_status(&state, Some(port)).expect("status").running);
 }
+
+#[test]
+fn desktop_open_case_concurrent_external_mcp_write_and_hot_reload() {
+    use tracedesk_core::verify_audit_chain_at;
+    use tracedesk_engines::CaseFileLock;
+    use tracedesk_mcp::CaseService;
+
+    let tmp = tempdir().expect("create tempdir");
+    let cases_dir = tmp.path().join("cases");
+    std::fs::create_dir_all(&cases_dir).expect("mkdir cases");
+    let state = make_test_state(cases_dir.clone());
+
+    // 1. 桌面端创建案件、加载演示镜像并完成全部分区扫描，随后重新打开一次案件模拟完整日常流程。
+    let created = cmd_create_case(
+        &state,
+        &cases_dir.to_string_lossy(),
+        "SHORT-LOCK-01",
+        "桌面取证员",
+        "FAT16镜像",
+        None,
+    )
+    .expect("create_case");
+    let _ = cmd_load_image(&state, &demo_image_path().to_string_lossy(), None).expect("load_image");
+    let scanned = cmd_scan_all_partitions(&state, None).expect("scan_all");
+    assert!(scanned.completed);
+
+    // 重新打开同一案件后，桌面端应立即释放 OS case.lock，不长期占锁。
+    let opened = cmd_open_case(&state, &created.case_dir).expect("reopen case");
+    assert_eq!(opened.number, "SHORT-LOCK-01");
+    {
+        let cg = state.case_lock.lock().expect("case_lock");
+        let active_case = cg.as_ref().expect("active case");
+        assert!(
+            !active_case.has_lock(),
+            "桌面端打开案件后浏览期间不应长期持有 case.lock"
+        );
+    }
+
+    // 2. 验证短锁退避重试机制：后台线程持锁 80ms 后释放，acquire_with_timeout 应自动排队成功获取。
+    let lock_file = PathBuf::from(&opened.case_dir).join("case.lock");
+    let held_lock = CaseFileLock::acquire(&lock_file).expect("acquire initial lock");
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(80));
+        held_lock.unlock();
+    });
+    let queued = CaseFileLock::acquire_with_timeout(&lock_file, Duration::from_secs(2))
+        .expect("acquire_with_timeout should succeed after brief contention");
+    queued.unlock();
+    releaser.join().expect("join releaser");
+
+    // 3. 在桌面端保持案件打开（不关闭案件、不手动释放锁）的同时，
+    //    外部独立 CaseService（模拟独立 stdio MCP 进程）直接对该案件执行受控写入。
+    let external_svc = CaseService::new(Some(cases_dir.clone()), Some("外部AI助手".to_string()));
+    CaseService::with_caller_scope(Some("外部AI助手"), Some("Cursor"), || {
+        let note_res = external_svc
+            .record_finding(
+                &opened.case_dir,
+                "DOCS/CASE.TXT",
+                "外部 stdio 进程在桌面端打开案件期间写入的取证笔记",
+                Some(2048),
+                None,
+                Some(false),
+                None,
+                "",
+                false,
+                None,
+            )
+            .expect("external stdio record_finding");
+        assert!(note_res.is_object());
+
+        let exam_res = external_svc
+            .examine_file(
+                &opened.case_dir,
+                "DOCS/CASE.TXT",
+                Some(2048),
+                None,
+                Some(false),
+                None,
+                "",
+                None,
+                false,
+                None,
+            )
+            .expect("external stdio examine_file");
+        assert!(
+            exam_res["details"]["sha256"]
+                .as_str()
+                .is_some_and(|s| s.len() == 64),
+            "应计算出 64 位十六进制 SHA-256，实际返回：{exam_res}"
+        );
+
+        let reg_res = external_svc
+            .register_source(
+                &opened.case_dir,
+                "EV-SHORT-LOCK",
+                "外部 MCP 协同测试交付方",
+                "2026-11-23 18:00:00",
+                "TraceDesk MCP",
+                "",
+                None,
+            )
+            .expect("external stdio register_source");
+        assert!(reg_res.is_object());
+    });
+
+    // 4. 桌面端调用 reload_active_case_from_disk 应立即检测到外部写入并热重载最新状态。
+    let changed = state
+        .reload_active_case_from_disk()
+        .expect("reload_active_case_from_disk");
+    assert!(changed, "外部 MCP 写入后应检测到磁盘指纹变更并热重载");
+    assert!(
+        !state
+            .reload_active_case_from_disk()
+            .expect("second reload"),
+        "无新增外部写入时重复检测应返回 false"
+    );
+
+    let snap_after = cmd_get_case_snapshot(&state)
+        .expect("get_case_snapshot")
+        .expect("snapshot exists");
+    let prov = snap_after
+        .evidence
+        .as_ref()
+        .and_then(|e| e.provenance.as_ref())
+        .expect("provenance reloaded from disk");
+    assert_eq!(prov.evidence_id, "EV-SHORT-LOCK");
+    assert_eq!(prov.source, "外部 MCP 协同测试交付方");
+
+    let findings = cmd_list_findings(&state, None, None, None, "latest_time", true)
+        .expect("cmd_list_findings");
+    assert!(
+        findings.groups.iter().any(|g| {
+            g.records.iter().any(|r| {
+                r.origin == "mcp"
+                    && r.details
+                        .get("note")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|n| n.contains("外部 stdio 进程"))
+            })
+        }),
+        "桌面端取证发现应立即可见外部 MCP 写入的笔记"
+    );
+
+    let audit_after_mcp =
+        cmd_list_audit_log(&state, "", None, None, None, None, "seq", false).expect("audit log");
+    assert!(audit_after_mcp.valid);
+    assert!(
+        audit_after_mcp
+            .records
+            .iter()
+            .any(|r| r.origin == "mcp" && r.action == "FILE_HASH"),
+        "桌面端审计日志应可见外部 MCP 写入的 FILE_HASH 记录"
+    );
+
+    // 5. 桌面端紧接着自身再执行一次受控写入（通过 with_write_lock 短锁对齐），验证哈希链 100% 完整。
+    let page = cmd_query_files_page(&state, None, None, "", "CASE.TXT", "all", 0, 50, Some(false))
+        .expect("query CASE.TXT");
+    let target_entry = page
+        .items
+        .iter()
+        .find(|e| e.path.eq_ignore_ascii_case("DOCS/CASE.TXT"))
+        .expect("find DOCS/CASE.TXT");
+    let _ = cmd_record_finding_note(
+        &state,
+        &target_entry.entry_id,
+        "桌面端协同后的后续人工笔记",
+    )
+    .expect("desktop record_finding_note");
+
+    let verified_records =
+        verify_audit_chain_at(Path::new(&opened.case_dir)).expect("audit chain 100% valid");
+    assert!(
+        verified_records
+            .iter()
+            .any(|r| r.origin.as_deref() == Some("mcp") && r.action == "FILE_NOTE")
+    );
+    assert!(
+        verified_records
+            .iter()
+            .any(|r| r.origin.as_deref() == Some("manual")
+                && r.details
+                    .get("note")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|n| n.contains("后续人工笔记")))
+    );
+
+    // 写入结束后桌面端依然不持有常驻锁。
+    {
+        let cg = state.case_lock.lock().expect("case_lock");
+        assert!(!cg.as_ref().expect("active case").has_lock());
+    }
+
+    state.shutdown_all();
+}

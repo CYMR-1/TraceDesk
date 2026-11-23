@@ -1032,7 +1032,6 @@ export const App: React.FC = () => {
               onStatusChange={setMcpStatus}
               onRefreshAll={refreshMcpTelemetry}
               onClearActivities={handleClearMcpActivities}
-              onCaseReleased={() => handleCaseReplaced(null)}
               onJumpToAudit={() => {
                 setActiveTab('audit');
                 bumpRefresh();

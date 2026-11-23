@@ -44,8 +44,11 @@ use crate::state::{
 };
 
 /* ==========================================================================================
- * 辅助函数：事件推送
+ * 辅助函数与常量：事件推送、写入瞬间短锁超时
  * ========================================================================================== */
+
+/// 桌面端写盘或写审计时等待 `case.lock` 短锁排队的超时时间。
+const DESKTOP_WRITE_LOCK_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn emit_task_started(app: Option<&AppHandle>, stage: &str) {
     if let Some(handle) = app {
@@ -144,7 +147,7 @@ pub fn cmd_create_case(
         .case_lock
         .lock()
         .map_err(|_| "案件状态锁异常".to_string())?;
-    let new_case = Case::create(
+    let mut new_case = Case::create(
         &parent,
         number.trim(),
         examiner.trim(),
@@ -154,6 +157,8 @@ pub fn cmd_create_case(
         AuditOrigin::Manual,
     )
     .map_err(|e| e.to_string())?;
+    // 建案落盘完成后立即释放 OS `case.lock` 句柄，浏览期间不常驻占锁，允许外部 MCP 实时协同。
+    new_case.release_lock();
 
     if let Some(mut old) = case_guard.take() {
         old.close();
@@ -209,12 +214,20 @@ pub fn cmd_open_case(state: &Arc<AppState>, case_path: &str) -> Result<CaseSnaps
         cur.close();
     }
 
-    let mut opened =
-        Case::open(&folder, None, AuditOrigin::Manual).map_err(|e| e.to_string())?;
+    let mut opened = Case::open_with_mcp_client_and_timeout(
+        &folder,
+        None,
+        AuditOrigin::Manual,
+        None,
+        DESKTOP_WRITE_LOCK_TIMEOUT,
+    )
+    .map_err(|e| e.to_string())?;
     if let Err(err) = opened.log("CASE_OPEN", &log_subject, "成功", Map::new()) {
         opened.close();
         return Err(err.to_string());
     }
+    // 写入 CASE_OPEN 审计记录后立即释放 `case.lock`，桌面端空闲浏览期间不长期占锁。
+    opened.release_lock();
 
     if let Some(mut old) = case_guard.take() {
         old.close();
@@ -251,6 +264,8 @@ pub fn cmd_close_case(state: &Arc<AppState>) -> Result<CloseCaseResponse, String
 }
 
 pub fn cmd_get_case_snapshot(state: &Arc<AppState>) -> Result<Option<CaseSnapshot>, String> {
+    // 轻量检测外部 MCP 进程是否修改了磁盘案件状态，若有变化则即时热重载。
+    let _ = state.reload_active_case_from_disk();
     let view = state
         .view
         .read()
@@ -340,12 +355,14 @@ pub fn cmd_load_image(
         emit_task_progress(app, "固定镜像 SHA-256", done, total);
     };
 
-    if let Err(err) = case.load_image(
-        Path::new(image_path.trim()),
-        None,
-        Some(&cancel),
-        Some(&progress_cb),
-    ) {
+    if let Err(err) = case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+        c.load_image(
+            Path::new(image_path.trim()),
+            None,
+            Some(&cancel),
+            Some(&progress_cb),
+        )
+    }) {
         let msg = err.to_string();
         emit_task_finished(app, "打开镜像并识别分区", false, Some(msg.clone()));
         return Err(msg);
@@ -418,7 +435,9 @@ pub fn cmd_verify_integrity(
         emit_task_progress(app, "校验 SHA-256", done, total);
     };
 
-    let ok = match case.verify_integrity(None, Some(&cancel), Some(&progress_cb)) {
+    let ok = match case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+        c.verify_integrity(None, Some(&cancel), Some(&progress_cb))
+    }) {
         Ok(ok) => ok,
         Err(err) => {
             let msg = err.to_string();
@@ -518,19 +537,25 @@ fn spawn_large_image_hash_worker(state: Arc<AppState>, app: AppHandle) -> Result
                 let image_str = ev.path.clone();
                 match measure_res {
                     Err(ref err) if err.is_cancelled() || cancel.load(Ordering::Relaxed) => {
-                        let _ = case.log("HASH_VERIFY", &image_str, "已取消", Map::new());
+                        let _ = case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+                            c.log("HASH_VERIFY", &image_str, "已取消", Map::new())
+                        });
                         finished_event.cancelled = true;
                     }
                     Err(err) => {
                         let msg = err.to_string();
                         let mut d = Map::new();
                         d.insert("error".to_string(), Value::String(msg.clone()));
-                        let _ = case.log("HASH_VERIFY", &image_str, "失败", d);
+                        let _ = case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+                            c.log("HASH_VERIFY", &image_str, "失败", d)
+                        });
                         finished_event.error = Some(msg);
                     }
                     Ok(measured) => {
                         let initial_fixed = measured.sha256_update.is_some();
-                        match case.accept_hash(measured) {
+                        match case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+                            c.accept_hash(measured)
+                        }) {
                             Ok(ok) => {
                                 finished_event.ok = Some(ok);
                                 finished_event.initial_fixed = Some(initial_fixed);
@@ -539,7 +564,9 @@ fn spawn_large_image_hash_worker(state: Arc<AppState>, app: AppHandle) -> Result
                                 let msg = err.to_string();
                                 let mut d = Map::new();
                                 d.insert("error".to_string(), Value::String(msg.clone()));
-                                let _ = case.log("HASH_VERIFY", &image_str, "失败", d);
+                                let _ = case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+                                    c.log("HASH_VERIFY", &image_str, "失败", d)
+                                });
                                 finished_event.error = Some(msg);
                             }
                         }
@@ -690,7 +717,8 @@ pub fn cmd_register_source(
         tool: tool.to_string(),
         expected_sha256: expected_sha256.to_string(),
     };
-    case.register_source(&prov).map_err(|e| e.to_string())?;
+    case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| c.register_source(&prov))
+        .map_err(|e| e.to_string())?;
 
     let mut view = state
         .view
@@ -709,8 +737,11 @@ pub fn cmd_export_fsstat(state: &Arc<AppState>, offset: u64) -> Result<PathRespo
         .as_mut()
         .ok_or_else(|| "请先新建或打开案件".to_string())?;
     let dest = case
-        .export_fsstat(offset, None)
+        .with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| c.export_fsstat(offset, None))
         .map_err(|e| e.to_string())?;
+    if let Ok(mut view) = state.view.write() {
+        view.sync_from_case(case, false);
+    }
     Ok(PathResponse {
         path: dest.to_string_lossy().into_owned(),
     })
@@ -738,7 +769,9 @@ pub fn cmd_scan_all_partitions(
             emit_task_progress(app, stage, done, total);
         };
 
-        match case.scan_partitions(None, Some(&cancel), Some(&progress_cb)) {
+        match case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+            c.scan_partitions(None, Some(&cancel), Some(&progress_cb))
+        }) {
             Ok(_) => {
                 let mut view = state
                     .view
@@ -788,8 +821,10 @@ pub fn cmd_scan_partition(
     let case = case_guard
         .as_mut()
         .ok_or_else(|| "请先新建或打开案件".to_string())?;
-    case.scan_partition(offset, None, Some(&cancel))
-        .map_err(|e| e.to_string())?;
+    case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+        c.scan_partition(offset, None, Some(&cancel))
+    })
+    .map_err(|e| e.to_string())?;
     let mut view = state
         .view
         .write()
@@ -976,7 +1011,11 @@ pub fn cmd_query_files_page(
             .lock()
             .map_err(|_| "案件状态锁异常".to_string())?;
         if let Some(case) = case_guard.as_mut() {
-            case.filtered(suffix, keyword).map_err(|e| e.to_string())?;
+            case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| c.filtered(suffix, keyword))
+                .map_err(|e| e.to_string())?;
+            if let Ok(mut view) = state.view.write() {
+                view.sync_from_case(case, false);
+            }
         }
     }
 
@@ -1173,7 +1212,9 @@ pub fn cmd_export_file(
         .as_mut()
         .ok_or_else(|| "请先新建或打开案件".to_string())?;
 
-    let dest = case.export(&entry, None).map_err(|e| e.to_string())?;
+    let dest = case
+        .with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| c.export(&entry, None))
+        .map_err(|e| e.to_string())?;
     let dest_str = dest.to_string_lossy().into_owned();
 
     let (title, note) = match case.data().exports.last() {
@@ -1232,7 +1273,8 @@ pub fn cmd_record_finding_note(
         .as_mut()
         .ok_or_else(|| "请先新建或打开案件".to_string())?;
 
-    record_note(case, &entry, note).map_err(|e| e.to_string())?;
+    case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| record_note(c, &entry, note))
+        .map_err(|e| e.to_string())?;
 
     let mut view = state
         .view
@@ -1271,7 +1313,11 @@ pub fn cmd_examine_file(
         .as_mut()
         .ok_or_else(|| "请先新建或打开案件".to_string())?;
 
-    let res = examine(case, &entry, cmp_clean.as_deref(), None).map_err(|e| e.to_string())?;
+    let res = case
+        .with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+            examine(c, &entry, cmp_clean.as_deref(), None)
+        })
+        .map_err(|e| e.to_string())?;
     let d = &res.details;
 
     let title = if cmp_clean.is_some() {
@@ -1352,6 +1398,7 @@ pub fn cmd_list_findings(
     sort_column: &str,
     descending: bool,
 ) -> Result<ListFindingsResponse, String> {
+    let _ = state.reload_active_case_from_disk();
     let mut case_guard = state
         .case_lock
         .lock()
@@ -1538,37 +1585,41 @@ pub fn cmd_export_findings(
         .as_mut()
         .ok_or_else(|| "请先新建或打开案件".to_string())?;
 
-    let records = case.check_audit().map_err(|e| e.to_string())?;
-    let all_groups = group_findings(&records);
+    let res = case
+        .with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+            let records = c.check_audit()?;
+            let all_groups = group_findings(&records);
 
-    let target_groups: Vec<FindingGroup> = if group_keys.is_empty() {
-        all_groups
-    } else {
-        let mut by_key: HashMap<String, FindingGroup> = all_groups
-            .into_iter()
-            .map(|g| (format_finding_group_key(&g), g))
-            .collect();
-        let mut selected = Vec::with_capacity(group_keys.len());
-        for k in group_keys {
-            if let Some(g) = by_key.remove(k) {
-                selected.push(g);
+            let target_groups: Vec<FindingGroup> = if group_keys.is_empty() {
+                all_groups
             } else {
-                // 兼容 4 段式分组键：忽略末尾的 image_sha256 进行回退匹配。
-                let found_key = by_key
-                    .keys()
-                    .find(|cand| cand.starts_with(&format!("{k}|")))
-                    .cloned();
-                if let Some(fk) = found_key
-                    && let Some(g) = by_key.remove(&fk)
-                {
-                    selected.push(g);
+                let mut by_key: HashMap<String, FindingGroup> = all_groups
+                    .into_iter()
+                    .map(|g| (format_finding_group_key(&g), g))
+                    .collect();
+                let mut selected = Vec::with_capacity(group_keys.len());
+                for k in group_keys {
+                    if let Some(g) = by_key.remove(k) {
+                        selected.push(g);
+                    } else {
+                        // 兼容 4 段式分组键：忽略末尾的 image_sha256 进行回退匹配。
+                        let found_key = by_key
+                            .keys()
+                            .find(|cand| cand.starts_with(&format!("{k}|")))
+                            .cloned();
+                        if let Some(fk) = found_key
+                            && let Some(g) = by_key.remove(&fk)
+                        {
+                            selected.push(g);
+                        }
+                    }
                 }
-            }
-        }
-        selected
-    };
+                selected
+            };
 
-    let res = core_export_findings(case, &target_groups).map_err(|e| e.to_string())?;
+            core_export_findings(c, &target_groups)
+        })
+        .map_err(|e| e.to_string())?;
     let mut note = format!(
         "已导出 {} 个证据文件至 exports 目录，并生成汇总清单。",
         res.exported_count
@@ -1601,6 +1652,7 @@ pub fn cmd_export_findings(
  * ========================================================================================== */
 
 pub fn cmd_build_timeline(state: &Arc<AppState>) -> Result<BuildTimelineResponse, String> {
+    let _ = state.reload_active_case_from_disk();
     let entries = {
         let case_guard = state
             .case_lock
@@ -1737,6 +1789,7 @@ pub fn cmd_list_audit_log(
     sort_column: &str,
     descending: bool,
 ) -> Result<ListAuditLogResponse, String> {
+    let _ = state.reload_active_case_from_disk();
     let mut case_guard = state
         .case_lock
         .lock()
@@ -2176,19 +2229,21 @@ fn run_content_search_worker(
         let Some(case) = case_guard.as_mut() else {
             return;
         };
-        let out = search_case(
-            case,
-            &SearchOptions {
-                query,
-                encoding,
-                limit: None,
-                selected,
-            },
-            &cancel,
-            Some(&progress_cb),
-            Some(&mut hit_cb),
-            None,
-        );
+        let out = case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+            search_case(
+                c,
+                &SearchOptions {
+                    query,
+                    encoding,
+                    limit: None,
+                    selected,
+                },
+                &cancel,
+                Some(&progress_cb),
+                Some(&mut hit_cb),
+                None,
+            )
+        });
         let snap = if let Ok(mut view) = state.view.write() {
             view.sync_from_case(case, false);
             view.snapshot.clone()
@@ -2334,51 +2389,55 @@ pub fn cmd_bookmark_search_hits(
         .as_mut()
         .ok_or_else(|| "请先新建或打开案件".to_string())?;
 
-    let mut saved_count = 0usize;
-    for item in selected_hits {
-        let pos = item.dto.pos;
-        let entry = &item.entry;
-        let src_note = if !item.source_note.is_empty() {
-            item.source_note
-        } else {
-            deleted_source_note(entry).to_string()
-        };
-        let mut details = Map::new();
-        details.insert("offset".to_string(), Value::from(entry.offset));
-        details.insert("inode".to_string(), Value::String(entry.inode.clone()));
-        details.insert("deleted".to_string(), Value::from(entry.deleted));
-        details.insert(
-            "image_sha256".to_string(),
-            image_sha256
-                .clone()
-                .map(Value::String)
-                .unwrap_or(Value::Null),
-        );
-        details.insert(
-            "source_verification".to_string(),
-            Value::String(verification.clone()),
-        );
-        details.insert(
-            "note".to_string(),
-            Value::String(format!(
-                "内容命中：{query}；{encoding}；文件内字节偏移 {pos}"
-            )),
-        );
-        details.insert("file_byte".to_string(), Value::from(pos));
-        details.insert("needle".to_string(), Value::String(needle_hex.clone()));
-        details.insert("before".to_string(), Value::String(item.dto.before_hex));
-        details.insert("after".to_string(), Value::String(item.dto.after_hex));
-        details.insert(
-            "search_record".to_string(),
-            Value::String(report_name.clone()),
-        );
-        details.insert("source_note".to_string(), Value::String(src_note));
-        details.insert("reallocated".to_string(), Value::from(entry.reallocated));
+    let saved_count = case
+        .with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+            let mut count = 0usize;
+            for item in selected_hits {
+                let pos = item.dto.pos;
+                let entry = &item.entry;
+                let src_note = if !item.source_note.is_empty() {
+                    item.source_note
+                } else {
+                    deleted_source_note(entry).to_string()
+                };
+                let mut details = Map::new();
+                details.insert("offset".to_string(), Value::from(entry.offset));
+                details.insert("inode".to_string(), Value::String(entry.inode.clone()));
+                details.insert("deleted".to_string(), Value::from(entry.deleted));
+                details.insert(
+                    "image_sha256".to_string(),
+                    image_sha256
+                        .clone()
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                );
+                details.insert(
+                    "source_verification".to_string(),
+                    Value::String(verification.clone()),
+                );
+                details.insert(
+                    "note".to_string(),
+                    Value::String(format!(
+                        "内容命中：{query}；{encoding}；文件内字节偏移 {pos}"
+                    )),
+                );
+                details.insert("file_byte".to_string(), Value::from(pos));
+                details.insert("needle".to_string(), Value::String(needle_hex.clone()));
+                details.insert("before".to_string(), Value::String(item.dto.before_hex));
+                details.insert("after".to_string(), Value::String(item.dto.after_hex));
+                details.insert(
+                    "search_record".to_string(),
+                    Value::String(report_name.clone()),
+                );
+                details.insert("source_note".to_string(), Value::String(src_note));
+                details.insert("reallocated".to_string(), Value::from(entry.reallocated));
 
-        case.log("FILE_NOTE", &entry.path, "成功", details)
-            .map_err(|e| e.to_string())?;
-        saved_count += 1;
-    }
+                c.log("FILE_NOTE", &entry.path, "成功", details)?;
+                count += 1;
+            }
+            Ok(count)
+        })
+        .map_err(|e| e.to_string())?;
 
     let mut view = state
         .view
@@ -2468,7 +2527,9 @@ pub fn cmd_generate_report(state: &Arc<AppState>) -> Result<PathAndSnapshotRespo
         .as_mut()
         .ok_or_else(|| "请先新建或打开案件".to_string())?;
 
-    let path = case.report(None).map_err(|e| e.to_string())?;
+    let path = case
+        .with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| c.report(None))
+        .map_err(|e| e.to_string())?;
 
     let mut view = state
         .view
@@ -2486,6 +2547,7 @@ pub fn cmd_generate_report(state: &Arc<AppState>) -> Result<PathAndSnapshotRespo
 pub fn cmd_inspect_bundle_materials(
     state: &Arc<AppState>,
 ) -> Result<BundleMaterialsResponse, String> {
+    let _ = state.reload_active_case_from_disk();
     let mut case_guard = state
         .case_lock
         .lock()
@@ -2556,16 +2618,19 @@ pub fn cmd_build_review_bundle(
         .as_mut()
         .ok_or_else(|| "请先新建或打开案件".to_string())?;
 
-    let res = build_bundle(
-        case,
-        &BuildBundleOptions {
-            selected_export_indices,
-            selected_search_indices,
-            skip_missing: true,
-        },
-        None,
-    )
-    .map_err(|e| e.to_string())?;
+    let res = case
+        .with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+            build_bundle(
+                c,
+                &BuildBundleOptions {
+                    selected_export_indices,
+                    selected_search_indices,
+                    skip_missing: true,
+                },
+                None,
+            )
+        })
+        .map_err(|e| e.to_string())?;
 
     let mut view = state
         .view
@@ -2758,9 +2823,9 @@ pub fn cmd_get_guide_pages() -> Result<Vec<GuidePageDto>, String> {
             index: 9,
             title: "MCP 服务端接入与 AI 协同".to_string(),
             nav_label: "MCP 服务端接入".to_string(),
-            summary: "内置标准 MCP 服务端 tracedesk_mcp（19 工具 + 2 资源），支持在桌面端一键复制配置、启停本地 HTTP 服务与释放案件锁。".to_string(),
+            summary: "内置标准 MCP 服务端 tracedesk_mcp（19 工具 + 2 资源），采用仅写入瞬间短锁机制，支持在桌面端实时监控外部 stdio 与 HTTP 客户端并自动同步界面。".to_string(),
             image: "/assets/guide/09_mcp_dialog.png".to_string(),
-            caption: "图 9 · MCP 服务配置弹窗：案件锁释放、本地 HTTP 启停与客户端配置（点击查看大图）".to_string(),
+            caption: "图 9 · MCP 服务配置与实时监控：客户端配置、本地 HTTP 启停与实时协同（点击查看大图）".to_string(),
         },
     ])
 }
@@ -2836,7 +2901,10 @@ pub async fn release_case_lock(
 pub async fn get_case_snapshot(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<CaseSnapshot>, String> {
-    cmd_get_case_snapshot(&state)
+    let st = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || cmd_get_case_snapshot(&st))
+        .await
+        .map_err(|e| format!("后台任务执行异常：{e}"))?
 }
 
 #[tauri::command]

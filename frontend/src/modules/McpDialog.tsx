@@ -1,7 +1,7 @@
 /**
  * 模块 7：MCP 服务管理弹窗 (mcp)
  * - 本地 Streamable HTTP 启停（127.0.0.1 + 端口 1024..65535）、实时状态徽标
- * - 持有案件锁提示条与一键释放 case.lock
+ * - 桌面与 MCP 仅写入瞬间短锁实时协同状态提示条
  * - 三标签页：stdio 接入配置（推荐）/ Streamable HTTP 配置 / 可用工具清单（19）
  */
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
@@ -14,13 +14,11 @@ import { copyToClipboard, formatError } from '../utils/assets';
 
 interface McpDialogProps {
   activeCaseNumber: string | null;
-  onCaseReleased: () => void;
   onClose: () => void;
 }
 
 export const McpDialog: React.FC<McpDialogProps> = ({
   activeCaseNumber,
-  onCaseReleased,
   onClose,
 }) => {
   const [status, setStatus] = useState<McpStatus | null>(null);
@@ -90,24 +88,6 @@ export const McpDialog: React.FC<McpDialogProps> = ({
     }
   };
 
-  const handleReleaseCase = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await tauriApi.closeCase();
-      if (res.closed) {
-        const releasedNum = activeCaseNumber ?? status?.activeCaseNumber ?? '';
-        onCaseReleased();
-        await loadStatus(port);
-        setFeedback(`已关闭案件「${releasedNum}」并释放 case.lock，现在可由外部 MCP 客户端操作`);
-      }
-    } catch (err) {
-      setError(`释放案件锁失败：${formatError(err)}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleCopy = async (text: string, notice: string) => {
     const ok = await copyToClipboard(text);
     setFeedback(ok ? notice : '复制到剪贴板失败，请手动选中复制');
@@ -169,21 +149,12 @@ export const McpDialog: React.FC<McpDialogProps> = ({
           </div>
 
           {currentActiveCase && (
-            <div className="td-banner td-banner--warning">
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <UiIcon name="warning" size={16} color="var(--warn-fg)" />
+            <div className="td-banner td-banner--collab">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span className="td-mcp-dot td-mcp-dot--online" />
                 <div style={{ flex: 1 }}>
-                  提示：桌面端当前已打开案件「{currentActiveCase}」并持有 case.lock。外部 MCP 客户端操作同一案件前，可点击右侧按钮一键释放案件锁。
+                  桌面与 MCP 实时协同已就绪：案件「{currentActiveCase}」采用仅写入瞬间短锁，外部 stdio 与 HTTP 客户端可直接操作并实时同步界面
                 </div>
-                <button
-                  type="button"
-                  className="td-btn td-btn--warningAction"
-                  disabled={loading}
-                  onClick={() => void handleReleaseCase()}
-                >
-                  <UiIcon name="lock_open" size={14} color="var(--warn-fg)" />
-                  释放当前案件锁
-                </button>
               </div>
             </div>
           )}

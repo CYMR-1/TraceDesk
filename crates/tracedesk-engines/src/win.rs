@@ -2,6 +2,8 @@ use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::error::{EngineError, EngineResult};
 use crate::types::FileStamp;
@@ -462,6 +464,41 @@ impl CaseFileLock {
             handle,
             path: lock_path.to_path_buf(),
         })
+    }
+
+    /// 以短锁退避重试方式获取 `lock_path` 的独占锁，直到成功或超过 `timeout`。
+    ///
+    /// 每次发生 `EngineError::Locked` 竞争时最多休眠 25ms 后重试，
+    /// 用于桌面端与外部 MCP（stdio / HTTP）在写入瞬间自动排队协同。
+    pub fn acquire_with_timeout(lock_path: &Path, timeout: Duration) -> EngineResult<Self> {
+        const RETRY_INTERVAL: Duration = Duration::from_millis(25);
+        match Self::acquire(lock_path) {
+            Ok(lock) => return Ok(lock),
+            Err(EngineError::Locked(msg)) if timeout.is_zero() => {
+                return Err(EngineError::Locked(msg));
+            }
+            Err(EngineError::Locked(_)) => {}
+            Err(other) => return Err(other),
+        }
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return Self::acquire(lock_path);
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            thread::sleep(RETRY_INTERVAL.min(remaining));
+            match Self::acquire(lock_path) {
+                Ok(lock) => return Ok(lock),
+                Err(EngineError::Locked(msg)) => {
+                    if Instant::now() >= deadline {
+                        return Err(EngineError::Locked(msg));
+                    }
+                }
+                Err(other) => return Err(other),
+            }
+        }
     }
 
     /// 锁文件的路径。

@@ -639,7 +639,7 @@ fn handle_client_connection(
                 let resp_opt = app_state.coordinate_mcp_call(&target_dirs, || {
                     server.handle_jsonrpc_value_with_context(parsed, &req_ctx)
                 });
-                // 在 `coordinate_mcp_call` 重新打开桌面案件并刷新 `ViewCache` 之后再推送 `mcp:case-updated`，
+                // 在 `coordinate_mcp_call` 热重载磁盘变更并刷新 `ViewCache` 之后再推送 `mcp:case-updated`，
                 // 防止前端立即拉取快照时读到刷新前的旧视图。
                 for completed_write in drain_deferred_case_updates() {
                     let _ = app_state.emit_case_updated_if_matching(&completed_write);

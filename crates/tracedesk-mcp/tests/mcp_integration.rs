@@ -710,11 +710,15 @@ fn test_boundaries_lock_contention_and_force_release() {
     assert!(err.contains("Error (ValueError)"), "got: {err}");
     assert!(err.contains("案件库目录之外"), "got: {err}");
 
-    // 3. 桌面端持有 case.lock 时，MCP 工具应返回可操作的中文提示且不崩溃
+    // 3. 显式持续持有 case.lock 时，MCP 工具在短超时等待后应返回可操作的中文提示且不崩溃
     let mut opened =
         Case::open(Path::new(&case_dir), None, AuditOrigin::Manual).expect("open desktop case");
+    let fast_timeout_server = McpServer::with_service(std::sync::Arc::new(
+        tracedesk_mcp::CaseService::new(Some(cases_dir.clone()), None)
+            .with_lock_timeout(std::time::Duration::from_millis(80)),
+    ));
     let lock_err = call_text(
-        &server,
+        &fast_timeout_server,
         "tracedesk_get_case_summary",
         json!({ "case_dir": case_dir }),
     );

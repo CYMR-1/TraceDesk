@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flate2::Compression;
 use flate2::read::GzDecoder;
@@ -363,6 +363,202 @@ struct AuditCache {
     head: String,
 }
 
+/// 案件磁盘持久化指纹（覆盖 `case.json` 与 `audit.head`/`audit.jsonl` 的长度、mtime 及内容摘要），
+/// 用于在无常驻锁协同模式下零误差感知外部 MCP 进程对案件的写入变更。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiskFingerprint {
+    case_json_len: u64,
+    case_json_mtime_ns: Option<i128>,
+    case_json_sha256: String,
+    audit_head_len: Option<u64>,
+    audit_head_mtime_ns: Option<i128>,
+    audit_head_content: Option<String>,
+    audit_jsonl_len: u64,
+    audit_jsonl_mtime_ns: Option<i128>,
+}
+
+fn read_disk_fingerprint(folder: &Path) -> CoreResult<DiskFingerprint> {
+    let metadata_path = folder.join("case.json");
+    let case_meta = fs::metadata(&metadata_path)
+        .map_err(|e| CoreError::CorruptCase(format!("无法读取 case.json 元数据：{e}")))?;
+    let case_bytes = fs::read(&metadata_path)
+        .map_err(|e| CoreError::CorruptCase(format!("无法读取 case.json：{e}")))?;
+    let case_json_sha256 = sha256_hex(&case_bytes);
+
+    let head_path = folder.join("audit.head");
+    let (audit_head_len, audit_head_mtime_ns, audit_head_content) = if head_path.exists() {
+        let head_meta = fs::metadata(&head_path).ok();
+        let content = fs::read_to_string(&head_path).ok();
+        (
+            head_meta.as_ref().map(fs::Metadata::len),
+            head_meta
+                .and_then(|m| m.modified().ok())
+                .and_then(system_time_to_ns),
+            content,
+        )
+    } else {
+        (None, None, None)
+    };
+
+    let audit_path = folder.join("audit.jsonl");
+    let (audit_jsonl_len, audit_jsonl_mtime_ns) = match fs::metadata(&audit_path) {
+        Ok(m) => (m.len(), m.modified().ok().and_then(system_time_to_ns)),
+        Err(_) => (0, None),
+    };
+
+    Ok(DiskFingerprint {
+        case_json_len: case_meta.len(),
+        case_json_mtime_ns: case_meta.modified().ok().and_then(system_time_to_ns),
+        case_json_sha256,
+        audit_head_len,
+        audit_head_mtime_ns,
+        audit_head_content,
+        audit_jsonl_len,
+        audit_jsonl_mtime_ns,
+    })
+}
+
+/// 从磁盘读取并校验 `case.json` 与关联的 gzip 清单文件，返回 `(CaseData, inventory_file, needs_legacy_migration)`。
+fn load_case_data_from_disk(folder: &Path) -> CoreResult<(CaseData, Option<String>, bool)> {
+    let metadata_path = folder.join("case.json");
+    if !metadata_path.is_file() {
+        return Err(CoreError::CorruptCase("缺少案件元数据 case.json".to_string()));
+    }
+
+    let raw_text = fs::read_to_string(&metadata_path)
+        .map_err(|e| CoreError::CorruptCase(format!("无法读取 case.json：{e}")))?;
+    let mut root_val: Value = serde_json::from_str(&raw_text)
+        .map_err(|e| CoreError::CorruptCase(format!("case.json 格式错误：{e}")))?;
+    let obj = root_val
+        .as_object_mut()
+        .ok_or_else(|| CoreError::CorruptCase("case.json 根节点必须为对象".to_string()))?;
+
+    for key in ["id", "examiner", "number", "target", "created"] {
+        let valid = obj
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty());
+        if !valid {
+            return Err(CoreError::CorruptCase(key.to_string()));
+        }
+    }
+    if !obj.get("exports").is_some_and(Value::is_array) {
+        return Err(CoreError::CorruptCase("案件清单格式错误".to_string()));
+    }
+
+    // 从 `inventory_file`（.jsonl.gz）或旧版内联 `inventory` 字段加载清单。
+    let inventory_file = match obj.remove("inventory_file") {
+        Some(Value::String(name)) => Some(name),
+        Some(Value::Null) | None => None,
+        Some(_) => return Err(CoreError::CorruptCase("清单文件名无效".to_string())),
+    };
+    let inventory: Vec<InventoryEntry> = if let Some(ref idx_name) = inventory_file {
+        if !INVENTORY_FILE_RE.is_match(idx_name) {
+            return Err(CoreError::CorruptCase("清单文件名无效".to_string()));
+        }
+        let expected_count = obj
+            .remove("inventory_count")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| CoreError::CorruptCase("缺少 inventory_count".to_string()))?
+            as usize;
+        let loaded = read_inventory_gz(&folder.join(idx_name))
+            .map_err(|e| CoreError::CorruptCase(format!("读取清单文件失败：{e}")))?;
+        if loaded.len() != expected_count {
+            return Err(CoreError::CorruptCase("案件清单数量不匹配".to_string()));
+        }
+        loaded
+    } else {
+        let arr = obj
+            .get("inventory")
+            .ok_or_else(|| CoreError::CorruptCase("案件清单格式错误".to_string()))?;
+        if !arr.is_array() {
+            return Err(CoreError::CorruptCase("案件清单格式错误".to_string()));
+        }
+        serde_json::from_value(arr.clone())
+            .map_err(|e| CoreError::CorruptCase(format!("案件清单格式错误：{e}")))?
+    };
+
+    // 若 `evidence` 非空，校验其必需字段。
+    let evidence: Option<EvidenceInfo> = match obj.get("evidence") {
+        None | Some(Value::Null) => None,
+        Some(ev_val) => {
+            let ev_obj = ev_val
+                .as_object()
+                .ok_or_else(|| CoreError::CorruptCase("证据信息不完整".to_string()))?;
+            for req in ["path", "sha256", "layout", "partitions", "fixed_at", "size"] {
+                if !ev_obj.contains_key(req) {
+                    return Err(CoreError::CorruptCase("证据信息不完整".to_string()));
+                }
+            }
+            let mut ev: EvidenceInfo = serde_json::from_value(ev_val.clone())
+                .map_err(|e| CoreError::CorruptCase(format!("证据信息不完整：{e}")))?;
+            if ev.size >= LARGE_IMAGE_BYTES {
+                ev.large_image = Some(true);
+            }
+            Some(ev)
+        }
+    };
+
+    if !folder.join("reports").is_dir() || !folder.join("exports").is_dir() {
+        return Err(CoreError::CorruptCase("案件输出目录缺失".to_string()));
+    }
+
+    let id = obj["id"].as_str().unwrap_or_default().to_string();
+    let number = obj["number"].as_str().unwrap_or_default().to_string();
+    let examiner = obj["examiner"].as_str().unwrap_or_default().to_string();
+    let target = obj["target"].as_str().unwrap_or_default().to_string();
+    let created = obj["created"].as_str().unwrap_or_default().to_string();
+    let exports: Vec<ExportRecord> = serde_json::from_value(obj["exports"].clone())
+        .map_err(|e| CoreError::CorruptCase(format!("导出记录格式错误：{e}")))?;
+    let partition_scans = match obj.get("partition_scans") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            serde_json::from_value(v.clone())
+                .map_err(|e| CoreError::CorruptCase(format!("partition_scans 格式错误：{e}")))?,
+        ),
+    };
+    let offset = match obj.get("offset") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(v) => Some(Some(v.as_u64().ok_or_else(|| {
+            CoreError::CorruptCase("offset 格式错误".to_string())
+        })?)),
+    };
+    let fsstat = obj
+        .get("fsstat")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let index_verification = obj
+        .get("index_verification")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let verification = match obj.get("verification") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            serde_json::from_value(v.clone())
+                .map_err(|e| CoreError::CorruptCase(format!("verification 格式错误：{e}")))?,
+        ),
+    };
+
+    let needs_legacy_migration = inventory_file.is_none() && !inventory.is_empty();
+    let data = CaseData {
+        id,
+        number,
+        examiner,
+        target,
+        created,
+        evidence,
+        inventory,
+        exports,
+        partition_scans,
+        offset,
+        fsstat,
+        index_verification,
+        verification,
+    };
+    Ok((data, inventory_file, needs_legacy_migration))
+}
+
 fn system_time_to_ns(t: SystemTime) -> Option<i128> {
     t.duration_since(UNIX_EPOCH)
         .ok()
@@ -423,14 +619,16 @@ pub fn verify_audit_chain_at(folder: &Path) -> CoreResult<Vec<AuditRecord>> {
     Ok(records)
 }
 
-/// 活跃的 TraceDesk 取证案件对象，持有 `case.lock`、可选 `SourceGuard`、
-/// 内存元数据/清单、目录浏览 LRU 缓存以及审计链状态。
+/// 活跃的 TraceDesk 取证案件对象，持有可选 `case.lock`、可选 `SourceGuard`、
+/// 内存元数据/清单、目录浏览 LRU 缓存、磁盘变更指纹以及审计链状态。
 pub struct Case {
     folder: PathBuf,
     actor: String,
     origin: AuditOrigin,
     /// MCP 调用方/使用者标识（仅当 `origin == AuditOrigin::Mcp` 时生效，人工操作始终为 `None`）。
     mcp_client: Option<String>,
+    /// 案件逻辑关闭标志（区别于释放 OS `case.lock` 句柄后的空闲协同态）。
+    closed: bool,
     lease: Option<CaseFileLock>,
     source_guard: Option<SourceGuard>,
     source_paths: Vec<PathBuf>,
@@ -443,6 +641,8 @@ pub struct Case {
     directory_entries: Vec<InventoryEntry>,
     directory_location: Option<DirectoryLocation>,
     audit_cache: Option<AuditCache>,
+    /// 最近一次读取或写入时的磁盘指纹，用于检测外部进程（如 MCP）写入并自动热重载。
+    disk_fingerprint: Option<DiskFingerprint>,
 }
 
 /// 规范化可选 MCP 使用者/客户端标识（仅在来源为 MCP 且去空白后非空时保留）。
@@ -547,11 +747,23 @@ impl Case {
     }
 
     /// 打开已有案件目录，并在 `origin == AuditOrigin::Mcp` 时绑定当前会话的 MCP 使用者/客户端标识。
+    /// 默认以非阻塞方式立即获取 `case.lock`（兼容既有互斥校验语义）。
     pub fn open_with_mcp_client(
         folder: &Path,
         actor: Option<&str>,
         origin: AuditOrigin,
         mcp_client: Option<&str>,
+    ) -> CoreResult<Self> {
+        Self::open_with_mcp_client_and_timeout(folder, actor, origin, mcp_client, Duration::ZERO)
+    }
+
+    /// 打开已有案件目录，并允许在 `timeout` 内以短锁退避重试方式等待获取 `case.lock`。
+    pub fn open_with_mcp_client_and_timeout(
+        folder: &Path,
+        actor: Option<&str>,
+        origin: AuditOrigin,
+        mcp_client: Option<&str>,
+        timeout: Duration,
     ) -> CoreResult<Self> {
         let folder = resolve_clean(folder);
         let metadata_path = folder.join("case.json");
@@ -559,194 +771,151 @@ impl Case {
             return Err(CoreError::CorruptCase("缺少案件元数据 case.json".to_string()));
         }
 
-        let lease = CaseFileLock::acquire(&folder.join("case.lock")).map_err(|e| match e {
-            EngineError::Locked(msg) => CoreError::Locked(msg),
-            other => CoreError::Locked(format!("案件已被占用或无法加锁：{other}")),
-        })?;
+        let lease = CaseFileLock::acquire_with_timeout(&folder.join("case.lock"), timeout)
+            .map_err(|e| match e {
+                EngineError::Locked(msg) => CoreError::Locked(msg),
+                other => CoreError::Locked(format!("案件已被占用或无法加锁：{other}")),
+            })?;
 
-        let raw_text = fs::read_to_string(&metadata_path)
-            .map_err(|e| CoreError::CorruptCase(format!("无法读取 case.json：{e}")))?;
-        let mut root_val: Value = serde_json::from_str(&raw_text)
-            .map_err(|e| CoreError::CorruptCase(format!("case.json 格式错误：{e}")))?;
-        let obj = root_val
-            .as_object_mut()
-            .ok_or_else(|| CoreError::CorruptCase("case.json 根节点必须为对象".to_string()))?;
-
-        for key in ["id", "examiner", "number", "target", "created"] {
-            let valid = obj
-                .get(key)
-                .and_then(Value::as_str)
-                .is_some_and(|s| !s.trim().is_empty());
-            if !valid {
-                return Err(CoreError::CorruptCase(key.to_string()));
-            }
-        }
-        if !obj.get("exports").is_some_and(Value::is_array) {
-            return Err(CoreError::CorruptCase("案件清单格式错误".to_string()));
-        }
-
-        // 从 `inventory_file`（.jsonl.gz）或旧版内联 `inventory` 字段加载清单。
-        let inventory_file = match obj.remove("inventory_file") {
-            Some(Value::String(name)) => Some(name),
-            Some(Value::Null) | None => None,
-            Some(_) => return Err(CoreError::CorruptCase("清单文件名无效".to_string())),
-        };
-        let inventory: Vec<InventoryEntry> = if let Some(ref idx_name) = inventory_file {
-            if !INVENTORY_FILE_RE.is_match(idx_name) {
-                return Err(CoreError::CorruptCase("清单文件名无效".to_string()));
-            }
-            let expected_count = obj
-                .remove("inventory_count")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| CoreError::CorruptCase("缺少 inventory_count".to_string()))?
-                as usize;
-            let loaded = read_inventory_gz(&folder.join(idx_name))
-                .map_err(|e| CoreError::CorruptCase(format!("读取清单文件失败：{e}")))?;
-            if loaded.len() != expected_count {
-                return Err(CoreError::CorruptCase("案件清单数量不匹配".to_string()));
-            }
-            loaded
-        } else {
-            let arr = obj
-                .get("inventory")
-                .ok_or_else(|| CoreError::CorruptCase("案件清单格式错误".to_string()))?;
-            if !arr.is_array() {
-                return Err(CoreError::CorruptCase("案件清单格式错误".to_string()));
-            }
-            serde_json::from_value(arr.clone())
-                .map_err(|e| CoreError::CorruptCase(format!("案件清单格式错误：{e}")))?
-        };
-
-        // 若 `evidence` 非空，校验其必需字段。
-        let evidence: Option<EvidenceInfo> = match obj.get("evidence") {
-            None | Some(Value::Null) => None,
-            Some(ev_val) => {
-                let ev_obj = ev_val
-                    .as_object()
-                    .ok_or_else(|| CoreError::CorruptCase("证据信息不完整".to_string()))?;
-                for req in ["path", "sha256", "layout", "partitions", "fixed_at", "size"] {
-                    if !ev_obj.contains_key(req) {
-                        return Err(CoreError::CorruptCase("证据信息不完整".to_string()));
-                    }
-                }
-                let mut ev: EvidenceInfo = serde_json::from_value(ev_val.clone())
-                    .map_err(|e| CoreError::CorruptCase(format!("证据信息不完整：{e}")))?;
-                if ev.size >= LARGE_IMAGE_BYTES {
-                    ev.large_image = Some(true);
-                }
-                Some(ev)
-            }
-        };
-
-        if !folder.join("reports").is_dir() || !folder.join("exports").is_dir() {
-            return Err(CoreError::CorruptCase("案件输出目录缺失".to_string()));
-        }
-
-        let id = obj["id"].as_str().unwrap_or_default().to_string();
-        let number = obj["number"].as_str().unwrap_or_default().to_string();
-        let examiner = obj["examiner"].as_str().unwrap_or_default().to_string();
-        let target = obj["target"].as_str().unwrap_or_default().to_string();
-        let created = obj["created"].as_str().unwrap_or_default().to_string();
-        let exports: Vec<ExportRecord> = serde_json::from_value(obj["exports"].clone())
-            .map_err(|e| CoreError::CorruptCase(format!("导出记录格式错误：{e}")))?;
-        let partition_scans = match obj.get("partition_scans") {
-            None | Some(Value::Null) => None,
-            Some(v) => Some(
-                serde_json::from_value(v.clone())
-                    .map_err(|e| CoreError::CorruptCase(format!("partition_scans 格式错误：{e}")))?,
-            ),
-        };
-        let offset = match obj.get("offset") {
-            None => None,
-            Some(Value::Null) => Some(None),
-            Some(v) => Some(Some(v.as_u64().ok_or_else(|| {
-                CoreError::CorruptCase("offset 格式错误".to_string())
-            })?)),
-        };
-        let fsstat = obj
-            .get("fsstat")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let index_verification = obj
-            .get("index_verification")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let verification = match obj.get("verification") {
-            None | Some(Value::Null) => None,
-            Some(v) => Some(
-                serde_json::from_value(v.clone())
-                    .map_err(|e| CoreError::CorruptCase(format!("verification 格式错误：{e}")))?,
-            ),
-        };
+        let (data, inventory_file, needs_legacy_migration) = load_case_data_from_disk(&folder)?;
 
         let resolved_actor = actor
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .unwrap_or(&examiner)
+            .unwrap_or(&data.examiner)
             .to_string();
 
         let resolved_mcp_client = normalize_mcp_client(origin, mcp_client);
-
-        let needs_legacy_migration = inventory_file.is_none() && !inventory.is_empty();
 
         let mut case = Self {
             folder,
             actor: resolved_actor,
             origin,
             mcp_client: resolved_mcp_client,
+            closed: false,
             lease: Some(lease),
             source_guard: None,
             source_paths: Vec::new(),
             session_verified: false,
             session_stamp: None,
             inventory_file,
-            data: CaseData {
-                id,
-                number,
-                examiner,
-                target,
-                created,
-                evidence,
-                inventory,
-                exports,
-                partition_scans,
-                offset,
-                fsstat,
-                index_verification,
-                verification,
-            },
+            data,
             directory_cache: VecDeque::new(),
             directory_cache_total: 0,
             directory_entries: Vec::new(),
             directory_location: None,
             audit_cache: None,
+            disk_fingerprint: None,
         };
 
         case.check_audit()?;
         if needs_legacy_migration {
             case.save_internal(true, None)?;
         }
+        case.disk_fingerprint = read_disk_fingerprint(&case.folder).ok();
 
         Ok(case)
     }
 
     /// 释放 `SourceGuard` 与 `case.lock`，将案件标记为已关闭。
     pub fn close(&mut self) {
+        self.closed = true;
         self.source_guard = None;
         self.source_paths.clear();
         self.session_verified = false;
         self.lease = None;
     }
 
+    /// 仅释放 OS `case.lock` 句柄而不关闭案件，允许桌面端空闲/浏览期间与外部 MCP 协同访问。
+    pub fn release_lock(&mut self) {
+        self.lease = None;
+    }
+
+    /// 返回当前案件对象是否持有 OS `case.lock` 句柄。
+    pub fn has_lock(&self) -> bool {
+        self.lease.is_some()
+    }
+
     pub fn is_closed(&self) -> bool {
-        self.lease.is_none()
+        self.closed
     }
 
     fn ensure_open(&self) -> CoreResult<()> {
-        if self.lease.is_none() {
+        if self.closed {
             return Err(CoreError::CaseClosed);
         }
         Ok(())
+    }
+
+    /// 检测磁盘上的 `case.json` 与 `audit.head`/`audit.jsonl` 指纹是否发生变化；
+    /// 若外部进程（如独立 `stdio`/`HTTP` MCP）有写入，则自动重载 `data`、`inventory`
+    /// 并重置 `audit_cache`，返回 `Ok(true)`；无变更时返回 `Ok(false)`。
+    pub fn sync_from_disk_if_changed(&mut self) -> CoreResult<bool> {
+        self.ensure_open()?;
+        let current_fp = read_disk_fingerprint(&self.folder)?;
+        if self.disk_fingerprint.as_ref() == Some(&current_fp) {
+            return Ok(false);
+        }
+
+        let prev_case_sha = self
+            .disk_fingerprint
+            .as_ref()
+            .map(|fp| fp.case_json_sha256.as_str());
+        let case_json_changed = prev_case_sha != Some(current_fp.case_json_sha256.as_str());
+
+        if case_json_changed {
+            let prev_evidence_path = self.data.evidence.as_ref().map(|e| e.path.clone());
+            let (new_data, new_inventory_file, _) = load_case_data_from_disk(&self.folder)?;
+            let next_evidence_path = new_data.evidence.as_ref().map(|e| e.path.clone());
+            self.data = new_data;
+            self.inventory_file = new_inventory_file;
+
+            // 若证据切换或已从大镜像快速浏览完成全盘扫描，则清理旧目录浏览缓存。
+            if prev_evidence_path != next_evidence_path || !self.browsing_directories() {
+                self.directory_cache.clear();
+                self.directory_cache_total = 0;
+                self.directory_entries.clear();
+                self.directory_location = None;
+            }
+        }
+
+        // 重置审计链增量缓存，确保下次读取或写入严格对齐最新磁盘与哈希链。
+        self.audit_cache = None;
+        self.disk_fingerprint = Some(current_fp);
+        Ok(true)
+    }
+
+    /// 写入瞬间排他短锁包装器：
+    /// 1. 若当前未持有 `case.lock`，则以 `acquire_with_timeout` 在 `timeout` 内排队获取临时排他短锁；
+    /// 2. 调用 [`Self::sync_from_disk_if_changed`] 对齐外部进程可能刚完成的最新磁盘状态与哈希链；
+    /// 3. 执行闭包 `f(self)` 完成原子落盘与审计追加；
+    /// 4. 无论成功或失败，返回前均自动释放本次临时获取的短锁（并更新磁盘指纹），确保 `audit.jsonl` SHA-256 哈希链绝对安全。
+    pub fn with_write_lock<T, F>(&mut self, timeout: Duration, f: F) -> CoreResult<T>
+    where
+        F: FnOnce(&mut Self) -> CoreResult<T>,
+    {
+        self.ensure_open()?;
+        let acquired_here = self.lease.is_none();
+        if acquired_here {
+            let lease = CaseFileLock::acquire_with_timeout(&self.folder.join("case.lock"), timeout)
+                .map_err(|e| match e {
+                    EngineError::Locked(msg) => CoreError::Locked(msg),
+                    other => CoreError::Locked(format!("案件已被占用或无法加锁：{other}")),
+                })?;
+            self.lease = Some(lease);
+        }
+
+        let outcome = (|| -> CoreResult<T> {
+            self.sync_from_disk_if_changed()?;
+            let res = f(self)?;
+            self.disk_fingerprint = read_disk_fingerprint(&self.folder).ok();
+            Ok(res)
+        })();
+
+        if acquired_here {
+            self.lease = None;
+        }
+        outcome
     }
 
     pub fn folder(&self) -> &Path {
@@ -906,6 +1075,7 @@ impl Case {
         {
             let _ = fs::remove_file(self.folder.join(prev));
         }
+        self.disk_fingerprint = read_disk_fingerprint(&self.folder).ok();
         Ok(())
     }
 
@@ -1071,6 +1241,7 @@ impl Case {
                 head: hash.clone(),
             });
         }
+        self.disk_fingerprint = read_disk_fingerprint(&self.folder).ok();
 
         Ok(AuditRecord {
             seq,
