@@ -20,7 +20,11 @@ import type {
   HashProgressEvent,
   ListAuditLogResponse,
   ListFindingsResponse,
+  ListMcpActivitiesParams,
   LocateFileResponse,
+  McpActivityRecord,
+  McpActivitySnapshot,
+  McpCaseUpdatedEvent,
   McpStatus,
   PreviewEncoding,
   PreviewImageResponse,
@@ -287,6 +291,16 @@ export const tauriApi = {
     return callCommand<McpStatus>('stop_mcp_http', {});
   },
 
+  /** 获取 MCP 实时操作流与汇总统计快照 */
+  listMcpActivities(params?: ListMcpActivitiesParams): Promise<McpActivitySnapshot> {
+    return callCommand<McpActivitySnapshot>('list_mcp_activities', (params ?? {}) as Record<string, unknown>);
+  },
+
+  /** 清空内存中的 MCP 实时操作监控流 */
+  clearMcpActivities(): Promise<{ cleared: boolean }> {
+    return callCommand<{ cleared: boolean }>('clear_mcp_activities', {});
+  },
+
   openInOs(params: { path: string; revealFolder: boolean }): Promise<{ ok: boolean }> {
     return callCommand<{ ok: boolean }>('open_in_os', params);
   },
@@ -372,5 +386,21 @@ export const tauriEvents = {
       return listen<SearchFinishedEvent>('search:finished', (e) => handler(e.payload));
     }
     return Promise.resolve(demoListen('search:finished', handler));
+  },
+
+  /** 订阅 MCP 单步工具调用实时事件（started / completed / failed） */
+  onMcpActivity(handler: (payload: McpActivityRecord) => void): Promise<UnlistenFn> {
+    if (isTauriRuntime()) {
+      return listen<McpActivityRecord>('mcp:activity', (e) => handler(e.payload));
+    }
+    return Promise.resolve(demoListen('mcp:activity', handler));
+  },
+
+  /** 订阅 MCP 修改案件后的变更通知事件 */
+  onMcpCaseUpdated(handler: (payload: McpCaseUpdatedEvent) => void): Promise<UnlistenFn> {
+    if (isTauriRuntime()) {
+      return listen<McpCaseUpdatedEvent>('mcp:case-updated', (e) => handler(e.payload));
+    }
+    return Promise.resolve(demoListen('mcp:case-updated', handler));
   },
 };

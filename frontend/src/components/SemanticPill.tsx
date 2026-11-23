@@ -42,10 +42,14 @@ const DIRECT_MAP: Record<string, PillVariant> = {
 
   M: 'accent',
   'M 内容修改': 'accent',
+  执行中: 'accent',
+  '桌面 HTTP': 'accent',
+  '独立 HTTP': 'system',
 
   未启动: 'neutral',
   已停止: 'neutral',
   跳过: 'neutral',
+  stdio: 'neutral',
   A: 'neutral',
   'A 访问': 'neutral',
 };

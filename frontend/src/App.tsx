@@ -19,7 +19,7 @@ import { EvidenceInfoModule } from './modules/EvidenceInfoModule';
 import { FileBrowserModule } from './modules/FileBrowserModule';
 import { FindingsModule } from './modules/FindingsModule';
 import { HelpGuideDialog } from './modules/HelpGuideDialog';
-import { McpDialog } from './modules/McpDialog';
+import { McpMonitorModule } from './modules/McpMonitorModule';
 import { TimelineModule } from './modules/TimelineModule';
 import type {
   AppPaths,
@@ -27,8 +27,17 @@ import type {
   CaseSnapshot,
   EntryView,
   ExamineFileResponse,
+  McpActivityRecord,
+  McpActivityStats,
+  McpStatus,
 } from './types/ipc';
 import { formatError } from './utils/assets';
+import {
+  computeMcpActivityStats,
+  EMPTY_MCP_ACTIVITY_STATS,
+  mergeMcpActivityRecord,
+  normalizeCaseDirForCompare,
+} from './utils/mcpActivity';
 
 const DEFAULT_STATUS = '就绪 · 应用层只读 · 本地处理 · UTC+8';
 const DEFAULT_DETAIL = '选择目录定位文件；拖动分隔条调整树、列表和内容区域。';
@@ -57,12 +66,16 @@ export const App: React.FC = () => {
   const [refreshToken, setRefreshToken] = useState(0);
   const [singleFileSearchToken, setSingleFileSearchToken] = useState(0);
 
+  // 全局 MCP 服务状态与实时监控流
+  const [mcpStatus, setMcpStatus] = useState<McpStatus | null>(null);
+  const [mcpActivities, setMcpActivities] = useState<McpActivityRecord[]>([]);
+  const [mcpStats, setMcpStats] = useState<McpActivityStats>(EMPTY_MCP_ACTIVITY_STATS);
+
   // 弹窗状态
   const [newCaseOpen, setNewCaseOpen] = useState(false);
   const [openCaseOpen, setOpenCaseOpen] = useState(false);
   const [registerSourceOpen, setRegisterSourceOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [mcpOpen, setMcpOpen] = useState(false);
   const [noteTarget, setNoteTarget] = useState<EntryView | null>(null);
   const [examineResult, setExamineResult] = useState<ExamineFileResponse | null>(null);
   const [exportResult, setExportResult] = useState<ExportResultInfo | null>(null);
@@ -71,8 +84,12 @@ export const App: React.FC = () => {
 
   const busyRef = useRef(false);
   const backgroundBusyRef = useRef(false);
+  const snapshotRef = useRef<CaseSnapshot | null>(null);
+  const mcpStatusRef = useRef<McpStatus | null>(null);
   busyRef.current = busy;
   backgroundBusyRef.current = hashingImage || contentSearching;
+  snapshotRef.current = snapshot;
+  mcpStatusRef.current = mcpStatus;
 
   const showAlert = useCallback(
     (title: string, message: string, tone: AlertDialogState['tone'] = 'info') => {
@@ -90,7 +107,41 @@ export const App: React.FC = () => {
     setRefreshToken((n) => n + 1);
   }, []);
 
-  // 启动时读取路径和当前案件快照
+  /** 拉取最新 MCP 服务状态与实时监控流快照 */
+  const refreshMcpTelemetry = useCallback(async () => {
+    const [statusRes, actRes] = await Promise.all([
+      tauriApi.getMcpStatus(),
+      tauriApi.listMcpActivities({ limit: 300 }),
+    ]);
+    setMcpStatus(statusRes);
+    setMcpActivities(actRes.activities);
+    setMcpStats(actRes.stats);
+  }, []);
+
+  /** 清空 MCP 实时操作流 */
+  const handleClearMcpActivities = useCallback(async () => {
+    await tauriApi.clearMcpActivities();
+    setMcpActivities([]);
+    setMcpStats(EMPTY_MCP_ACTIVITY_STATS);
+  }, []);
+
+  /** 温和刷新当前打开的案件快照与审计日志（不折叠文件树、不丢失当前选中文件） */
+  const refreshCurrentCaseGently = useCallback(async (notice?: string) => {
+    try {
+      const latest = await tauriApi.getCaseSnapshot();
+      if (latest) {
+        setSnapshot(latest);
+      }
+      setRefreshToken((n) => n + 1);
+      if (notice) {
+        setStatusText(notice);
+      }
+    } catch {
+      // 忽略温和刷新过程中的偶发读取异常
+    }
+  }, []);
+
+  // 启动时读取路径、当前案件快照与 MCP 实时状态
   useEffect(() => {
     let active = true;
     void (async () => {
@@ -107,13 +158,26 @@ export const App: React.FC = () => {
       } catch {
         // 忽略初始化读取失败
       }
+
+      try {
+        const [statusRes, actRes] = await Promise.all([
+          tauriApi.getMcpStatus(),
+          tauriApi.listMcpActivities({ limit: 300 }),
+        ]);
+        if (!active) return;
+        setMcpStatus(statusRes);
+        setMcpActivities(actRes.activities);
+        setMcpStats(actRes.stats);
+      } catch {
+        // 忽略初始化 MCP 监控读取失败
+      }
     })();
     return () => {
       active = false;
     };
   }, []);
 
-  // 订阅后台任务与大镜像哈希进度事件
+  // 订阅后台任务、大镜像哈希进度与 MCP 实时遥测事件
   useEffect(() => {
     let mounted = true;
     const unlisteners: (() => void)[] = [];
@@ -158,14 +222,37 @@ export const App: React.FC = () => {
         }
       });
 
-      unlisteners.push(u1, u2, u3);
+      // 实时合并 MCP 单步操作事件并重算统计指标
+      const u4 = await tauriEvents.onMcpActivity((record) => {
+        if (!mounted) return;
+        setMcpActivities((prev) => {
+          const next = mergeMcpActivityRecord(prev, record, 500);
+          setMcpStats(computeMcpActivityStats(next));
+          return next;
+        });
+      });
+
+      // 当 MCP 对当前打开的案件执行受控写入后，温和刷新快照与审计日志（不折叠文件树）
+      const u5 = await tauriEvents.onMcpCaseUpdated((ev) => {
+        if (!mounted) return;
+        const currentDir = normalizeCaseDirForCompare(snapshotRef.current?.caseDir);
+        const updatedDir = normalizeCaseDirForCompare(ev.caseDir);
+        if (currentDir && updatedDir && currentDir === updatedDir) {
+          const matchedTool = mcpStatusRef.current?.tools?.find((t) => t.name === ev.toolName);
+          const displayTool = matchedTool?.title || ev.toolName;
+          const clientLabel = ev.client ? `MCP（${ev.client}）` : 'MCP';
+          void refreshCurrentCaseGently(`${clientLabel}完成「${displayTool}」，已自动刷新案件与审计日志`);
+        }
+      });
+
+      unlisteners.push(u1, u2, u3, u4, u5);
     })();
 
     return () => {
       mounted = false;
       for (const u of unlisteners) u();
     };
-  }, [applySnapshot, showAlert]);
+  }, [applySnapshot, refreshCurrentCaseGently, showAlert]);
 
   // 主窗口关闭守卫（仅 Tauri 桌面端）
   useEffect(() => {
@@ -593,7 +680,7 @@ export const App: React.FC = () => {
         setHelpOpen(true);
         break;
       case 'mcp':
-        setMcpOpen(true);
+        setActiveTab('mcp');
         break;
       case 'new_case':
         handleNewCase();
@@ -625,6 +712,26 @@ export const App: React.FC = () => {
   const custodyState = snapshot?.custodyState ?? 'idle';
   const showProgressBar = busy || hashingImage;
 
+  // 当前正在执行中的 MCP 工具信息（用于顶栏和底栏实时状态指示）
+  const activeRunningMcp = useMemo(
+    () => mcpActivities.find((item) => item.phase === 'started') ?? null,
+    [mcpActivities]
+  );
+  const mcpRunningCalls = mcpStats.runningCalls;
+  const mcpHttpRunning = Boolean(mcpStatus?.running);
+  const mcpLiveLabel = useMemo(() => {
+    if (mcpRunningCalls > 0) {
+      const toolTitle = activeRunningMcp?.toolTitle || '正在调用工具';
+      return mcpRunningCalls > 1
+        ? `MCP 执行中 · ${toolTitle} (+${mcpRunningCalls - 1})`
+        : `MCP 执行中 · ${toolTitle}`;
+    }
+    if (mcpHttpRunning) {
+      return 'MCP 运行中';
+    }
+    return 'MCP 服务';
+  }, [mcpRunningCalls, activeRunningMcp, mcpHttpRunning]);
+
   return (
     <div className="td-workbench">
       {/* 1. 顶部 48px 明净瓷白命令带 */}
@@ -643,17 +750,52 @@ export const App: React.FC = () => {
 
         {brandActions.length > 0 && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 4 }}>
-            {brandActions.map((act) => (
-              <button
-                key={act.key}
-                type="button"
-                className="td-btn td-hdr-btn--ghost"
-                onClick={() => invokeAction(act.key)}
-              >
-                {act.icon && <UiIcon name={act.icon} size={14} color="var(--header-muted)" />}
-                {act.title}
-              </button>
-            ))}
+            {brandActions.map((act) => {
+              if (act.key === 'mcp') {
+                const isRunningNow = mcpRunningCalls > 0;
+                const stateClass = isRunningNow
+                  ? 'td-hdr-mcp-btn--running'
+                  : mcpHttpRunning
+                    ? 'td-hdr-mcp-btn--online'
+                    : 'td-hdr-btn--ghost';
+                const activeClass = activeTab === 'mcp' ? 'td-hdr-mcp-btn--active' : '';
+                return (
+                  <button
+                    key={act.key}
+                    type="button"
+                    className={`td-btn td-hdr-mcp-btn ${stateClass} ${activeClass}`}
+                    title={
+                      isRunningNow
+                        ? `${mcpLiveLabel}（点击切换到 MCP 实时监控）`
+                        : mcpHttpRunning
+                          ? `本地 MCP HTTP 服务运行中：${mcpStatus?.url}（点击打开实时监控）`
+                          : '切换到 MCP 实时监控与服务配置'
+                    }
+                    onClick={() => invokeAction(act.key)}
+                  >
+                    {isRunningNow ? (
+                      <span className="td-mcp-dot td-mcp-dot--running" />
+                    ) : mcpHttpRunning ? (
+                      <span className="td-mcp-dot td-mcp-dot--online" />
+                    ) : (
+                      act.icon && <UiIcon name={act.icon} size={14} color="var(--header-muted)" />
+                    )}
+                    <span className="td-hdr-mcp-label">{mcpLiveLabel}</span>
+                  </button>
+                );
+              }
+              return (
+                <button
+                  key={act.key}
+                  type="button"
+                  className="td-btn td-hdr-btn--ghost"
+                  onClick={() => invokeAction(act.key)}
+                >
+                  {act.icon && <UiIcon name={act.icon} size={14} color="var(--header-muted)" />}
+                  {act.title}
+                </button>
+              );
+            })}
           </div>
         )}
 
@@ -736,6 +878,12 @@ export const App: React.FC = () => {
                 }}
               >
                 {panel.title}
+                {panel.key === 'mcp' && mcpRunningCalls > 0 && (
+                  <span className="td-tab-badge">
+                    <span className="td-mcp-dot td-mcp-dot--running" style={{ width: 6, height: 6 }} />
+                    {mcpRunningCalls}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -866,6 +1014,33 @@ export const App: React.FC = () => {
             />
           </div>
         )}
+
+        {registry.hasFeature('mcp') && (
+          <div
+            style={{
+              display: activeTab === 'mcp' ? 'flex' : 'none',
+              flex: 1,
+              minHeight: 0,
+              flexDirection: 'column',
+            }}
+          >
+            <McpMonitorModule
+              snapshot={snapshot}
+              mcpStatus={mcpStatus}
+              activities={mcpActivities}
+              stats={mcpStats}
+              onStatusChange={setMcpStatus}
+              onRefreshAll={refreshMcpTelemetry}
+              onClearActivities={handleClearMcpActivities}
+              onCaseReleased={() => handleCaseReplaced(null)}
+              onJumpToAudit={() => {
+                setActiveTab('audit');
+                bumpRefresh();
+              }}
+              onRefreshCurrentCase={() => refreshCurrentCaseGently('已手动刷新当前案件快照与审计日志')}
+            />
+          </div>
+        )}
       </main>
 
       {/* 5. 底部只读状态与进度遥测栏（28px） */}
@@ -873,6 +1048,17 @@ export const App: React.FC = () => {
         <span className="td-footer-detail" title={detailText}>
           {detailText}
         </span>
+        {mcpRunningCalls > 0 && (
+          <button
+            type="button"
+            className="td-footer-mcp-pill"
+            title={`${mcpLiveLabel}（点击查看实时操作流）`}
+            onClick={() => setActiveTab('mcp')}
+          >
+            <span className="td-mcp-dot td-mcp-dot--running" style={{ width: 7, height: 7 }} />
+            <span className="td-footer-mcp-pill-text">{mcpLiveLabel}</span>
+          </button>
+        )}
         <div className="td-footer-divider" />
         <span className="td-footer-status">{statusText}</span>
         {showProgressBar && (
@@ -942,14 +1128,6 @@ export const App: React.FC = () => {
           materials={bundleMaterials}
           onConfirm={(exportIds, searchIds) => void runBuildBundle(exportIds, searchIds)}
           onClose={() => setBundleMaterials(null)}
-        />
-      )}
-
-      {mcpOpen && (
-        <McpDialog
-          activeCaseNumber={snapshot?.number ?? null}
-          onCaseReleased={() => handleCaseReplaced(null)}
-          onClose={() => setMcpOpen(false)}
         />
       )}
 

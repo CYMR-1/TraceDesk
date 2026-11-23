@@ -1585,3 +1585,873 @@
   max-height: none;
   box-shadow: 0 2px 12px rgba(15, 23, 42, 0.12);
 }
+
+/* ==========================================================================
+ * MCP 实时监控主工作区与全局状态指示样式（明净瓷白与晴空蓝）
+ * ========================================================================== */
+
+/* 呼吸状态指示点与执行中旋转动画 */
+.td-mcp-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+.td-mcp-dot--idle {
+  background: var(--text-disabled);
+}
+
+.td-mcp-dot--online {
+  background: #16A34A;
+  box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.18);
+}
+
+.td-mcp-dot--running {
+  background: #2563EB;
+  box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.45);
+  animation: td-mcp-pulse 1.5s ease-out infinite;
+}
+
+@keyframes td-mcp-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(37, 99, 235, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+  }
+}
+
+.td-mcp-spinner {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 2px solid #BFDBFE;
+  border-top-color: #2563EB;
+  animation: td-mcp-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes td-mcp-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 顶部命令带 MCP 实时状态感知按钮 */
+.td-header .td-hdr-mcp-btn {
+  height: 30px;
+  min-height: 30px;
+  max-width: 240px;
+  padding: 4px 10px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-weight: 500;
+  gap: 6px;
+}
+
+.td-header .td-hdr-mcp-btn--running {
+  background: #EFF6FF;
+  color: #1D4ED8;
+  border: 1px solid #93C5FD;
+  font-weight: 600;
+}
+
+.td-header .td-hdr-mcp-btn--running:hover:not(:disabled) {
+  background: #DBEAFE;
+  border-color: #60A5FA;
+  color: #1E40AF;
+}
+
+.td-header .td-hdr-mcp-btn--online {
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+  border: 1px solid var(--ok-border);
+  font-weight: 500;
+}
+
+.td-header .td-hdr-mcp-btn--online:hover:not(:disabled) {
+  background: #DCFCE7;
+  border-color: #86EFAC;
+  color: #14532D;
+}
+
+.td-header .td-hdr-mcp-btn--active {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.td-hdr-mcp-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 模块标签上的微型计数或状态点 */
+.td-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 0 5px;
+  height: 16px;
+  border-radius: 9px;
+  background: var(--accent-soft-bg);
+  color: var(--accent-soft-text);
+  border: 1px solid var(--accent-soft-border);
+}
+
+/* 底部状态栏 MCP 实时执行指示胶囊 */
+.td-footer-mcp-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  max-width: 280px;
+  padding: 0 8px;
+  border-radius: 10px;
+  border: 1px solid #93C5FD;
+  background: #EFF6FF;
+  color: #1D4ED8;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.td-footer-mcp-pill:hover {
+  background: #DBEAFE;
+  border-color: #60A5FA;
+}
+
+.td-footer-mcp-pill-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* MCP 监控页顶部控制与状态条 */
+.td-mcp-control-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 14px;
+  background: var(--chrome-bg);
+  border-bottom: 1px solid var(--border-pane);
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.td-mcp-control-left,
+.td-mcp-control-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.td-mcp-service-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 600;
+  user-select: text;
+}
+
+.td-mcp-service-badge--running {
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+  border-color: var(--ok-border);
+}
+
+.td-mcp-service-badge--stopped {
+  background: var(--neutral-bg);
+  color: var(--neutral-fg);
+  border-color: var(--neutral-border);
+  font-weight: 500;
+}
+
+.td-mcp-clients-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.td-mcp-client-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 4px;
+  border: 1px solid var(--system-border);
+  background: var(--system-bg);
+  color: var(--system-fg);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.td-mcp-client-chip:hover {
+  background: #EAE2FC;
+  border-color: #B79FF0;
+}
+
+.td-mcp-client-chip--active {
+  background: #2563EB;
+  border-color: #1D4ED8;
+  color: #FFFFFF;
+}
+
+.td-mcp-lock-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--warn-border);
+  color: var(--warn-fg);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.td-mcp-error-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 14px;
+  background: var(--danger-bg);
+  border-bottom: 1px solid var(--danger-border);
+  color: var(--danger-fg);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+/* 四项紧凑遥测指标卡 */
+.td-mcp-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  padding: 10px 14px;
+  background: #F8FBFE;
+  border-bottom: 1px solid var(--border-pane);
+  flex-shrink: 0;
+}
+
+@media (max-width: 980px) {
+  .td-mcp-metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.td-mcp-metric-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 12px;
+  background: var(--surface-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  min-width: 0;
+  transition: border-color 0.12s ease;
+}
+
+.td-mcp-metric-card:hover {
+  border-color: var(--border-default);
+}
+
+.td-mcp-metric-card--running {
+  border-color: #93C5FD;
+  background: linear-gradient(180deg, #FFFFFF 0%, #F5F9FF 100%);
+}
+
+.td-mcp-metric-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.td-mcp-metric-value-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.td-mcp-metric-value {
+  font-family: var(--font-mono);
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.td-mcp-metric-sub {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.td-mcp-ratio-bar {
+  display: flex;
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--neutral-bg);
+  margin-top: 2px;
+}
+
+.td-mcp-ratio-read {
+  background: #16A34A;
+  transition: width 0.2s ease;
+}
+
+.td-mcp-ratio-write {
+  background: #D97706;
+  transition: width 0.2s ease;
+}
+
+/* 三合一子视图切换条 */
+.td-mcp-subnav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 14px;
+  height: 36px;
+  min-height: 36px;
+  background: var(--surface-bg);
+  border-bottom: 1px solid var(--border-default);
+  flex-shrink: 0;
+}
+
+.td-mcp-subnav-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  height: 100%;
+}
+
+.td-mcp-subnav-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  padding: 0 12px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.12s ease, background-color 0.12s ease;
+}
+
+.td-mcp-subnav-tab:hover:not(.td-mcp-subnav-tab--active) {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+.td-mcp-subnav-tab--active {
+  color: #2563EB;
+  border-bottom-color: #2563EB;
+  font-weight: 600;
+}
+
+.td-mcp-subnav-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 0 6px;
+  height: 18px;
+  line-height: 18px;
+  border-radius: 9px;
+  background: var(--neutral-bg);
+  color: var(--neutral-fg);
+}
+
+.td-mcp-subnav-tab--active .td-mcp-subnav-count {
+  background: #EFF6FF;
+  color: #1D4ED8;
+}
+
+.td-mcp-feedback {
+  font-size: 11.5px;
+  color: var(--accent-soft-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 实时操作流筛选工具条 */
+.td-mcp-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  background: var(--surface-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.td-segmented {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: 5px;
+  background: var(--neutral-bg);
+  border: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.td-segmented-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 3.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.td-segmented-btn:hover:not(.td-segmented-btn--active) {
+  color: var(--text-primary);
+}
+
+.td-segmented-btn--active {
+  background: var(--surface-bg);
+  color: #2563EB;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+
+.td-mcp-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+
+/* 左栏：实时步骤时间线列表 */
+.td-mcp-stream-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--surface-bg);
+}
+
+.td-mcp-stream-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--surface-bg);
+}
+
+.td-mcp-step-row {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  padding: 9px 14px 9px 12px;
+  border-bottom: 1px solid var(--border-soft-rule);
+  cursor: pointer;
+  background: var(--surface-bg);
+  transition: background-color 0.1s ease;
+}
+
+.td-mcp-step-row:hover {
+  background: var(--surface-hover);
+}
+
+.td-mcp-step-row--selected {
+  background: var(--surface-selected);
+}
+
+.td-mcp-step-row--selected:hover {
+  background: var(--surface-selected);
+}
+
+.td-mcp-step-row--selected::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: #2563EB;
+}
+
+.td-mcp-step-row--running {
+  background: linear-gradient(90deg, #F0F7FF 0%, #FFFFFF 60%);
+}
+
+.td-mcp-step-row--selected.td-mcp-step-row--running {
+  background: var(--surface-selected);
+}
+
+/* 左侧时间线状态轨与图标 */
+.td-mcp-step-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 20px;
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+
+.td-mcp-step-rail-line {
+  width: 1.5px;
+  flex: 1;
+  margin-top: 4px;
+  background: var(--border-subtle);
+  min-height: 12px;
+}
+
+.td-mcp-step-row:last-child .td-mcp-step-rail-line {
+  background: transparent;
+}
+
+.td-mcp-step-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.td-mcp-step-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.td-mcp-step-time {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.td-mcp-step-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.td-mcp-step-rawname {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.td-mcp-step-duration {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--neutral-bg);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.td-mcp-step-duration--running {
+  background: #EFF6FF;
+  color: #1D4ED8;
+}
+
+.td-mcp-step-duration--failed {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+}
+
+.td-mcp-step-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.td-mcp-step-params {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+
+.td-mcp-step-outcome {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.td-mcp-step-outcome--error {
+  color: var(--danger-fg);
+  font-weight: 500;
+}
+
+/* 空态引导卡片 */
+.td-mcp-empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 36px 28px;
+  text-align: center;
+  gap: 10px;
+  background: var(--surface-bg);
+}
+
+.td-mcp-empty-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  background: #EFF6FF;
+  border: 1px solid #BFDBFE;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.td-mcp-empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.td-mcp-empty-desc {
+  max-width: 420px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+/* 右栏：单步操作详情透视面板 */
+.td-mcp-detail-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--surface-bg);
+}
+
+.td-mcp-detail-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px 18px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  user-select: text;
+}
+
+.td-mcp-detail-card {
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.td-mcp-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 14px;
+}
+
+.td-mcp-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.td-mcp-meta-item--full {
+  grid-column: 1 / -1;
+}
+
+.td-mcp-meta-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.td-mcp-meta-val {
+  font-size: 12.5px;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.td-mcp-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.td-mcp-block-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.td-mcp-json-block {
+  width: 100%;
+  max-height: 260px;
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--surface-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.td-mcp-error-box {
+  padding: 10px 12px;
+  border-radius: 5px;
+  border: 1px solid var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.td-mcp-running-box {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 5px;
+  border: 1px solid #BFDBFE;
+  background: #EFF6FF;
+  color: #1D4ED8;
+  font-size: 12.5px;
+}
+
+/* 接入配置子视图（双栏卡片） */
+.td-mcp-config-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: #F8FBFE;
+}
+
+.td-mcp-config-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-radius: 6px;
+  background: #EFF6FF;
+  border: 1px solid #BFDBFE;
+  color: #1E40AF;
+  font-size: 12.5px;
+}
+
+.td-mcp-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+@media (max-width: 960px) {
+  .td-mcp-config-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.td-mcp-config-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  background: var(--surface-bg);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  min-width: 0;
+}
+
+.td-mcp-config-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.td-mcp-config-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.td-mcp-config-card-desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.55;
+}

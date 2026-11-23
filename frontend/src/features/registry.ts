@@ -22,7 +22,7 @@ export type ActionLocation = 'brand' | 'header' | 'evidence' | 'preview' | 'file
 
 export type ActionRole = 'default' | 'accent' | 'soft' | 'ghost' | 'pager' | 'warning';
 
-export type PanelKey = 'files' | 'info' | 'findings' | 'timeview' | 'audit' | 'review';
+export type PanelKey = 'files' | 'info' | 'findings' | 'timeview' | 'audit' | 'review' | 'mcp';
 
 export interface FeatureActionSpec {
   key: string;
@@ -191,7 +191,7 @@ const FEATURE_CATALOG: Record<FeatureKey, FeatureDefinition> = {
     actions: [
       { key: 'mcp', title: 'MCP 服务', location: 'brand', role: 'pager', icon: 'mcp' },
     ],
-    panels: [],
+    panels: [{ key: 'mcp', title: 'MCP 实时监控' }],
   },
   review: {
     key: 'review',
@@ -254,8 +254,8 @@ export function createFeatureRegistry(enabled: readonly FeatureKey[] = ENABLED_F
     }
   }
 
-  // 严格保证 6 个主工作区标签顺序：文件浏览 → 镜像与文件系统 → 取证发现 → MACB 时间线 → 审计日志 → 内容搜索与复核
-  const strictPanelOrder: PanelKey[] = ['files', 'info', 'findings', 'timeview', 'audit', 'review'];
+  // 严格保证主工作区标签顺序：文件浏览 → 镜像与文件系统 → 取证发现 → MACB 时间线 → 审计日志 → 内容搜索与复核 → MCP 实时监控
+  const strictPanelOrder: PanelKey[] = ['files', 'info', 'findings', 'timeview', 'audit', 'review', 'mcp'];
   const orderedPanels = strictPanelOrder
     .map((key) => panelMap.get(key))
     .filter((p): p is FeaturePanelSpec => p !== undefined);
