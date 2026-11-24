@@ -685,7 +685,7 @@ fn desktop_embedded_mcp_http_caller_identity_and_audit_filter() {
     assert!(st_running.running);
     let host = format!("127.0.0.1:{port}");
 
-    // 1. 客户端通过 initialize 上报 clientInfo = Cursor 1.5，服务端返回 Mcp-Session-Id 头。
+    // 1. 客户端通过 initialize 上报 clientInfo = Cursor (version 1.5)，服务端返回 Mcp-Session-Id 头且仅记录名称 Cursor。
     let init_body = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -714,7 +714,7 @@ fn desktop_embedded_mcp_http_caller_identity_and_audit_filter() {
         .cloned()
         .expect("桌面端内嵌 HTTP MCP 必须返回 Mcp-Session-Id");
 
-    // 2. 携带该 Mcp-Session-Id 调用 tracedesk_record_finding（不传 actor）-> 记录为 Cursor 1.5。
+    // 2. 携带该 Mcp-Session-Id 调用 tracedesk_record_finding（不传 actor）-> 记录为 Cursor（不带末尾版本号）。
     let call_cursor_body = json!({
         "jsonrpc": "2.0",
         "id": 2,
@@ -795,7 +795,7 @@ fn desktop_embedded_mcp_http_caller_identity_and_audit_filter() {
         all_mcp
             .filter_options
             .origins
-            .contains(&"MCP · Cursor 1.5".to_string())
+            .contains(&"MCP · Cursor".to_string())
     );
     assert!(
         all_mcp
@@ -808,14 +808,11 @@ fn desktop_embedded_mcp_http_caller_identity_and_audit_filter() {
         .expect("按 MCP 筛选");
     assert_eq!(all_mcp_upper.records.len(), 2);
 
-    let by_cursor_kw = cmd_list_audit_log(&state, "Cursor 1.5", None, None, None, None, "seq", true)
-        .expect("按 Cursor 1.5 关键词搜索");
+    let by_cursor_kw = cmd_list_audit_log(&state, "Cursor", None, None, None, None, "seq", true)
+        .expect("按 Cursor 关键词搜索");
     assert_eq!(by_cursor_kw.records.len(), 1);
-    assert_eq!(by_cursor_kw.records[0].origin_label, "MCP · Cursor 1.5");
-    assert_eq!(
-        by_cursor_kw.records[0].mcp_user.as_deref(),
-        Some("Cursor 1.5")
-    );
+    assert_eq!(by_cursor_kw.records[0].origin_label, "MCP · Cursor");
+    assert_eq!(by_cursor_kw.records[0].mcp_user.as_deref(), Some("Cursor"));
 
     let by_claude_kw =
         cmd_list_audit_log(&state, "Claude Desktop", None, None, None, None, "seq", true)
@@ -830,7 +827,7 @@ fn desktop_embedded_mcp_http_caller_identity_and_audit_filter() {
         Some("赵六 / Claude Desktop")
     );
 
-    // 5. 校验桌面端 list_findings 同步携带 originLabel 与 mcpUser。
+    // 5. 校验桌面端 list_findings 同步携带去除版本号后的 originLabel 与 mcpUser。
     let findings = cmd_list_findings(&state, None, None, Some("Cursor"), "seq", false)
         .expect("按 Cursor 搜索取证发现");
     assert_eq!(findings.groups.len(), 1);
@@ -838,9 +835,96 @@ fn desktop_embedded_mcp_http_caller_identity_and_audit_filter() {
         findings.groups[0]
             .records
             .iter()
-            .any(|r| r.origin_label.as_deref() == Some("MCP · Cursor 1.5")
-                && r.mcp_user.as_deref() == Some("Cursor 1.5"))
+            .any(|r| r.origin_label.as_deref() == Some("MCP · Cursor")
+                && r.mcp_user.as_deref() == Some("Cursor"))
     );
+
+    // 5b. 模拟历史磁盘记录含 "workbuddy 1.0" 与 "WorkBuddy HTTP / workbuddy-http-forensics 1.0"，
+    //     与新版 "workbuddy" 共存于同一案件时，筛选下拉自然合并为 "MCP · workbuddy" 且哈希链 100% 校验通过。
+    {
+        let mut legacy_writer = tracedesk_core::Case::open_with_mcp_client(
+            Path::new(&snap.case_dir),
+            Some("测试员"),
+            tracedesk_core::AuditOrigin::Mcp,
+            Some("workbuddy 1.0"),
+        )
+        .expect("以历史带版本号 MCP 身份写入审计链");
+        legacy_writer
+            .log("FILE_NOTE", "DOCS/CASE.TXT", "成功", serde_json::Map::new())
+            .expect("写入 workbuddy 1.0 记录");
+        legacy_writer
+            .log_with_mcp_client(
+                "FILE_NOTE",
+                "DOCS/CASE.TXT",
+                "成功",
+                serde_json::Map::new(),
+                Some("workbuddy"),
+            )
+            .expect("写入 workbuddy 新记录");
+        legacy_writer
+            .log_with_mcp_client(
+                "FILE_NOTE",
+                "DOCS/CASE.TXT",
+                "成功",
+                serde_json::Map::new(),
+                Some("WorkBuddy HTTP / workbuddy-http-forensics 1.0"),
+            )
+            .expect("写入 WorkBuddy HTTP 历史记录");
+        legacy_writer.close();
+    }
+    let _ = state
+        .reload_active_case_from_disk()
+        .expect("热重载含历史版本号记录的案件");
+
+    let wb_filtered = cmd_list_audit_log(
+        &state,
+        "",
+        Some("MCP · workbuddy"),
+        None,
+        None,
+        None,
+        "seq",
+        true,
+    )
+    .expect("按合并后的 MCP · workbuddy 筛选");
+    assert!(wb_filtered.valid);
+    assert_eq!(
+        wb_filtered.records.len(),
+        2,
+        "旧 workbuddy 1.0 与新 workbuddy 应合并为同一筛选项并同时命中"
+    );
+    assert!(
+        wb_filtered
+            .records
+            .iter()
+            .all(|r| r.origin_label == "MCP · workbuddy" && r.mcp_user.as_deref() == Some("workbuddy"))
+    );
+    assert_eq!(
+        wb_filtered
+            .filter_options
+            .origins
+            .iter()
+            .filter(|o| o.as_str() == "MCP · workbuddy")
+            .count(),
+        1
+    );
+    assert!(
+        wb_filtered
+            .filter_options
+            .origins
+            .contains(&"MCP · WorkBuddy HTTP / workbuddy-http-forensics".to_string())
+    );
+    assert!(
+        !wb_filtered
+            .filter_options
+            .origins
+            .iter()
+            .any(|o| o.contains("1.0") || o.contains("1.5"))
+    );
+    let raw_audit = std::fs::read_to_string(Path::new(&snap.case_dir).join("audit.jsonl"))
+        .expect("读取原始 audit.jsonl");
+    assert!(raw_audit.contains("\"workbuddy 1.0\""));
+    assert!(tracedesk_core::verify_audit_chain_at(Path::new(&snap.case_dir)).is_ok());
 
     // 6. 生成复核包并验签通过。
     let bundle_res = cmd_build_review_bundle(&state, None, None).expect("生成复核包");
@@ -1048,8 +1132,15 @@ fn desktop_mcp_activity_telemetry_tailing_filter_and_clear() {
     assert_eq!(full.stats.failed_calls, 1);
     assert_eq!(full.stats.read_only_calls, 4);
     assert_eq!(full.stats.write_calls, 2);
-    assert!(full.stats.active_clients.contains(&"Antigravity 1.0".to_string()));
+    assert!(full.stats.active_clients.contains(&"Antigravity".to_string()));
     assert!(full.stats.active_clients.contains(&"Cursor".to_string()));
+    assert!(
+        !full
+            .stats
+            .active_clients
+            .iter()
+            .any(|c| c.contains("1.0"))
+    );
     assert_eq!(
         full.stats
             .tool_stats
@@ -1075,7 +1166,7 @@ fn desktop_mcp_activity_telemetry_tailing_filter_and_clear() {
     let only_desktop_failed = cmd_list_mcp_activities(
         &state,
         Some(10),
-        Some("Antigravity 1.0"),
+        Some("Antigravity"),
         Some("failed"),
         Some("desktop-http"),
         Some("non_existent"),

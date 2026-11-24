@@ -24,7 +24,8 @@ pub use activity::{
     MAX_ACTIVITY_LOG_LINES, MAX_PREVIEW_BYTES, McpActivityRecord, McpActivitySink,
     McpActivitySnapshot, McpActivityStats, McpActivityStore, McpToolStat, append_activity_record,
     compute_activity_stats, default_activity_log_path, default_file_activity_sink,
-    now_east8_millis, trim_activity_log_if_needed, truncate_activity_log, truncate_preview,
+    normalize_activity_client, now_east8_millis, trim_activity_log_if_needed,
+    truncate_activity_log, truncate_preview,
 };
 
 pub use http::{

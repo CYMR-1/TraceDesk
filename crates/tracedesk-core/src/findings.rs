@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::case::Case;
+pub use crate::case::strip_trailing_version;
 use crate::error::{CoreError, CoreResult};
 use crate::formatting::{can_export, display_iso_time, now, sha256_hex};
 
@@ -167,22 +168,23 @@ pub fn audit_origin(record: &AuditRecord) -> AuditOrigin {
     }
 }
 
-/// 提取审计记录对应的 MCP 使用者/客户端名称。
+/// 提取审计记录对应的 MCP 使用者/客户端展示名称（自动去除各段末尾的版本号数字，不修改磁盘原文）。
 ///
 /// - 人工操作固定返回 `None`；
-/// - MCP 操作优先取非空 `mcp_client`（排除泛化 `"MCP"`）；
-/// - 兼容旧版无 `mcp_client` 记录：从 `actor` 去除 `(MCP)` 后若非空且不等于 `"MCP"` 则取该名称。
+/// - MCP 操作优先取非空 `mcp_client`（经 [`strip_trailing_version`] 归一化并排除泛化 `"MCP"`）；
+/// - 兼容旧版无 `mcp_client` 记录：从 `actor` 去除 `(MCP)` 并经 [`strip_trailing_version`] 归一化后，
+///   若非空且不等于 `"MCP"` 则取该名称。
 pub fn audit_mcp_user(record: &AuditRecord) -> Option<String> {
     if audit_origin(record) != AuditOrigin::Mcp {
         return None;
     }
     if let Some(raw_client) = record.mcp_client.as_deref() {
-        let cleaned = raw_client.trim();
+        let cleaned = strip_trailing_version(raw_client);
         if !cleaned.is_empty() && !cleaned.eq_ignore_ascii_case("MCP") {
-            return Some(cleaned.to_string());
+            return Some(cleaned);
         }
     }
-    let legacy = strip_mcp_marker(&record.actor);
+    let legacy = strip_trailing_version(&strip_mcp_marker(&record.actor));
     if !legacy.is_empty() && !legacy.eq_ignore_ascii_case("MCP") {
         Some(legacy)
     } else {

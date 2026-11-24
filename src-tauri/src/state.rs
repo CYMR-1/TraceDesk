@@ -20,7 +20,8 @@ use tracedesk_core::{
 use tracedesk_engines::InventoryEntry;
 use tracedesk_mcp::{
     ACTIVITY_LOG_FILENAME, ActivityLogTailer, DEFAULT_ACTIVITY_STORE_CAPACITY, McpActivityRecord,
-    McpActivitySnapshot, McpActivityStore, append_activity_record, truncate_activity_log,
+    McpActivitySnapshot, McpActivityStore, append_activity_record, normalize_activity_client,
+    truncate_activity_log,
 };
 
 pub use tracedesk_mcp::{McpActivityStats, McpToolStat};
@@ -1242,9 +1243,10 @@ impl AppState {
     /// 若 `emit_case_updated_now` 为 `true`，同步检查并推送 `mcp:case-updated`。
     pub fn record_desktop_mcp_activity(
         &self,
-        record: McpActivityRecord,
+        mut record: McpActivityRecord,
         emit_case_updated_now: bool,
     ) -> bool {
+        record.client = normalize_activity_client(&record.client);
         let accepted = self
             .mcp_activities
             .lock()

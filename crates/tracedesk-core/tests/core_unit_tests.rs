@@ -22,8 +22,8 @@ use tracedesk_core::{
     audit_origin, audit_origin_label, build_bundle, canonical_json, case_folder_name,
     compute_legacy_carry, display_timestamp, find_matches_in_reader, findings_text,
     format_unix_east8_stack, normalize_event_filter, parse_pattern, preview_rows, preview_text,
-    record_note, render_report, save_json_atomic, source_status, verify_audit_chain_at,
-    verify_bundle, windows_filename,
+    record_note, render_report, save_json_atomic, source_status, strip_trailing_version,
+    verify_audit_chain_at, verify_bundle, windows_filename,
 };
 use tracedesk_engines::{InventoryEntry, PartitionInfo};
 use zip::write::SimpleFileOptions;
@@ -752,26 +752,24 @@ fn mcp_client_audit_chain_reporting_and_verify_bundle_compat() {
             .expect("定位 CASE.TXT");
         let note_rec = record_note(&mut mcp_case, &target_entry, "由 MCP 协同标记的关键发现")
             .expect("写入 MCP 取证笔记");
+        // 磁盘原始记录保留传入值，展示归一化去除末尾版本号数字（不影响既有审计链）。
         assert_eq!(note_rec.mcp_client.as_deref(), Some("张三 / Cursor 1.2"));
-        assert_eq!(
-            audit_mcp_user(&note_rec).as_deref(),
-            Some("张三 / Cursor 1.2")
-        );
-        assert_eq!(audit_origin_label(&note_rec), "MCP · 张三 / Cursor 1.2");
+        assert_eq!(audit_mcp_user(&note_rec).as_deref(), Some("张三 / Cursor"));
+        assert_eq!(audit_origin_label(&note_rec), "MCP · 张三 / Cursor");
 
-        // 校验纯文本取证发现与 Markdown 报告均展示 “MCP · 张三 / Cursor 1.2”。
+        // 校验纯文本取证发现与 Markdown 报告均展示去除版本号后的 “MCP · 张三 / Cursor”。
         let records = mcp_case.check_audit().expect("核验含 mcp_client 的审计链");
         let plain = findings_text(&records);
-        assert!(plain.contains("[MCP · 张三 / Cursor 1.2]"), "findings_text={plain}");
+        assert!(plain.contains("[MCP · 张三 / Cursor]"), "findings_text={plain}");
 
         let report_md = render_report(mcp_case.data(), &records, "通过：测试校验");
         assert!(
-            report_md.contains("| MCP · 张三 / Cursor 1.2 |"),
-            "报告审计日志摘要应包含具体 MCP 使用者：{report_md}"
+            report_md.contains("| MCP · 张三 / Cursor |"),
+            "报告审计日志摘要应包含归一化后的 MCP 使用者：{report_md}"
         );
         assert!(
-            report_md.contains("[MCP · 张三 / Cursor 1.2]"),
-            "报告文件取证发现应包含具体 MCP 使用者：{report_md}"
+            report_md.contains("[MCP · 张三 / Cursor]"),
+            "报告文件取证发现应包含归一化后的 MCP 使用者：{report_md}"
         );
 
         let bundle = build_bundle(&mut mcp_case, &BuildBundleOptions::default(), None)
@@ -811,4 +809,91 @@ fn mcp_client_audit_chain_reporting_and_verify_bundle_compat() {
             break;
         }
     }
+}
+
+#[test]
+fn strip_trailing_version_and_legacy_audit_chain_compat() {
+    // 1. 校验各类常见与边界格式的去尾版本号规则。
+    assert_eq!(strip_trailing_version("workbuddy 1.0"), "workbuddy");
+    assert_eq!(strip_trailing_version("Antigravity 1.0"), "Antigravity");
+    assert_eq!(strip_trailing_version("Cursor 1.2.3"), "Cursor");
+    assert_eq!(strip_trailing_version("claude-code v2.1"), "claude-code");
+    assert_eq!(strip_trailing_version("claude-code V2.1.0"), "claude-code");
+    assert_eq!(strip_trailing_version("ForensicBot/3.0"), "ForensicBot");
+    assert_eq!(
+        strip_trailing_version("WorkBuddy HTTP / workbuddy-http-forensics 1.0"),
+        "WorkBuddy HTTP / workbuddy-http-forensics"
+    );
+    assert_eq!(
+        strip_trailing_version("王五 / ForensicBot/3.0"),
+        "王五 / ForensicBot"
+    );
+    assert_eq!(strip_trailing_version("张三 / Cursor 1.2"), "张三 / Cursor");
+    assert_eq!(strip_trailing_version("workbuddy 1.0.0-beta.1"), "workbuddy");
+    // 纯数字名称与去除后为空的段必须保留原段，且连字符命名不误删。
+    assert_eq!(strip_trailing_version("12345"), "12345");
+    assert_eq!(strip_trailing_version("1.0"), "1.0");
+    assert_eq!(strip_trailing_version("/3.0"), "/3.0");
+    assert_eq!(strip_trailing_version("GPT-4"), "GPT-4");
+    assert_eq!(strip_trailing_version("本地 MCP 客户端"), "本地 MCP 客户端");
+    assert_eq!(strip_trailing_version("   "), "");
+
+    // 2. 模拟历史案件磁盘 `audit.jsonl` 中存在带版本号的旧记录 + 不带版本号的新记录，
+    //    验证展示标签自动去尾版本号合并，同时磁盘原文未被修改且哈希链 100% 校验通过。
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cases_dir = tmp.path().join("cases");
+    let folder = {
+        let mut legacy_case = Case::create_with_mcp_client(
+            &cases_dir,
+            "LEG-VER-001",
+            "张取证",
+            "历史版本号兼容测试",
+            None,
+            Some("张取证"),
+            AuditOrigin::Mcp,
+            Some("workbuddy 1.0"),
+        )
+        .expect("创建历史 MCP 案件");
+        legacy_case
+            .log_with_mcp_client(
+                "FILE_NOTE",
+                "DOCS/CASE.TXT",
+                "成功",
+                Map::new(),
+                Some("WorkBuddy HTTP / workbuddy-http-forensics 1.0"),
+            )
+            .expect("追加历史复合来源记录");
+        legacy_case
+            .log_with_mcp_client(
+                "FILE_NOTE",
+                "DOCS/CASE.TXT",
+                "成功",
+                Map::new(),
+                Some("workbuddy"),
+            )
+            .expect("追加新版无版本号记录");
+        let dir = legacy_case.folder().to_path_buf();
+        legacy_case.close();
+        dir
+    };
+
+    // 磁盘 audit.jsonl 原文保持不变，绝不改写历史记录，且完整 SHA-256 哈希链 100% 通过。
+    let raw_disk = fs::read_to_string(folder.join("audit.jsonl")).expect("读取磁盘 audit.jsonl");
+    assert!(raw_disk.contains("\"workbuddy 1.0\""));
+    assert!(raw_disk.contains("\"WorkBuddy HTTP / workbuddy-http-forensics 1.0\""));
+
+    let verified = verify_audit_chain_at(&folder).expect("历史含版本号审计链必须 100% 验签通过");
+    assert_eq!(verified.len(), 3);
+    assert_eq!(audit_mcp_user(&verified[0]).as_deref(), Some("workbuddy"));
+    assert_eq!(audit_origin_label(&verified[0]), "MCP · workbuddy");
+    assert_eq!(
+        audit_mcp_user(&verified[1]).as_deref(),
+        Some("WorkBuddy HTTP / workbuddy-http-forensics")
+    );
+    assert_eq!(
+        audit_origin_label(&verified[1]),
+        "MCP · WorkBuddy HTTP / workbuddy-http-forensics"
+    );
+    assert_eq!(audit_mcp_user(&verified[2]).as_deref(), Some("workbuddy"));
+    assert_eq!(audit_origin_label(&verified[2]), "MCP · workbuddy");
 }

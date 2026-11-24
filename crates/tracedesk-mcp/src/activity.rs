@@ -13,7 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracedesk_core::{AppPaths, format_commas, format_unix_east8_stack, resolve_clean};
+use tracedesk_core::{
+    AppPaths, format_commas, format_unix_east8_stack, resolve_clean, strip_trailing_version,
+};
 use uuid::Uuid;
 
 use crate::tools::TOOL_CATALOG;
@@ -57,7 +59,7 @@ pub struct McpActivityRecord {
     pub phase: String,
     /// 传输方式：`"desktop-http"` | `"streamable-http"` | `"stdio"`。
     pub transport: String,
-    /// 使用者/客户端标识，如 `"Antigravity 1.0"`、`"Cursor"`、`"本地 MCP 客户端"`。
+    /// 使用者/客户端标识，如 `"Antigravity"`、`"Cursor"`、`"本地 MCP 客户端"`。
     pub client: String,
     /// 会话 ID（HTTP 为 `Mcp-Session-Id`，stdio 为会话循环 ID）。
     #[serde(default)]
@@ -157,6 +159,11 @@ pub fn now_east8_millis() -> String {
         }
     }
     tracedesk_core::now()
+}
+
+/// 规范化 MCP 活动记录的客户端展示名称，去除各段末尾的版本号数字（兼容历史已落盘记录）。
+pub fn normalize_activity_client(raw: &str) -> String {
+    strip_trailing_version(raw)
 }
 
 /// 生成新的唯一事件或调用 ID。
@@ -282,15 +289,7 @@ pub fn summarize_params(method: &str, params: &Value) -> String {
                 && let Some(name) = info.get("name").and_then(Value::as_str)
                 && !name.trim().is_empty()
             {
-                let ver = info
-                    .get("version")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty());
-                let label = match ver {
-                    Some(v) => format!("{} {}", name.trim(), v),
-                    None => name.trim().to_string(),
-                };
+                let label = normalize_activity_client(name);
                 parts.push(format!("client=\"{}\"", sanitize_single_line(&label, 48)));
             }
             if let Some(ver) = params.get("protocolVersion").and_then(Value::as_str)
@@ -767,7 +766,8 @@ impl ActivityLogTailer {
             if trimmed.is_empty() {
                 continue;
             }
-            if let Ok(rec) = serde_json::from_str::<McpActivityRecord>(trimmed) {
+            if let Ok(mut rec) = serde_json::from_str::<McpActivityRecord>(trimmed) {
+                rec.client = normalize_activity_client(&rec.client);
                 records.push(rec);
             }
         }
@@ -816,10 +816,11 @@ impl McpActivityStore {
     /// - 若 `record.id` 已被处理过，返回 `false`；
     /// - 若同 `callId` 已有终态（`completed` / `failed`）而新事件为过时 `started`，忽略状态倒退并返回 `false`；
     /// - 否则合并更新并返回 `true`。
-    pub fn ingest(&mut self, record: McpActivityRecord) -> bool {
+    pub fn ingest(&mut self, mut record: McpActivityRecord) -> bool {
         if !record.id.is_empty() && !self.seen_ids.insert(record.id.clone()) {
             return false;
         }
+        record.client = normalize_activity_client(&record.client);
         if !record.id.is_empty() {
             self.seen_id_order.push_back(record.id.clone());
             let max_seen = self.capacity.saturating_mul(6).max(1_000);
@@ -896,7 +897,9 @@ impl McpActivityStore {
         transport: Option<&str>,
         keyword: Option<&str>,
     ) -> McpActivitySnapshot {
-        let client_filter = normalize_filter_opt(client);
+        let client_filter = normalize_filter_opt(client)
+            .map(|c| normalize_activity_client(&c))
+            .filter(|c| !c.is_empty());
         let status_filter = normalize_status_filter(status);
         let transport_filter = normalize_filter_opt(transport);
         let kw_filter = keyword
@@ -906,8 +909,9 @@ impl McpActivityStore {
 
         let mut matched: Vec<McpActivityRecord> = Vec::new();
         for rec in self.records.iter().rev() {
+            let clean_client = normalize_activity_client(&rec.client);
             if let Some(ref cf) = client_filter
-                && !rec.client.trim().eq_ignore_ascii_case(cf)
+                && !clean_client.eq_ignore_ascii_case(cf)
             {
                 continue;
             }
@@ -926,7 +930,9 @@ impl McpActivityStore {
             {
                 continue;
             }
-            matched.push(rec.clone());
+            let mut item = rec.clone();
+            item.client = clean_client;
+            matched.push(item);
         }
 
         let stats = compute_activity_stats(&matched);
@@ -1023,9 +1029,9 @@ pub fn compute_activity_stats(records: &[McpActivityRecord]) -> McpActivityStats
             duration_sum += u128::from(ms);
             duration_count += 1;
         }
-        let client_trimmed = rec.client.trim();
-        if !client_trimmed.is_empty() && seen_clients.insert(client_trimmed.to_string()) {
-            active_clients.push(client_trimmed.to_string());
+        let client_clean = normalize_activity_client(&rec.client);
+        if !client_clean.is_empty() && seen_clients.insert(client_clean.clone()) {
+            active_clients.push(client_clean);
         }
         if let Some(ref tool_name) = rec.tool_name {
             let entry = tool_acc.entry(tool_name.clone()).or_insert((0, 0, 0, 0));
@@ -1241,11 +1247,19 @@ mod tests {
         assert_eq!(snap.stats.read_only_calls, 1);
         assert_eq!(snap.stats.write_calls, 1);
         assert_eq!(snap.stats.avg_duration_ms, 50);
-        assert_eq!(snap.stats.active_clients, vec!["Antigravity 1.0", "Cursor"]);
+        // 历史记录中的 "Antigravity 1.0" 在入队与统计时应自动去除末尾版本号数字
+        assert_eq!(snap.activities[0].client, "Antigravity");
+        assert_eq!(snap.stats.active_clients, vec!["Antigravity", "Cursor"]);
         assert_eq!(
             snap.stats.tool_stats["tracedesk_search_content"].failures,
             1
         );
+
+        // 兼容历史筛选词（含或不含末尾版本号）均应命中同一归一化客户端
+        let filtered_by_clean = store.snapshot(None, Some("Antigravity"), None, None, None);
+        assert_eq!(filtered_by_clean.activities.len(), 1);
+        let filtered_by_legacy = store.snapshot(None, Some("Antigravity 1.0"), None, None, None);
+        assert_eq!(filtered_by_legacy.activities.len(), 1);
 
         let filtered = store.snapshot(None, Some("Cursor"), Some("completed"), Some("stdio"), None);
         assert_eq!(filtered.activities.len(), 1);

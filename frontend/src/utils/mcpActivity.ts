@@ -7,10 +7,66 @@
 import type {
   McpActivityPhase,
   McpActivityRecord,
+  McpActivitySnapshot,
   McpActivityStats,
   McpToolStat,
   McpTransportKind,
 } from '../types/ipc';
+
+/** 匹配 MCP 客户端/来源名称分段末尾的版本号数字（如 " 1.0"、" 1.2.3"、" v2.1"、"/3.0"） */
+const TRAILING_VERSION_RE =
+  /(?:(?:\s+|\/)[vV]?\d+(?:\.\d+)*(?:-(?:alpha|beta|rc|dev|pre|preview|snapshot)(?:[._-]?\d+)*)?)+$/i;
+
+/**
+ * 去除 MCP 客户端/来源名称各段末尾的版本号数字，用于展示与筛选合并对齐：
+ * - "workbuddy 1.0" -> "workbuddy"
+ * - "WorkBuddy HTTP / workbuddy-http-forensics 1.0" -> "WorkBuddy HTTP / workbuddy-http-forensics"
+ * - "ForensicBot/3.0" -> "ForensicBot"
+ * 若某段去除后为空则保留原段，避免误删纯数字名称。
+ */
+export function stripTrailingVersion(raw: string | null | undefined): string {
+  const trimmed = (raw ?? '').trim();
+  if (!trimmed) return '';
+  const segments = trimmed
+    .split(' / ')
+    .map((seg) => {
+      const clean = seg.trim();
+      if (!clean) return '';
+      const stripped = clean.replace(TRAILING_VERSION_RE, '').trimEnd();
+      return stripped || clean;
+    })
+    .filter((seg) => seg.length > 0);
+  return segments.length > 0 ? segments.join(' / ') : trimmed;
+}
+
+/** 规范化单条 MCP 活动记录的 client 展示字段（温和去尾版本号） */
+export function normalizeMcpActivityRecord(record: McpActivityRecord): McpActivityRecord {
+  const cleanClient = stripTrailingVersion(record.client);
+  if (cleanClient === record.client) {
+    return record;
+  }
+  return {
+    ...record,
+    client: cleanClient,
+  };
+}
+
+/** 规范化 MCP 活动快照中的活动列表与活跃客户端列表 */
+export function normalizeMcpActivitySnapshot(snapshot: McpActivitySnapshot): McpActivitySnapshot {
+  const activities = snapshot.activities.map(normalizeMcpActivityRecord);
+  const clientSet = new Set<string>();
+  for (const name of snapshot.stats.activeClients) {
+    const clean = stripTrailingVersion(name);
+    if (clean) clientSet.add(clean);
+  }
+  return {
+    activities,
+    stats: {
+      ...snapshot.stats,
+      activeClients: Array.from(clientSet),
+    },
+  };
+}
 
 /** 空统计初始值 */
 export const EMPTY_MCP_ACTIVITY_STATS: McpActivityStats = {
@@ -49,30 +105,33 @@ export function mergeMcpActivityRecord(
   incoming: McpActivityRecord,
   maxItems = 500
 ): McpActivityRecord[] {
-  const index = prev.findIndex((item) => item.callId === incoming.callId);
+  const normalizedIncoming = normalizeMcpActivityRecord(incoming);
+  const index = prev.findIndex((item) => item.callId === normalizedIncoming.callId);
   if (index >= 0) {
     const existing = prev[index];
     const merged: McpActivityRecord = {
       ...existing,
-      ...incoming,
+      ...normalizedIncoming,
       // 保留首次启动时已携带而完成事件可能省略的上下文字段
-      sessionId: incoming.sessionId ?? existing.sessionId ?? null,
-      toolName: incoming.toolName ?? existing.toolName ?? null,
-      toolTitle: incoming.toolTitle || existing.toolTitle,
-      category: incoming.category || existing.category,
-      caseDir: incoming.caseDir ?? existing.caseDir ?? null,
-      caseNumber: incoming.caseNumber ?? existing.caseNumber ?? null,
-      paramsSummary: incoming.paramsSummary || existing.paramsSummary,
-      paramsJson: incoming.paramsJson || existing.paramsJson,
-      resultSummary: incoming.resultSummary || existing.resultSummary,
-      responsePreview: incoming.responsePreview ?? existing.responsePreview ?? null,
-      error: incoming.error ?? (incoming.phase === 'completed' ? null : existing.error ?? null),
+      sessionId: normalizedIncoming.sessionId ?? existing.sessionId ?? null,
+      toolName: normalizedIncoming.toolName ?? existing.toolName ?? null,
+      toolTitle: normalizedIncoming.toolTitle || existing.toolTitle,
+      category: normalizedIncoming.category || existing.category,
+      caseDir: normalizedIncoming.caseDir ?? existing.caseDir ?? null,
+      caseNumber: normalizedIncoming.caseNumber ?? existing.caseNumber ?? null,
+      paramsSummary: normalizedIncoming.paramsSummary || existing.paramsSummary,
+      paramsJson: normalizedIncoming.paramsJson || existing.paramsJson,
+      resultSummary: normalizedIncoming.resultSummary || existing.resultSummary,
+      responsePreview: normalizedIncoming.responsePreview ?? existing.responsePreview ?? null,
+      error:
+        normalizedIncoming.error ??
+        (normalizedIncoming.phase === 'completed' ? null : existing.error ?? null),
     };
     const next = [...prev];
     next[index] = merged;
     return next;
   }
-  return [incoming, ...prev].slice(0, maxItems);
+  return [normalizedIncoming, ...prev].slice(0, maxItems);
 }
 
 /**
@@ -110,7 +169,7 @@ export function computeMcpActivityStats(
       writeCalls += 1;
     }
 
-    const client = item.client?.trim();
+    const client = stripTrailingVersion(item.client);
     if (client) {
       clientSet.add(client);
     }

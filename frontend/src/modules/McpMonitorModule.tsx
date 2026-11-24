@@ -29,6 +29,7 @@ import {
   formatPhaseLabel,
   formatPrettyJson,
   formatTransportLabel,
+  stripTrailingVersion,
 } from '../utils/mcpActivity';
 
 interface McpMonitorModuleProps {
@@ -118,14 +119,25 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
     }
   }, [mcpStatus?.running, mcpStatus?.port]);
 
-  // 动态提取所有出现过的客户端名称用于筛选下拉
-  const knownClients = useMemo(() => {
-    const set = new Set<string>(stats.activeClients);
-    for (const item of activities) {
-      if (item.client?.trim()) set.add(item.client.trim());
+  // 归一化后的活跃客户端名称（温和去尾版本号并去重）
+  const normalizedActiveClients = useMemo(() => {
+    const set = new Set<string>();
+    for (const raw of stats.activeClients) {
+      const clean = stripTrailingVersion(raw);
+      if (clean) set.add(clean);
     }
     return Array.from(set);
-  }, [activities, stats.activeClients]);
+  }, [stats.activeClients]);
+
+  // 动态提取所有出现过的客户端名称用于筛选下拉（与活跃客户端保持同一去尾版本口径）
+  const knownClients = useMemo(() => {
+    const set = new Set<string>(normalizedActiveClients);
+    for (const item of activities) {
+      const clean = stripTrailingVersion(item.client);
+      if (clean) set.add(clean);
+    }
+    return Array.from(set);
+  }, [activities, normalizedActiveClients]);
 
   // 过滤后的实时操作流列表
   const filteredActivities = useMemo(() => {
@@ -134,7 +146,8 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
       if (statusFilter !== 'all' && item.phase !== statusFilter) return false;
       if (modeFilter === 'readonly' && !item.readOnly) return false;
       if (modeFilter === 'write' && item.readOnly) return false;
-      if (clientFilter !== 'all' && item.client !== clientFilter) return false;
+      const cleanClient = stripTrailingVersion(item.client);
+      if (clientFilter !== 'all' && cleanClient !== clientFilter) return false;
       if (transportFilter !== 'all' && item.transport !== transportFilter) return false;
       if (kw) {
         const hay = [
@@ -142,7 +155,7 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
           item.toolName ?? '',
           item.method,
           item.category,
-          item.client,
+          cleanClient,
           item.sessionId ?? '',
           item.caseNumber ?? '',
           item.caseDir ?? '',
@@ -433,12 +446,12 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
             </span>
           </div>
 
-          {stats.activeClients.length > 0 && (
+          {normalizedActiveClients.length > 0 && (
             <div className="td-mcp-clients-wrap" aria-label="活跃调用客户端">
               <span className="td-muted-text" style={{ fontSize: 11.5 }}>
                 活跃客户端：
               </span>
-              {stats.activeClients.map((clientName) => {
+              {normalizedActiveClients.map((clientName) => {
                 const isSelected = clientFilter === clientName && subView === 'stream';
                 return (
                   <button
@@ -616,16 +629,16 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
         <div className="td-mcp-metric-card">
           <div className="td-mcp-metric-head">
             <span>活跃客户端</span>
-            <span>{stats.activeClients.length > 0 ? '已观测接入' : '待连接'}</span>
+            <span>{normalizedActiveClients.length > 0 ? '已观测接入' : '待连接'}</span>
           </div>
           <div className="td-mcp-metric-value-row">
-            <span className="td-mcp-metric-value">{stats.activeClients.length}</span>
+            <span className="td-mcp-metric-value">{normalizedActiveClients.length}</span>
             <span
               className="td-mcp-metric-sub"
-              title={stats.activeClients.join(' · ') || '等待客户端连接'}
+              title={normalizedActiveClients.join(' · ') || '等待客户端连接'}
             >
-              {stats.activeClients.length > 0
-                ? stats.activeClients.join(' · ')
+              {normalizedActiveClients.length > 0
+                ? normalizedActiveClients.join(' · ')
                 : '等待 MCP 客户端调用'}
             </span>
           </div>
@@ -947,7 +960,7 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
 
                               <div className="td-mcp-step-meta">
                                 <SemanticPill
-                                  text={`MCP · ${item.client || '未知客户端'}`}
+                                  text={`MCP · ${stripTrailingVersion(item.client) || '未知客户端'}`}
                                   fallback="system"
                                 />
                                 <SemanticPill
@@ -1083,7 +1096,7 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
                             <span className="td-mcp-meta-label">调用客户端</span>
                             <span className="td-mcp-meta-val">
                               <SemanticPill
-                                text={`MCP · ${selectedActivity.client || '未知客户端'}`}
+                                text={`MCP · ${stripTrailingVersion(selectedActivity.client) || '未知客户端'}`}
                                 fallback="system"
                               />
                             </span>

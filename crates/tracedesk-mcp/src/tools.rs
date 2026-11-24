@@ -1931,7 +1931,8 @@ pub struct McpRequestContext {
     pub transport: Option<String>,
 }
 
-/// 从 MCP `initialize` 请求的 `params.clientInfo` 解析客户端标识（如 `"Cursor 1.2"` 或 `"claude-code"`）。
+/// 从 MCP `initialize` 请求的 `params.clientInfo` 提取客户端名称（如 `"Cursor"` 或 `"claude-code"`），
+/// 不再将 `clientInfo.version` 拼接到末尾，并去除名称自带的末尾版本号数字。
 pub fn parse_initialize_client_info(params: &Value) -> Option<String> {
     let info = params
         .get("clientInfo")
@@ -1941,17 +1942,8 @@ pub fn parse_initialize_client_info(params: &Value) -> Option<String> {
         .get("name")
         .and_then(Value::as_str)
         .and_then(sanitize_mcp_identity)?;
-    let version = info
-        .get("version")
-        .and_then(Value::as_str)
-        .and_then(sanitize_mcp_identity);
-
-    match version {
-        Some(ver) if !name.eq_ignore_ascii_case(&ver) && !name.ends_with(&ver) => {
-            sanitize_mcp_identity(&format!("{name} {ver}"))
-        }
-        _ => Some(name),
-    }
+    let stripped = tracedesk_core::strip_trailing_version(&name);
+    sanitize_mcp_identity(&stripped).or(Some(name))
 }
 
 /// 维护 `session_id -> client_info` 映射与最近一次 `initialize` 客户端的内存注册表。

@@ -43,7 +43,7 @@ import type {
   TreeChildrenResponse,
   TreeNodeDto,
 } from '../types/ipc';
-import { computeMcpActivityStats } from '../utils/mcpActivity';
+import { computeMcpActivityStats, stripTrailingVersion } from '../utils/mcpActivity';
 
 type EventName =
   | 'task:progress'
@@ -391,8 +391,8 @@ const demoFindings: FindingGroupDto[] = [
         action: 'FILE_HASH',
         actionTitle: '计算摘要',
         origin: 'mcp',
-        originLabel: 'MCP · Cursor 1.2',
-        mcpUser: 'Cursor 1.2',
+        originLabel: 'MCP · Cursor',
+        mcpUser: 'Cursor',
         actor: '演示人员',
         result: '成功',
         details: {
@@ -499,8 +499,8 @@ const demoAuditRecords: AuditRecordDto[] = [
     seq: 7,
     timestamp: '2026-03-10 09:42:18',
     origin: 'mcp',
-    originLabel: 'MCP · Cursor 1.2',
-    mcpUser: 'Cursor 1.2',
+    originLabel: 'MCP · Cursor',
+    mcpUser: 'Cursor',
     actor: '演示人员',
     action: 'FILE_HASH',
     actionTitle: '计算文件摘要',
@@ -533,7 +533,7 @@ function buildInitialMcpActivities(): McpActivityRecord[] {
       timestamp: '2026-03-10 09:46:12.418',
       phase: 'completed',
       transport: 'desktop-http',
-      client: 'Antigravity 1.0',
+      client: 'Antigravity',
       sessionId: 'sess-ag-9f2a1c',
       method: 'tools/call',
       toolName: 'tracedesk_generate_report',
@@ -571,7 +571,7 @@ function buildInitialMcpActivities(): McpActivityRecord[] {
       timestamp: '2026-03-10 09:45:48.105',
       phase: 'completed',
       transport: 'desktop-http',
-      client: 'Antigravity 1.0',
+      client: 'Antigravity',
       sessionId: 'sess-ag-9f2a1c',
       method: 'tools/call',
       toolName: 'tracedesk_export_file',
@@ -611,7 +611,7 @@ function buildInitialMcpActivities(): McpActivityRecord[] {
       timestamp: '2026-03-10 09:45:03.729',
       phase: 'failed',
       transport: 'desktop-http',
-      client: 'Antigravity 1.0',
+      client: 'Antigravity',
       sessionId: 'sess-ag-9f2a1c',
       method: 'tools/call',
       toolName: 'tracedesk_export_file',
@@ -642,7 +642,7 @@ function buildInitialMcpActivities(): McpActivityRecord[] {
       timestamp: '2026-03-10 09:44:22.614',
       phase: 'completed',
       transport: 'desktop-http',
-      client: 'Antigravity 1.0',
+      client: 'Antigravity',
       sessionId: 'sess-ag-9f2a1c',
       method: 'tools/call',
       toolName: 'tracedesk_record_finding',
@@ -682,7 +682,7 @@ function buildInitialMcpActivities(): McpActivityRecord[] {
       timestamp: '2026-03-10 09:43:51.092',
       phase: 'completed',
       transport: 'desktop-http',
-      client: 'Antigravity 1.0',
+      client: 'Antigravity',
       sessionId: 'sess-ag-9f2a1c',
       method: 'tools/call',
       toolName: 'tracedesk_search_content',
@@ -728,7 +728,7 @@ function buildInitialMcpActivities(): McpActivityRecord[] {
       timestamp: '2026-03-10 09:42:18.342',
       phase: 'completed',
       transport: 'stdio',
-      client: 'Cursor 1.2',
+      client: 'Cursor',
       sessionId: 'stdio-pid-18420',
       method: 'tools/call',
       toolName: 'tracedesk_examine_file',
@@ -767,7 +767,7 @@ function buildInitialMcpActivities(): McpActivityRecord[] {
       timestamp: '2026-03-10 09:41:36.881',
       phase: 'completed',
       transport: 'desktop-http',
-      client: 'Antigravity 1.0',
+      client: 'Antigravity',
       sessionId: 'sess-ag-9f2a1c',
       method: 'tools/call',
       toolName: 'tracedesk_verify_integrity',
@@ -804,7 +804,7 @@ function buildInitialMcpActivities(): McpActivityRecord[] {
       timestamp: '2026-03-10 09:41:10.120',
       phase: 'completed',
       transport: 'stdio',
-      client: 'Antigravity 1.0',
+      client: 'Antigravity',
       sessionId: 'stdio-pid-18392',
       method: 'tools/call',
       toolName: 'tracedesk_get_case_summary',
@@ -1606,13 +1606,14 @@ export const demoBackend = {
 
   async list_mcp_activities(args?: ListMcpActivitiesParams): Promise<McpActivitySnapshot> {
     const keyword = (args?.keyword || '').trim().toLowerCase();
-    const client = args?.client?.trim() || '';
+    const client = stripTrailingVersion(args?.client);
     const status = args?.status?.trim() || '';
     const transport = args?.transport?.trim() || '';
     const limit = args?.limit && args.limit > 0 ? args.limit : 500;
 
     let items = demoMcpActivities.filter((item) => {
-      if (client && item.client !== client) return false;
+      const cleanClient = stripTrailingVersion(item.client);
+      if (client && cleanClient !== client) return false;
       if (status && item.phase !== status) return false;
       if (transport && item.transport !== transport) return false;
       if (keyword) {
@@ -1620,7 +1621,7 @@ export const demoBackend = {
           item.toolTitle,
           item.toolName ?? '',
           item.method,
-          item.client,
+          cleanClient,
           item.caseNumber ?? '',
           item.paramsSummary,
           item.resultSummary,

@@ -1403,26 +1403,20 @@ fn test_mcp_caller_identity_stdio_http_headers_and_actor_combination() {
         .as_str()
         .expect("case_dir")
         .to_string();
-    assert_eq!(
-        created_payload["mcp_client"].as_str(),
-        Some("claude-code 2.1")
-    );
+    assert_eq!(created_payload["mcp_client"].as_str(), Some("claude-code"));
     assert_eq!(
         created_payload["origin_label"].as_str(),
-        Some("MCP · claude-code 2.1")
+        Some("MCP · claude-code")
     );
 
-    // 校验 stdio 会话中两条操作在 audit.jsonl 中的 mcp_client 标记。
+    // 校验 stdio 会话中两条操作在 audit.jsonl 中的 mcp_client 标记（不再拼接末尾版本号数字）。
     let stdio_records = verify_audit_chain_at(Path::new(&case_dir)).expect("校验 stdio 审计链");
-    assert_eq!(
-        stdio_records[0].mcp_client.as_deref(),
-        Some("claude-code 2.1")
-    );
+    assert_eq!(stdio_records[0].mcp_client.as_deref(), Some("claude-code"));
     assert!(
         stdio_records
             .iter()
-            .any(|r| r.action == "IMAGE_LOAD" && r.mcp_client.as_deref() == Some("张三 / claude-code 2.1")),
-        "携带 actor=张三 时应合并为 张三 / claude-code 2.1"
+            .any(|r| r.action == "IMAGE_LOAD" && r.mcp_client.as_deref() == Some("张三 / claude-code")),
+        "携带 actor=张三 时应合并为 张三 / claude-code"
     );
 
     // 2. streamable-http 传输：验证 Mcp-Session-Id 隔离、无 session 回退、HTTP 头优先级与 --actor 合并。
@@ -1479,7 +1473,7 @@ fn test_mcp_caller_identity_stdio_http_headers_and_actor_combination() {
         .expect("第二次 initialize 返回独立 Mcp-Session-Id");
     assert_ne!(sid_a, sid_b);
 
-    // 2c. 客户端 A 携带自己的 Mcp-Session-Id 写入取证笔记 -> 应标记为 Cursor 1.2（不受后初始化的客户端 B 影响）。
+    // 2c. 客户端 A 携带自己的 Mcp-Session-Id 写入取证笔记 -> 应标记为 Cursor（不含末尾版本号 1.2，且不受客户端 B 影响）。
     let (code_note_a, _, body_note_a) = send_http(
         port,
         "POST",
@@ -1514,8 +1508,8 @@ fn test_mcp_caller_identity_stdio_http_headers_and_actor_combination() {
             .expect("note A text"),
     )
     .expect("note A json");
-    assert_eq!(note_a["mcp_client"].as_str(), Some("Cursor 1.2"));
-    assert_eq!(note_a["origin_label"].as_str(), Some("MCP · Cursor 1.2"));
+    assert_eq!(note_a["mcp_client"].as_str(), Some("Cursor"));
+    assert_eq!(note_a["origin_label"].as_str(), Some("MCP · Cursor"));
 
     // 2d. 无 Mcp-Session-Id 请求 -> 回退到最近一次 initialize 的客户端 CherryStudio。
     let (code_no_sid, _, body_no_sid) = send_http(
@@ -1597,7 +1591,7 @@ fn test_mcp_caller_identity_stdio_http_headers_and_actor_combination() {
         Some("MCP · 李四 / CustomAgent")
     );
 
-    // 2f. 泛化 actor="MCP" 不应与客户端名拼接为 "MCP / Cursor 1.2"。
+    // 2f. 泛化 actor="MCP" 不应与客户端名拼接为 "MCP / Cursor"。
     let (code_gen, _, body_gen) = send_http(
         port,
         "POST",
@@ -1633,7 +1627,7 @@ fn test_mcp_caller_identity_stdio_http_headers_and_actor_combination() {
             .expect("gen text"),
     )
     .expect("gen json");
-    assert_eq!(gen_note["mcp_client"].as_str(), Some("Cursor 1.2"));
+    assert_eq!(gen_note["mcp_client"].as_str(), Some("Cursor"));
 
     handle.stop();
 
@@ -1644,7 +1638,7 @@ fn test_mcp_caller_identity_stdio_http_headers_and_actor_combination() {
         .expect("启动带默认 actor 的 HTTP MCP 服务");
     let host_hdr2 = format!("127.0.0.1:{port2}");
 
-    // 3a. 非通用 User-Agent 作为补充回退并与默认 --actor 合并为 "王五 / ForensicBot/3.0"。
+    // 3a. 非通用 User-Agent 作为补充回退并去除末尾 "/3.0" 后与默认 --actor 合并为 "王五 / ForensicBot"。
     let (code_ua, _, body_ua) = send_http(
         port2,
         "POST",
@@ -1681,7 +1675,7 @@ fn test_mcp_caller_identity_stdio_http_headers_and_actor_combination() {
     .expect("ua json");
     assert_eq!(
         ua_note["mcp_client"].as_str(),
-        Some("王五 / ForensicBot/3.0")
+        Some("王五 / ForensicBot")
     );
 
     // 3b. 通用 User-Agent (curl/8.5.0) 应被忽略，仅保留默认 --actor "王五"。
@@ -1739,8 +1733,8 @@ fn test_mcp_caller_identity_stdio_http_headers_and_actor_combination() {
     assert!(
         items
             .iter()
-            .any(|it| it["mcp_client"].as_str() == Some("Cursor 1.2")
-                && it["origin_label"].as_str() == Some("MCP · Cursor 1.2"))
+            .any(|it| it["mcp_client"].as_str() == Some("Cursor")
+                && it["origin_label"].as_str() == Some("MCP · Cursor"))
     );
     assert!(
         items
@@ -1758,9 +1752,9 @@ fn test_mcp_caller_identity_stdio_http_headers_and_actor_combination() {
         }),
     );
     assert!(audit_md.contains("| 序号 | 时间（UTC+8） | 来源 |"));
-    assert!(audit_md.contains("| MCP · Cursor 1.2 |"));
+    assert!(audit_md.contains("| MCP · Cursor |"));
     assert!(audit_md.contains("| MCP · 李四 / CustomAgent |"));
-    assert!(audit_md.contains("| MCP · 王五 / ForensicBot/3.0 |"));
+    assert!(audit_md.contains("| MCP · 王五 / ForensicBot |"));
 
     let disk_records = verify_audit_chain_at(Path::new(&case_dir)).expect("全链校验通过");
     assert!(
@@ -1882,7 +1876,7 @@ fn test_stdio_and_http_activity_telemetry_lifecycle_and_jsonl_tailing() {
         assert_ne!(pair[0].id, pair[1].id);
         assert_eq!(pair[0].transport, "stdio");
         assert_eq!(pair[1].transport, "stdio");
-        assert_eq!(pair[1].client, "Antigravity 1.0");
+        assert_eq!(pair[1].client, "Antigravity");
         assert!(pair[0].timestamp.ends_with("+08:00"));
         assert!(pair[1].duration_ms.is_some());
     }
@@ -1999,21 +1993,69 @@ fn test_stdio_and_http_activity_telemetry_lifecycle_and_jsonl_tailing() {
     let subproc_events = tailer.poll_new_records();
     assert_eq!(subproc_events.len(), 4);
     assert_eq!(subproc_events[3].transport, "stdio");
-    assert_eq!(subproc_events[3].client, "ExternalCli 2.0");
+    assert_eq!(subproc_events[3].client, "ExternalCli");
     assert_eq!(subproc_events[3].tool_name.as_deref(), Some("tracedesk_list_cases"));
     assert_eq!(subproc_events[3].phase, "completed");
+
+    // 3b. 模拟历史已落盘到 mcp-activity.jsonl 的含版本号记录（workbuddy 1.0 与 WorkBuddy HTTP / workbuddy-http-forensics 1.0），
+    //     读取后应自动去除末尾版本号数字且不污染 active_clients。
+    let legacy_rec_1 = McpActivityRecord {
+        id: "legacy-wb-1".to_string(),
+        call_id: "legacy-call-wb-1".to_string(),
+        client: "workbuddy 1.0".to_string(),
+        ..subproc_events[3].clone()
+    };
+    let legacy_rec_2 = McpActivityRecord {
+        id: "legacy-wb-2".to_string(),
+        call_id: "legacy-call-wb-2".to_string(),
+        client: "WorkBuddy HTTP / workbuddy-http-forensics 1.0".to_string(),
+        ..subproc_events[3].clone()
+    };
+    tracedesk_mcp::append_activity_record(&log_path, &legacy_rec_1).expect("append legacy 1");
+    tracedesk_mcp::append_activity_record(&log_path, &legacy_rec_2).expect("append legacy 2");
+    let legacy_polled = tailer.poll_new_records();
+    assert_eq!(legacy_polled.len(), 2);
+    assert_eq!(legacy_polled[0].client, "workbuddy");
+    assert_eq!(
+        legacy_polled[1].client,
+        "WorkBuddy HTTP / workbuddy-http-forensics"
+    );
 
     // 4. 将全部记录加载进 McpActivityStore，校验按 callId 合并后的统计与最新倒序。
     let mut store = McpActivityStore::new(500);
     let loaded_bytes = store.load_from_file(&log_path);
     assert!(loaded_bytes > 0);
     let snapshot = store.snapshot(None, None, None, None, None);
-    assert_eq!(snapshot.activities.len(), 8);
-    assert_eq!(snapshot.stats.total_calls, 8);
+    assert_eq!(snapshot.activities.len(), 10);
+    assert_eq!(snapshot.stats.total_calls, 10);
     assert_eq!(snapshot.stats.running_calls, 0);
-    assert_eq!(snapshot.stats.succeeded_calls, 6);
+    assert_eq!(snapshot.stats.succeeded_calls, 8);
     assert_eq!(snapshot.stats.failed_calls, 2);
-    assert_eq!(snapshot.activities[0].client, "ExternalCli 2.0");
+    assert_eq!(
+        snapshot.activities[0].client,
+        "WorkBuddy HTTP / workbuddy-http-forensics"
+    );
+    assert_eq!(snapshot.activities[1].client, "workbuddy");
+    assert_eq!(snapshot.activities[2].client, "ExternalCli");
+    assert!(
+        snapshot
+            .stats
+            .active_clients
+            .contains(&"workbuddy".to_string())
+    );
+    assert!(
+        snapshot
+            .stats
+            .active_clients
+            .contains(&"WorkBuddy HTTP / workbuddy-http-forensics".to_string())
+    );
+    assert!(
+        !snapshot
+            .stats
+            .active_clients
+            .iter()
+            .any(|c| c.contains("1.0") || c.contains("2.0"))
+    );
     // 校验所有记录均为合法 McpActivityRecord 并按 camelCase 序列化。
     let _: McpActivityRecord = snapshot.activities[0].clone();
 }

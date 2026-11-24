@@ -50,6 +50,48 @@ static EWF_NUMBERED_EXT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^e\d\d$").expect("valid ewf ext regex"));
 static FS_TYPE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)^File System Type:\s*(\S+)").expect("valid fs type regex"));
+/// 匹配 MCP 客户端/来源名称分段末尾的版本号数字（如 ` 1.0`、` 1.2.3`、` v2.1`、`/3.0`、` 1.0.0-beta.1`）。
+static TRAILING_VERSION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?:(?:\s+|/)[vV]?\d+(?:\.\d+)*(?:-(?i:alpha|beta|rc|dev|pre|preview|snapshot)(?:[._-]?\d+)*)?)+$",
+    )
+    .expect("valid trailing version regex")
+});
+
+/// 去除 MCP 来源/客户端名称各段末尾的版本号数字，用于统一展示与筛选合并。
+///
+/// - 按 `" / "` 分段处理每段末尾（例如 `"workbuddy 1.0"` → `"workbuddy"`、
+///   `"WorkBuddy HTTP / workbuddy-http-forensics 1.0"` → `"WorkBuddy HTTP / workbuddy-http-forensics"`、
+///   `"王五 / ForensicBot/3.0"` → `"王五 / ForensicBot"`）；
+/// - 仅去除空白或 `/` 后跟可选 `v`/`V` 与数字点号序列（及常见预发布标签），不误伤 `GPT-4` 等连字符命名；
+/// - 若某段去除后为空（如纯版本号或 `"/3.0"`），则保留原段以避免误删纯数字名称。
+pub fn strip_trailing_version(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let segments: Vec<String> = trimmed
+        .split(" / ")
+        .filter_map(|seg| {
+            let clean = seg.trim();
+            if clean.is_empty() {
+                return None;
+            }
+            let replaced = TRAILING_VERSION_RE.replace(clean, "");
+            let stripped = replaced.trim_end();
+            if stripped.is_empty() {
+                Some(clean.to_string())
+            } else {
+                Some(stripped.to_string())
+            }
+        })
+        .collect();
+    if segments.is_empty() {
+        trimmed.to_string()
+    } else {
+        segments.join(" / ")
+    }
+}
 
 /// 与旧版 Python `case.json` 中 `source_stamp` 行一致的元组布局：`(name, size, mtime_ns, ino)`。
 pub type SourceStampRow = (String, u64, i64, u64);

@@ -25,7 +25,8 @@ use tracedesk_core::{
     build_bundle, can_export, coverage_text, deleted_source_note, display_iso_time,
     display_timestamp, entry_name, entry_status, examine, export_findings as do_export_findings,
     group_findings, is_within, normalize_event_filter, operation_title, preview_entry_page,
-    record_note, resolve_clean, search_case, sha256_hex, source_status, verify_audit_chain_at,
+    record_note, resolve_clean, search_case, sha256_hex, source_status, strip_trailing_version,
+    verify_audit_chain_at,
 };
 use tracedesk_engines::{CaseFileLock, InventoryEntry};
 
@@ -187,7 +188,7 @@ pub fn normalize_explicit_user(raw: Option<&str>) -> Option<String> {
     }
 }
 
-/// 按统一规则合成写入 `audit.jsonl` 的 `mcp_client` 标识：
+/// 按统一规则合成写入 `audit.jsonl` 的 `mcp_client` 标识（自动去除客户端末尾版本号数字）：
 /// - 若同时存在明确人工使用者（非泛化 `"MCP"`）与客户端名（且二者不同），合并为 `"<使用者> / <客户端>"`；
 /// - 若仅有一项，则直接使用该项；
 /// - 若均缺失，则回退为 `"本地 MCP 客户端"`。
@@ -195,6 +196,8 @@ pub fn compose_mcp_client(explicit_user: Option<&str>, client_name: Option<&str>
     let user = normalize_explicit_user(explicit_user);
     let client = client_name
         .and_then(sanitize_mcp_identity)
+        .map(|s| strip_trailing_version(&s))
+        .and_then(|s| sanitize_mcp_identity(&s))
         .filter(|s| !s.eq_ignore_ascii_case("MCP"));
 
     match (user, client) {

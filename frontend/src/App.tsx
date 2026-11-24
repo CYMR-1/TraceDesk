@@ -37,6 +37,8 @@ import {
   EMPTY_MCP_ACTIVITY_STATS,
   mergeMcpActivityRecord,
   normalizeCaseDirForCompare,
+  normalizeMcpActivitySnapshot,
+  stripTrailingVersion,
 } from './utils/mcpActivity';
 
 const DEFAULT_STATUS = '就绪 · 应用层只读 · 本地处理 · UTC+8';
@@ -113,9 +115,10 @@ export const App: React.FC = () => {
       tauriApi.getMcpStatus(),
       tauriApi.listMcpActivities({ limit: 300 }),
     ]);
+    const normalized = normalizeMcpActivitySnapshot(actRes);
     setMcpStatus(statusRes);
-    setMcpActivities(actRes.activities);
-    setMcpStats(actRes.stats);
+    setMcpActivities(normalized.activities);
+    setMcpStats(normalized.stats);
   }, []);
 
   /** 清空 MCP 实时操作流 */
@@ -165,9 +168,10 @@ export const App: React.FC = () => {
           tauriApi.listMcpActivities({ limit: 300 }),
         ]);
         if (!active) return;
+        const normalized = normalizeMcpActivitySnapshot(actRes);
         setMcpStatus(statusRes);
-        setMcpActivities(actRes.activities);
-        setMcpStats(actRes.stats);
+        setMcpActivities(normalized.activities);
+        setMcpStats(normalized.stats);
       } catch {
         // 忽略初始化 MCP 监控读取失败
       }
@@ -240,7 +244,8 @@ export const App: React.FC = () => {
         if (currentDir && updatedDir && currentDir === updatedDir) {
           const matchedTool = mcpStatusRef.current?.tools?.find((t) => t.name === ev.toolName);
           const displayTool = matchedTool?.title || ev.toolName;
-          const clientLabel = ev.client ? `MCP（${ev.client}）` : 'MCP';
+          const cleanClient = stripTrailingVersion(ev.client);
+          const clientLabel = cleanClient ? `MCP（${cleanClient}）` : 'MCP';
           void refreshCurrentCaseGently(`${clientLabel}完成「${displayTool}」，已自动刷新案件与审计日志`);
         }
       });

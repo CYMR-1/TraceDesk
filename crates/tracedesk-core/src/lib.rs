@@ -33,8 +33,8 @@ pub use browser_index::{
 pub use case::{
     ByteProgress, Case, CaseData, DirectoryLocation, EvidenceInfo, ExportRecord, GENESIS_HASH,
     LARGE_IMAGE_BYTES, MeasuredHash, PartitionScan, SourceStampRow, StageProgress,
-    VerificationInfo, read_inventory_gz, save_json_atomic, verify_audit_chain_at,
-    write_inventory_gz,
+    VerificationInfo, read_inventory_gz, save_json_atomic, strip_trailing_version,
+    verify_audit_chain_at, write_inventory_gz,
 };
 pub use content_search::{
     CONTEXT_BYTES, HitCallback, ICAT_THREADS, PIECE_BYTES, PIECE_SPLIT_MIN, RawHit,
