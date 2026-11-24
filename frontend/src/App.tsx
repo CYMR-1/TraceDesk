@@ -6,6 +6,7 @@ import { isTauriRuntime, tauriApi, tauriEvents } from './api/tauri';
 import { BrandLogo, UiIcon } from './components/Icons';
 import { AlertDialog, type AlertDialogState } from './components/dialogs/AlertDialog';
 import { BundleExportDialog } from './components/dialogs/BundleExportDialog';
+import { BusyTaskDialog } from './components/dialogs/BusyTaskDialog';
 import { ExamineResultDialog } from './components/dialogs/ExamineResultDialog';
 import { ExportResultDialog, type ExportResultInfo } from './components/dialogs/ExportResultDialog';
 import { FindingNoteDialog } from './components/dialogs/FindingNoteDialog';
@@ -61,6 +62,8 @@ export const App: React.FC = () => {
   const [detailText, setDetailText] = useState(DEFAULT_DETAIL);
   const [statusText, setStatusText] = useState(DEFAULT_STATUS);
   const [busy, setBusy] = useState(false);
+  const [activeTaskLabel, setActiveTaskLabel] = useState<string | null>(null);
+  const [taskStageText, setTaskStageText] = useState('');
   const [progressPercent, setProgressPercent] = useState<number | null>(null);
   const [scanningPartitions, setScanningPartitions] = useState(false);
   const [hashingImage, setHashingImage] = useState(false);
@@ -82,16 +85,39 @@ export const App: React.FC = () => {
   const [examineResult, setExamineResult] = useState<ExamineFileResponse | null>(null);
   const [exportResult, setExportResult] = useState<ExportResultInfo | null>(null);
   const [bundleMaterials, setBundleMaterials] = useState<BundleMaterialsResponse | null>(null);
+  const [busyDialogReason, setBusyDialogReason] = useState<string | null>(null);
   const [alertState, setAlertState] = useState<AlertDialogState | null>(null);
 
   const busyRef = useRef(false);
+  const hashingImageRef = useRef(false);
+  const contentSearchingRef = useRef(false);
   const backgroundBusyRef = useRef(false);
   const snapshotRef = useRef<CaseSnapshot | null>(null);
   const mcpStatusRef = useRef<McpStatus | null>(null);
-  busyRef.current = busy;
-  backgroundBusyRef.current = hashingImage || contentSearching;
-  snapshotRef.current = snapshot;
   mcpStatusRef.current = mcpStatus;
+
+  // 同步更新并发锁与快照引用，避免链式任务在 React 异步重渲染前读到陈旧状态
+  const setBusyState = useCallback((next: boolean) => {
+    busyRef.current = next;
+    setBusy(next);
+  }, []);
+
+  const setHashingImageState = useCallback((next: boolean) => {
+    hashingImageRef.current = next;
+    backgroundBusyRef.current = next || contentSearchingRef.current;
+    setHashingImage(next);
+  }, []);
+
+  const setContentSearchingState = useCallback((next: boolean) => {
+    contentSearchingRef.current = next;
+    backgroundBusyRef.current = hashingImageRef.current || next;
+    setContentSearching(next);
+  }, []);
+
+  const setSnapshotState = useCallback((next: CaseSnapshot | null) => {
+    snapshotRef.current = next;
+    setSnapshot(next);
+  }, []);
 
   const showAlert = useCallback(
     (title: string, message: string, tone: AlertDialogState['tone'] = 'info') => {
@@ -100,14 +126,22 @@ export const App: React.FC = () => {
     []
   );
 
+  // 打开实时任务进度弹窗，清晰展示当前正在运行的任务与进度
+  const openBusyDialog = useCallback((reason: string) => {
+    setBusyDialogReason(reason);
+  }, []);
+
   const bumpRefresh = useCallback(() => {
     setRefreshToken((n) => n + 1);
   }, []);
 
-  const applySnapshot = useCallback((next: CaseSnapshot | null) => {
-    setSnapshot(next);
-    setRefreshToken((n) => n + 1);
-  }, []);
+  const applySnapshot = useCallback(
+    (next: CaseSnapshot | null) => {
+      setSnapshotState(next);
+      setRefreshToken((n) => n + 1);
+    },
+    [setSnapshotState]
+  );
 
   /** 拉取最新 MCP 服务状态与实时监控流快照 */
   const refreshMcpTelemetry = useCallback(async () => {
@@ -129,20 +163,23 @@ export const App: React.FC = () => {
   }, []);
 
   /** 温和刷新当前打开的案件快照与审计日志（不折叠文件树、不丢失当前选中文件） */
-  const refreshCurrentCaseGently = useCallback(async (notice?: string) => {
-    try {
-      const latest = await tauriApi.getCaseSnapshot();
-      if (latest) {
-        setSnapshot(latest);
+  const refreshCurrentCaseGently = useCallback(
+    async (notice?: string) => {
+      try {
+        const latest = await tauriApi.getCaseSnapshot();
+        if (latest) {
+          setSnapshotState(latest);
+        }
+        setRefreshToken((n) => n + 1);
+        if (notice) {
+          setStatusText(notice);
+        }
+      } catch {
+        // 忽略温和刷新过程中的偶发读取异常
       }
-      setRefreshToken((n) => n + 1);
-      if (notice) {
-        setStatusText(notice);
-      }
-    } catch {
-      // 忽略温和刷新过程中的偶发读取异常
-    }
-  }, []);
+    },
+    [setSnapshotState]
+  );
 
   // 启动时读取路径、当前案件快照与 MCP 实时状态
   useEffect(() => {
@@ -156,7 +193,7 @@ export const App: React.FC = () => {
         if (!active) return;
         setAppPaths(paths);
         if (snap) {
-          setSnapshot(snap);
+          setSnapshotState(snap);
         }
       } catch {
         // 忽略初始化读取失败
@@ -179,7 +216,7 @@ export const App: React.FC = () => {
     return () => {
       active = false;
     };
-  }, []);
+  }, [setSnapshotState]);
 
   // 订阅后台任务、大镜像哈希进度与 MCP 实时遥测事件
   useEffect(() => {
@@ -191,25 +228,32 @@ export const App: React.FC = () => {
         if (!mounted) return;
         if (ev.total > 0) {
           const pct = Math.min(100, Math.floor((100 * ev.done) / ev.total));
+          const text = `${ev.stage} · ${pct}%`;
           setProgressPercent(pct);
-          setStatusText(`${ev.stage} · ${pct}%`);
+          setStatusText(text);
+          setTaskStageText(text);
         } else {
+          const text = `${ev.stage}…`;
           setProgressPercent(null);
-          setStatusText(`${ev.stage}…`);
+          setStatusText(text);
+          setTaskStageText(text);
         }
       });
 
       const u2 = await tauriEvents.onHashProgress((ev) => {
         if (!mounted) return;
         const pct = ev.total > 0 ? Math.min(100, Math.floor((100 * ev.done) / ev.total)) : 0;
+        const text = `后台读取整镜像 · ${pct}% · ${Math.round(ev.rateMiBs)} MiB/s`;
         setProgressPercent(pct);
-        setStatusText(`后台读取整镜像 · ${pct}% · ${Math.round(ev.rateMiBs)} MiB/s`);
+        setStatusText(text);
+        setTaskStageText(text);
       });
 
       const u3 = await tauriEvents.onHashFinished((ev) => {
         if (!mounted) return;
-        setHashingImage(false);
+        setHashingImageState(false);
         setProgressPercent(null);
+        setTaskStageText('');
         if (ev.snapshot) {
           applySnapshot(ev.snapshot);
         }
@@ -257,7 +301,7 @@ export const App: React.FC = () => {
       mounted = false;
       for (const u of unlisteners) u();
     };
-  }, [applySnapshot, refreshCurrentCaseGently, showAlert]);
+  }, [applySnapshot, refreshCurrentCaseGently, setHashingImageState, showAlert]);
 
   // 主窗口关闭守卫（仅 Tauri 桌面端）
   useEffect(() => {
@@ -269,7 +313,7 @@ export const App: React.FC = () => {
         unlisten = await getCurrentWindow().onCloseRequested(async (event) => {
           if (busyRef.current || backgroundBusyRef.current) {
             event.preventDefault();
-            showAlert('正在处理', '存在正在运行的后台任务或内容搜索，请先取消或等待完成后再关闭窗口。', 'warning');
+            openBusyDialog('存在正在运行的后台任务或内容搜索，请先取消或等待完成后再关闭窗口。');
             return;
           }
           try {
@@ -289,48 +333,62 @@ export const App: React.FC = () => {
     return () => {
       unlisten?.();
     };
-  }, [inTauri, showAlert]);
+  }, [inTauri, openBusyDialog, showAlert]);
 
-  // 统一任务执行包装
+  // 统一任务执行包装：同步维护 busyRef 与 busy，避免链式任务或快速连点误触发并发锁
   const runTask = useCallback(
     async <T,>(
       label: string,
       work: () => Promise<T>,
-      options?: { requiresCase?: boolean; onSuccess?: (val: T) => void | Promise<void> }
+      options?: {
+        requiresCase?: boolean;
+        blocksBackground?: boolean;
+        onSuccess?: (val: T) => void | Promise<void>;
+      }
     ): Promise<T | null> => {
       const requiresCase = options?.requiresCase ?? true;
-      if (!requiresCase && backgroundBusyRef.current) {
-        showAlert('正在处理', '切换案件前请先取消后台校验或内容搜索，或等待完成。', 'info');
+      const blocksBackground = options?.blocksBackground ?? !requiresCase;
+      if (blocksBackground && backgroundBusyRef.current) {
+        openBusyDialog('切换案件前请先取消后台校验或内容搜索，或等待完成。');
         return null;
       }
       if (busyRef.current) {
-        showAlert('正在处理', '请等待当前任务完成。', 'info');
+        openBusyDialog('请等待当前任务完成后再继续操作。');
         return null;
       }
-      if (requiresCase && !snapshot) {
+      if (requiresCase && !snapshotRef.current) {
         showAlert('提示', '请先新建或打开案件。', 'info');
         return null;
       }
 
-      setBusy(true);
+      setBusyState(true);
+      setActiveTaskLabel(label);
+      setTaskStageText(`${label}…`);
       setProgressPercent(null);
       setStatusText(`${label}…`);
+      let result: T;
       try {
-        const result = await work();
-        setStatusText(DEFAULT_STATUS);
-        setBusy(false);
-        setProgressPercent(null);
-        await options?.onSuccess?.(result);
-        return result;
+        result = await work();
       } catch (err) {
-        setBusy(false);
+        setBusyState(false);
+        setActiveTaskLabel(null);
+        setTaskStageText('');
         setProgressPercent(null);
         setStatusText(`${label}失败`);
         showAlert(`${label}失败`, formatError(err), 'error');
         return null;
       }
+
+      // work() 完成后先同步释放并发锁，再执行 onSuccess 或返回给链式后续任务
+      setBusyState(false);
+      setActiveTaskLabel(null);
+      setTaskStageText('');
+      setProgressPercent(null);
+      setStatusText(DEFAULT_STATUS);
+      await options?.onSuccess?.(result);
+      return result;
     },
-    [snapshot, showAlert]
+    [openBusyDialog, setBusyState, showAlert]
   );
 
   // 加载镜像或打开案件后，按镜像大小自动扫描分区或浏览首个可读根目录
@@ -340,7 +398,8 @@ export const App: React.FC = () => {
       if (!ev) return;
       const isLarge = Boolean(ev.largeImage ?? ev.large_image);
       if (isLarge && snap.browsingDirectories) {
-        await runTask(
+        if (ev.partitions.length === 0) return;
+        const res = await runTask(
           '读取分区根目录',
           async () => {
             const failures: string[] = [];
@@ -353,39 +412,40 @@ export const App: React.FC = () => {
             }
             throw new Error('无法读取根目录：' + failures.join('；'));
           },
-          {
-            requiresCase: false,
-            onSuccess: (res) => {
-              applySnapshot(res.snapshot);
-            },
-          }
+          { requiresCase: true }
         );
+        if (res) {
+          applySnapshot(res.snapshot);
+        }
       } else if (!isLarge && snap.needsPartitionScan) {
         setScanningPartitions(true);
-        await runTask('读取所有分区与文件树', () => tauriApi.scanAllPartitions(), {
-          requiresCase: false,
-          onSuccess: (res) => {
+        try {
+          const res = await runTask('读取所有分区与文件树', () => tauriApi.scanAllPartitions(), {
+            requiresCase: true,
+          });
+          if (res) {
             if (res.completed) {
               applySnapshot(res.snapshot);
             } else {
               setDetailText('已取消建立索引，保留原有浏览结果。');
             }
-          },
-        });
-        setScanningPartitions(false);
+          }
+        } finally {
+          setScanningPartitions(false);
+        }
       }
     },
     [runTask, applySnapshot]
   );
 
   const handleCaseReplaced = useCallback(
-    (next: CaseSnapshot | null) => {
+    async (next: CaseSnapshot | null) => {
       setSelectedEntry(null);
       setDetailText(DEFAULT_DETAIL);
       setStatusText(DEFAULT_STATUS);
       applySnapshot(next);
       if (next) {
-        void resumePartitions(next);
+        await resumePartitions(next);
       }
     },
     [applySnapshot, resumePartitions]
@@ -394,11 +454,11 @@ export const App: React.FC = () => {
   // 案件与镜像动作
   const handleNewCase = () => {
     if (backgroundBusyRef.current) {
-      showAlert('正在处理', '切换案件前请先取消后台校验或内容搜索，或等待完成。', 'info');
+      openBusyDialog('切换案件前请先取消后台校验或内容搜索，或等待完成。');
       return;
     }
-    if (busy) {
-      showAlert('正在处理', '请等待当前任务完成。', 'info');
+    if (busyRef.current) {
+      openBusyDialog('请等待当前任务完成后再新建案件。');
       return;
     }
     setNewCaseOpen(true);
@@ -406,11 +466,11 @@ export const App: React.FC = () => {
 
   const handleOpenCase = async () => {
     if (backgroundBusyRef.current) {
-      showAlert('正在处理', '切换案件前请先取消后台校验或内容搜索，或等待完成。', 'info');
+      openBusyDialog('切换案件前请先取消后台校验或内容搜索，或等待完成。');
       return;
     }
-    if (busy) {
-      showAlert('正在处理', '请等待当前任务完成。', 'info');
+    if (busyRef.current) {
+      openBusyDialog('请等待当前任务完成后再打开案件。');
       return;
     }
     if (inTauri) {
@@ -420,22 +480,26 @@ export const App: React.FC = () => {
         filters: [{ name: '案件元数据 (case.json)', extensions: ['json'] }],
       });
       if (!picked) return;
-      await runTask('打开案件并读取清单', () => tauriApi.openCase({ casePath: picked }), {
+      // 先完成打开案件并释放并发锁，再由链式逻辑自动恢复分区浏览或扫描
+      const snap = await runTask('打开案件并读取清单', () => tauriApi.openCase({ casePath: picked }), {
         requiresCase: false,
-        onSuccess: (snap) => handleCaseReplaced(snap),
+        blocksBackground: true,
       });
+      if (snap) {
+        await handleCaseReplaced(snap);
+      }
     } else {
       setOpenCaseOpen(true);
     }
   };
 
   const handleLoadImage = async () => {
-    if (!snapshot) {
+    if (!snapshotRef.current) {
       showAlert('提示', '请先新建或打开案件。', 'info');
       return;
     }
-    if (busy) {
-      showAlert('正在处理', '请等待当前任务完成。', 'info');
+    if (busyRef.current) {
+      openBusyDialog('请等待当前任务完成后再加载镜像。');
       return;
     }
     let imagePath: string | null = null;
@@ -449,17 +513,19 @@ export const App: React.FC = () => {
     } else {
       imagePath = 'C:\\TraceDesk\\evidence\\demo.dd';
     }
-    await runTask('打开镜像并识别分区', () => tauriApi.loadImage({ imagePath: imagePath! }), {
-      onSuccess: async (snap) => {
-        setSelectedEntry(null);
-        applySnapshot(snap);
-        await resumePartitions(snap);
-      },
-    });
+    // 先完成镜像识别并同步释放并发锁，再在顶层链式调用分区自动扫描/根目录读取
+    const snap = await runTask('打开镜像并识别分区', () =>
+      tauriApi.loadImage({ imagePath: imagePath! })
+    );
+    if (snap) {
+      setSelectedEntry(null);
+      applySnapshot(snap);
+      await resumePartitions(snap);
+    }
   };
 
   const handleVerifyIntegrity = async () => {
-    if (hashingImage) {
+    if (hashingImageRef.current) {
       try {
         await tauriApi.cancelVerifyIntegrity();
         setStatusText('正在取消校验…');
@@ -468,53 +534,65 @@ export const App: React.FC = () => {
       }
       return;
     }
-    if (!snapshot) {
+    const currentSnap = snapshotRef.current;
+    if (!currentSnap) {
       showAlert('提示', '请先新建或打开案件。', 'info');
       return;
     }
-    if (!snapshot.evidence) {
+    if (!currentSnap.evidence) {
       showAlert('提示', '请先加载镜像。', 'info');
       return;
     }
-    const isLarge = Boolean(snapshot.evidence.largeImage ?? snapshot.evidence.large_image);
+    const isLarge = Boolean(currentSnap.evidence.largeImage ?? currentSnap.evidence.large_image);
     if (isLarge) {
-      setHashingImage(true);
+      if (busyRef.current) {
+        openBusyDialog('请等待当前任务完成后再启动完整性校验。');
+        return;
+      }
+      setHashingImageState(true);
       setStatusText('后台读取整镜像 · 可继续浏览');
+      setTaskStageText('后台读取整镜像 · 可继续浏览');
       try {
         await tauriApi.verifyIntegrity();
       } catch (err) {
-        setHashingImage(false);
+        setHashingImageState(false);
         setProgressPercent(null);
+        setTaskStageText('');
         setStatusText('校验失败');
         showAlert('校验失败', formatError(err), 'error');
       }
       return;
     }
-    await runTask('流式校验 SHA-256', () => tauriApi.verifyIntegrity(), {
-      onSuccess: (res) => {
-        applySnapshot(res.snapshot);
-        showAlert(
-          '完整性校验',
-          res.ok ? '通过：与初始固定值一致。' : '失败：原始镜像已发生变化！',
-          res.ok ? 'ok' : 'error'
-        );
-      },
-    });
+    const res = await runTask('流式校验 SHA-256', () => tauriApi.verifyIntegrity());
+    if (res) {
+      applySnapshot(res.snapshot);
+      showAlert(
+        '完整性校验',
+        res.ok ? '通过：与初始固定值一致。' : '失败：原始镜像已发生变化！',
+        res.ok ? 'ok' : 'error'
+      );
+    }
   };
 
   const handleScanAllPartitions = async () => {
-    if (!snapshot?.evidence) return;
+    if (!snapshotRef.current?.evidence) return;
+    if (busyRef.current) {
+      openBusyDialog('请等待当前任务完成后再扫描分区。');
+      return;
+    }
     setScanningPartitions(true);
-    await runTask('读取所有分区与文件树', () => tauriApi.scanAllPartitions(), {
-      onSuccess: (res) => {
+    try {
+      const res = await runTask('读取所有分区与文件树', () => tauriApi.scanAllPartitions());
+      if (res) {
         if (res.completed) {
           applySnapshot(res.snapshot);
         } else {
           setDetailText('已取消建立索引，保留原有浏览结果。');
         }
-      },
-    });
-    setScanningPartitions(false);
+      }
+    } finally {
+      setScanningPartitions(false);
+    }
   };
 
   const handleCancelScan = async () => {
@@ -526,21 +604,20 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleBrowseDirectory = async (
-    offset: number,
-    inode: string | null,
-    path: string
-  ): Promise<EntryView[] | null> => {
-    const res = await runTask(`读取目录 /${path}`, () =>
-      tauriApi.browseDirectory({ offset, inode, path })
-    );
-    if (res) {
-      setSelectedEntry(null);
-      applySnapshot(res.snapshot);
-      return res.entries;
-    }
-    return null;
-  };
+  const handleBrowseDirectory = useCallback(
+    async (offset: number, inode: string | null, path: string): Promise<EntryView[] | null> => {
+      const res = await runTask(`读取目录 /${path}`, () =>
+        tauriApi.browseDirectory({ offset, inode, path })
+      );
+      if (res) {
+        setSelectedEntry(null);
+        applySnapshot(res.snapshot);
+        return res.entries;
+      }
+      return null;
+    },
+    [runTask, applySnapshot]
+  );
 
   const handleExportEntry = async (entry: EntryView) => {
     await runTask('校验并导出证据副本', () => tauriApi.exportFile({ entryId: entry.entryId }), {
@@ -565,15 +642,20 @@ export const App: React.FC = () => {
   };
 
   const handleCompareEntry = async (entry: EntryView) => {
+    if (busyRef.current) {
+      openBusyDialog('请等待当前任务完成后再校验文件一致性。');
+      return;
+    }
+    const currentSnap = snapshotRef.current;
     let comparisonPath: string | null = null;
     if (inTauri) {
       comparisonPath = await tauriApi.pickFile({
         title: '选择与镜像内文件比较的本地副本',
-        defaultPath: snapshot ? `${snapshot.caseDir}\\exports` : undefined,
+        defaultPath: currentSnap ? `${currentSnap.caseDir}\\exports` : undefined,
       });
       if (!comparisonPath) return;
     } else {
-      comparisonPath = `${snapshot?.caseDir ?? 'C:\\TraceDesk\\cases\\DEMO-01'}\\exports\\${entry.name}`;
+      comparisonPath = `${currentSnap?.caseDir ?? 'C:\\TraceDesk\\cases\\DEMO-01'}\\exports\\${entry.name}`;
     }
     await runTask(
       '校验文件一致性',
@@ -634,16 +716,17 @@ export const App: React.FC = () => {
   };
 
   const handleExportBundle = async () => {
-    if (!snapshot) {
+    const currentSnap = snapshotRef.current;
+    if (!currentSnap) {
       showAlert('提示', '请先新建或打开案件。', 'info');
       return;
     }
-    if (!snapshot.evidence) {
+    if (!currentSnap.evidence) {
       showAlert('提示', '请先加载镜像。', 'info');
       return;
     }
-    if (busy) {
-      showAlert('正在处理', '请等待当前任务完成。', 'info');
+    if (busyRef.current) {
+      openBusyDialog('请等待当前任务完成后再生成复核包。');
       return;
     }
     try {
@@ -716,6 +799,28 @@ export const App: React.FC = () => {
 
   const custodyState = snapshot?.custodyState ?? 'idle';
   const showProgressBar = busy || hashingImage;
+
+  // 聚合当前活跃的前台与后台任务名称，供实时任务进度弹窗清晰展示
+  const activeTaskNames = useMemo(() => {
+    const names: string[] = [];
+    if (activeTaskLabel) {
+      names.push(activeTaskLabel);
+    }
+    if (hashingImage) {
+      names.push('校验镜像完整性');
+    }
+    if (contentSearching) {
+      names.push('搜索文件内容');
+    }
+    return names;
+  }, [activeTaskLabel, hashingImage, contentSearching]);
+
+  const busyDialogStageText = useMemo(() => {
+    if (taskStageText) return taskStageText;
+    if (hashingImage) return '后台读取整镜像 · 可继续浏览';
+    if (contentSearching) return '正在流式检索镜像文件内容…';
+    return statusText;
+  }, [taskStageText, hashingImage, contentSearching, statusText]);
 
   // 当前正在执行中的 MCP 工具信息（用于顶栏和底栏实时状态指示）
   const activeRunningMcp = useMemo(
@@ -1013,7 +1118,7 @@ export const App: React.FC = () => {
               selectedBrowserEntry={selectedEntry}
               singleFileRequestToken={singleFileSearchToken}
               busy={busy}
-              onSearchingChange={setContentSearching}
+              onSearchingChange={setContentSearchingState}
               onSnapshotUpdated={applySnapshot}
               onAlert={showAlert}
             />
@@ -1079,7 +1184,7 @@ export const App: React.FC = () => {
       {newCaseOpen && (
         <NewCaseDialog
           defaultCasesDir={appPaths.casesDir || 'C:\\TraceDesk\\cases'}
-          onCreated={(snap) => handleCaseReplaced(snap)}
+          onCreated={(snap) => void handleCaseReplaced(snap)}
           onClose={() => setNewCaseOpen(false)}
         />
       )}
@@ -1087,7 +1192,7 @@ export const App: React.FC = () => {
       {openCaseOpen && (
         <OpenCaseDialog
           defaultCasesDir={appPaths.casesDir || 'C:\\TraceDesk\\cases'}
-          onOpened={(snap) => handleCaseReplaced(snap)}
+          onOpened={(snap) => void handleCaseReplaced(snap)}
           onClose={() => setOpenCaseOpen(false)}
         />
       )}
@@ -1136,6 +1241,16 @@ export const App: React.FC = () => {
       )}
 
       {helpOpen && <HelpGuideDialog onClose={() => setHelpOpen(false)} />}
+
+      {busyDialogReason && (
+        <BusyTaskDialog
+          reason={busyDialogReason}
+          taskNames={activeTaskNames}
+          stageText={busyDialogStageText}
+          progressPercent={progressPercent}
+          onClose={() => setBusyDialogReason(null)}
+        />
+      )}
 
       {alertState && (
         <AlertDialog

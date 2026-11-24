@@ -29,6 +29,11 @@ const MONO_KEY_TOKENS = [
 ];
 
 function renderDossierValue(key: string, value: unknown): React.ReactNode {
+  // 允许上层直接传入交互式 React 节点（例如可点击切换单位的镜像大小展示）
+  if (React.isValidElement(value)) {
+    return value;
+  }
+
   const raw = value === null || value === undefined ? '' : String(value);
   const stripped = raw.trim();
   if (!stripped || isMutedPlaceholder(stripped)) {

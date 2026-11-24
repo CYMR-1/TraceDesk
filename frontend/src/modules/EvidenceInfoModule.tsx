@@ -19,6 +19,41 @@ interface EvidenceInfoModuleProps {
   onExportFsstat: (offset: number) => void;
 }
 
+interface BinarySizeUnit {
+  label: 'TiB' | 'GiB' | 'MiB' | 'KiB' | 'B';
+  factor: number;
+}
+
+const BINARY_SIZE_UNITS: readonly BinarySizeUnit[] = [
+  { label: 'TiB', factor: 1024 ** 4 },
+  { label: 'GiB', factor: 1024 ** 3 },
+  { label: 'MiB', factor: 1024 ** 2 },
+  { label: 'KiB', factor: 1024 },
+];
+
+/** 按 1024 二进制进制推导可选显示单位序列：默认优先最大合适单位，点击后逐级向小单位循环切换 */
+function resolveBinarySizeUnits(bytes: number): BinarySizeUnit[] {
+  const safeBytes = Math.max(0, Number.isFinite(bytes) ? bytes : 0);
+  const startIdx = BINARY_SIZE_UNITS.findIndex((u) => safeBytes >= u.factor);
+  if (startIdx === -1) {
+    return [{ label: 'B', factor: 1 }];
+  }
+  return BINARY_SIZE_UNITS.slice(startIdx);
+}
+
+/** 将字节数格式化为“<大单位值> = (<精确千分位字节数> 字节)” */
+function formatBinarySizeWithBytes(bytes: number, unit: BinarySizeUnit): string {
+  const exactBytes = formatBytes(bytes);
+  if (unit.label === 'B') {
+    return `${exactBytes} B = (${exactBytes} 字节)`;
+  }
+  const scaled = (bytes / unit.factor).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return `${scaled} ${unit.label} = (${exactBytes} 字节)`;
+}
+
 function buildCoverageSummary(evidence: EvidenceInfo): string {
   if (evidence.coverageText) return evidence.coverageText;
   if (evidence.coverage?.text) return evidence.coverage.text;
@@ -54,6 +89,8 @@ export const EvidenceInfoModule: React.FC<EvidenceInfoModuleProps> = ({
   const evidence = snapshot?.evidence ?? null;
   const partitions = evidence?.partitions ?? [];
   const [selectedOffset, setSelectedOffset] = useState<number>(partitions[0]?.offset ?? 0);
+  // 镜像大小展示单位索引：0 表示默认最大合适单位，点击逐级向小单位循环切换
+  const [sizeUnitIdx, setSizeUnitIdx] = useState<number>(0);
 
   useEffect(() => {
     if (partitions.length > 0 && !partitions.some((p) => p.offset === selectedOffset)) {
@@ -61,18 +98,43 @@ export const EvidenceInfoModule: React.FC<EvidenceInfoModuleProps> = ({
     }
   }, [partitions, selectedOffset]);
 
+  useEffect(() => {
+    setSizeUnitIdx(0);
+  }, [evidence?.path, evidence?.size]);
+
   const sections = useMemo<DossierSection[]>(() => {
     if (!evidence || !snapshot) return [];
 
     const scanMap = new Map(snapshot.partitionScans.map((s) => [s.offset, s]));
     const fixedAt = evidence.fixedAt ?? evidence.fixed_at;
 
+    const sizeUnits = resolveBinarySizeUnits(evidence.size);
+    const activeUnit = sizeUnits[sizeUnitIdx % sizeUnits.length] ?? sizeUnits[0];
+    const sizeText = formatBinarySizeWithBytes(evidence.size, activeUnit);
+    const nextUnit = sizeUnits.length > 1 ? sizeUnits[(sizeUnitIdx + 1) % sizeUnits.length] : null;
+    const sizeValueNode =
+      sizeUnits.length > 1 && nextUnit ? (
+        <button
+          type="button"
+          className="td-size-unit-btn td-dossier-mono"
+          title={`点击切换显示单位（下次切换为 ${nextUnit.label}）`}
+          onClick={() => setSizeUnitIdx((idx) => (idx + 1) % sizeUnits.length)}
+        >
+          <span>{sizeText}</span>
+          <span className="td-size-unit-hint" aria-hidden="true">
+            ⇄
+          </span>
+        </button>
+      ) : (
+        <span className="td-dossier-mono">{sizeText}</span>
+      );
+
     const list: DossierSection[] = [
       {
         title: '证据固定',
         rows: [
           ['镜像路径', evidence.path],
-          ['大小', `${formatBytes(evidence.size)} 字节`],
+          ['大小', sizeValueNode],
           ['固定时间（UTC+8）', fixedAt || '待固定'],
           ['SHA-256', evidence.sha256 || '待固定'],
         ],
@@ -125,7 +187,7 @@ export const EvidenceInfoModule: React.FC<EvidenceInfoModuleProps> = ({
     });
 
     return list;
-  }, [evidence, snapshot, partitions]);
+  }, [evidence, snapshot, partitions, sizeUnitIdx]);
 
   const rawText = useMemo(() => {
     if (!evidence) return '';

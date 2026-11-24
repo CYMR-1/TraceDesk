@@ -143,7 +143,13 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
     // 3. 加载真实 demo.dd 镜像并扫描全部分区
     let snap = cmd_load_image(&state, &demo_dd.to_string_lossy(), None).expect("load_image");
     assert_eq!(snap.custody_state, "verified");
+    assert!(!snap.browsing_directories, "常规镜像加载后不应进入大镜像按需模式");
+    assert!(
+        snap.needs_partition_scan,
+        "常规镜像加载后未扫描前 needs_partition_scan 必须为 true，以触发前端自动扫描"
+    );
     let ev = snap.evidence.as_ref().expect("evidence loaded");
+    assert_eq!(ev.large_image, Some(false));
     let fixed_sha = ev.sha256.clone().expect("sha256 fixed");
     assert_eq!(fixed_sha.len(), 64);
     assert!(!ev.partitions.is_empty());
@@ -1575,6 +1581,94 @@ fn large_image_quick_mode_lazy_tree_children_and_audit_integrity() {
             "按需目录浏览不得残留常驻 case.lock"
         );
     }
+
+    state.shutdown_all();
+}
+
+#[test]
+fn load_and_scan_real_drf2024_image_end_to_end_readonly() {
+    let drf_path = repo_root().join("evidence").join("DRF2024.dd");
+    if !drf_path.is_file() {
+        // 本地未放置 DRF2024.dd 时跳过，保证无本地大样本环境下测试套件仍可完整通过
+        return;
+    }
+
+    let tmp = tempdir().expect("create tempdir");
+    let cases_dir = tmp.path().join("cases");
+    std::fs::create_dir_all(&cases_dir).expect("mkdir cases");
+    let state = make_test_state(cases_dir.clone());
+
+    // 1. 在临时目录新建案件并只读加载本地 DRF2024.dd
+    let created = cmd_create_case(
+        &state,
+        &cases_dir.to_string_lossy(),
+        "DRF-VERIFY-01",
+        "自动化核验",
+        "DRF2024",
+        None,
+    )
+    .expect("create_case");
+    assert_eq!(created.inventory_count, 0);
+
+    let loaded = cmd_load_image(&state, &drf_path.to_string_lossy(), None).expect("load_image");
+    let ev = loaded.evidence.as_ref().expect("evidence present");
+    assert_eq!(ev.size, 262_144_512, "DRF2024.dd 实际大小应为 262,144,512 字节");
+    assert_eq!(ev.large_image, Some(false), "DRF2024.dd 小于 1 GiB，不应被判为大镜像");
+    assert!(!loaded.browsing_directories, "常规镜像不应进入大镜像按需目录浏览模式");
+    assert!(
+        loaded.needs_partition_scan,
+        "load_image 完成后 needs_partition_scan 必须为 true"
+    );
+    let offsets: Vec<u64> = ev.partitions.iter().map(|p| p.offset).collect();
+    assert_eq!(offsets, vec![128, 409_728], "应准确识别 FAT32(128) 与 NTFS(409728) 两个分区");
+
+    // 2. 紧接执行全分区自动扫描，验证两分区均可正常扫描出文件清单
+    let scanned = cmd_scan_all_partitions(&state, None).expect("scan_all_partitions");
+    assert!(scanned.completed, "全部分区扫描应完整完成");
+    assert!(
+        !scanned.snapshot.needs_partition_scan,
+        "全部分区扫描完成后 needs_partition_scan 应为 false"
+    );
+    assert!(
+        scanned.snapshot.inventory_count > 0,
+        "扫描完成后完整清单不得为 0 项"
+    );
+    assert_eq!(scanned.snapshot.partition_scans.len(), 2);
+    for ps in &scanned.snapshot.partition_scans {
+        assert_eq!(
+            ps.status, "ready",
+            "分区偏移 {} 扫描状态应为 ready，错误：{:?}",
+            ps.offset, ps.error
+        );
+        assert!(
+            ps.count.unwrap_or(0) > 0,
+            "分区偏移 {} 应扫描出有效文件条目",
+            ps.offset
+        );
+    }
+
+    // 3. 核验左侧文件树根节点与右侧分页查询均可返回真实条目
+    let tree_fat =
+        cmd_get_tree_children(&state, 128, "", None, None).expect("tree children offset 128");
+    let tree_ntfs = cmd_get_tree_children(&state, 409_728, "", None, None)
+        .expect("tree children offset 409728");
+    assert!(!tree_fat.nodes.is_empty(), "偏移 128 (FAT32) 根目录树节点不应为空");
+    assert!(!tree_ntfs.nodes.is_empty(), "偏移 409728 (NTFS) 根目录树节点不应为空");
+
+    let page = cmd_query_files_page(&state, None, None, "", "", "all", 0, 100, Some(false))
+        .expect("query_files_page");
+    assert_eq!(page.total, scanned.snapshot.inventory_count);
+    assert!(!page.items.is_empty());
+
+    println!(
+        "[DRF2024.dd 实测] size={} bytes, sha256={}, inventory_count={}, scans={:?}, fat_root_nodes={}, ntfs_root_nodes={}",
+        ev.size,
+        ev.sha256.as_deref().unwrap_or(""),
+        scanned.snapshot.inventory_count,
+        scanned.snapshot.partition_scans,
+        tree_fat.nodes.len(),
+        tree_ntfs.nodes.len(),
+    );
 
     state.shutdown_all();
 }
