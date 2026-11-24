@@ -98,11 +98,12 @@ export const AuditLogModule: React.FC<AuditLogModuleProps> = ({ snapshot, refres
       {
         key: 'origin',
         label: '来源',
-        // 加宽来源列以完整展示“MCP · 使用者 / 客户端”胶囊，避免截断乱版
+        // 加宽来源列以完整展示“MCP · 使用者 / 客户端”胶囊，并启用“来源”分层筛选菜单
         width: 188,
         pill: true,
         filterable: true,
         filterMode: 'single',
+        filterVariant: 'origin',
         getText: (r) => r.originLabel || (r.origin === 'mcp' ? 'MCP' : '人工'),
         getTooltip: (r) => {
           const label = r.originLabel || (r.origin === 'mcp' ? 'MCP' : '人工');
