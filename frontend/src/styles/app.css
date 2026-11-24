@@ -733,6 +733,11 @@
   color: var(--accent);
 }
 
+.td-header-cell--open {
+  background: var(--header-hover-bg);
+  color: var(--accent);
+}
+
 .td-header-cell--center {
   justify-content: center;
 }
@@ -1211,7 +1216,7 @@
   user-select: text;
 }
 
-/* ---------- 表头下拉筛选菜单与右键菜单 ---------- */
+/* ---------- 右键菜单与表头下拉筛选弹层 ---------- */
 .td-menu {
   position: fixed;
   z-index: 1200;
@@ -1261,6 +1266,343 @@
   height: 1px;
   background: var(--border-subtle);
   margin: 4px 6px;
+}
+
+/* 表头下拉筛选专用弹层（明净瓷白与晴空蓝：自适应宽幅、单行省略、分组层次与内置搜索） */
+.td-filter-menu {
+  position: fixed;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  min-width: 224px;
+  max-width: 380px;
+  background: var(--surface-bg);
+  color: var(--text-primary);
+  border: 1px solid #D3DFEC;
+  border-radius: 8px;
+  box-shadow:
+    0 12px 32px rgba(15, 23, 42, 0.14),
+    0 3px 10px rgba(38, 116, 196, 0.08),
+    0 1px 2px rgba(15, 23, 42, 0.06);
+  overflow: hidden;
+}
+
+.td-filter-search-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 7px 8px;
+  background: var(--chrome-bg);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.td-filter-search-icon {
+  position: absolute;
+  left: 16px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.td-filter-search-input {
+  width: 100%;
+  height: 27px;
+  padding: 0 24px 0 26px;
+  background: var(--surface-bg);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: 5px;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.td-filter-search-input:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px rgba(38, 116, 196, 0.14);
+}
+
+.td-filter-search-input::placeholder {
+  color: var(--text-muted);
+}
+
+.td-filter-search-clear {
+  position: absolute;
+  right: 12px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+}
+
+.td-filter-search-clear:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.td-filter-menu-list {
+  max-height: 320px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overscroll-behavior: contain;
+}
+
+.td-filter-menu-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.td-filter-menu-list::-webkit-scrollbar-thumb {
+  background: #CBD7E5;
+  border-radius: 3px;
+  border: none;
+}
+
+.td-filter-menu-list::-webkit-scrollbar-thumb:hover {
+  background: #9DB2C9;
+}
+
+.td-filter-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+  padding: 5px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.td-filter-item:hover:not(:disabled) {
+  background: #F1F7FE;
+  color: var(--text-primary);
+}
+
+.td-filter-item:active:not(:disabled) {
+  background: #E2EFFD;
+}
+
+.td-filter-item:focus-visible {
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+
+.td-filter-item--active {
+  background: #EFF6FF;
+  color: #1D4ED8;
+  font-weight: 600;
+}
+
+.td-filter-item--active:hover:not(:disabled) {
+  background: #E2EFFD;
+  color: #1D4ED8;
+}
+
+.td-filter-item-text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 单选模式左侧状态点 */
+.td-filter-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #94A3B8;
+  transition: background-color 0.12s ease, transform 0.12s ease;
+}
+
+.td-filter-dot--all {
+  background: #DBEAFE;
+  box-shadow: inset 0 0 0 1.5px #2563EB;
+}
+
+.td-filter-dot--manual,
+.td-filter-dot--ok {
+  background: #10B981;
+}
+
+.td-filter-dot--mcp,
+.td-filter-dot--system {
+  background: #7C3AED;
+}
+
+.td-filter-dot--danger {
+  background: #DC2626;
+}
+
+.td-filter-dot--warn {
+  background: #D97706;
+}
+
+.td-filter-dot--accent {
+  background: #2563EB;
+}
+
+.td-filter-dot--neutral {
+  background: #94A3B8;
+}
+
+.td-filter-item--active .td-filter-dot--neutral {
+  background: #2563EB;
+}
+
+/* 来源筛选中具体 MCP 调用方的紧凑紫色徽章 */
+.td-filter-mcp-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: #F4F0FD;
+  border: 1px solid #D8CBF5;
+  color: #6D28D9;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  line-height: 1;
+}
+
+.td-filter-item--active .td-filter-mcp-badge {
+  background: #EDE9FE;
+  border-color: #C4B5FD;
+  color: #5B21B6;
+}
+
+/* 单选模式右侧晴空蓝对勾 */
+.td-filter-check-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-left: 2px;
+}
+
+/* 多选模式左侧圆角复选框视觉指示 */
+.td-filter-checkbox {
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  border: 1.5px solid #B8C7D9;
+  background: var(--surface-bg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.td-filter-item:hover .td-filter-checkbox {
+  border-color: var(--accent);
+}
+
+.td-filter-checkbox--checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.td-filter-sep {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 4px 6px;
+  flex-shrink: 0;
+}
+
+.td-filter-group-label {
+  padding: 5px 10px 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+.td-filter-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 16px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.td-filter-empty-reset {
+  border: 1px solid var(--accent-soft-border);
+  background: var(--accent-soft-bg);
+  color: var(--accent-soft-text);
+  border-radius: 4px;
+  padding: 2px 9px;
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.td-filter-empty-reset:hover {
+  background: #DFEEFD;
+}
+
+/* 多选模式底部已选统计与快捷重置栏 */
+.td-filter-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--chrome-bg);
+  border-top: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.td-filter-footer-count {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.td-filter-footer-count--active {
+  color: #1D4ED8;
+  font-weight: 600;
+}
+
+.td-filter-footer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
 /* ---------- 模态弹窗 ---------- */
