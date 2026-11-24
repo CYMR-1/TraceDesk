@@ -12,7 +12,7 @@ use tempfile::tempdir;
 use tracedesk_core::{AppPaths, verify_bundle};
 use tracedesk_desktop_lib::AppState;
 use tracedesk_desktop_lib::commands::{
-    cmd_bookmark_search_hits, cmd_build_review_bundle, cmd_build_timeline,
+    cmd_bookmark_search_hits, cmd_browse_directory, cmd_build_review_bundle, cmd_build_timeline,
     cmd_cancel_content_search, cmd_cancel_scan_partitions, cmd_cancel_verify_integrity,
     cmd_check_busy_before_close, cmd_clear_mcp_activities, cmd_close_case, cmd_create_case,
     cmd_examine_file, cmd_export_file, cmd_export_findings, cmd_export_fsstat, cmd_generate_report,
@@ -197,7 +197,8 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
     assert!(PathBuf::from(&fsstat_res.path).is_file());
 
     // 6. 目录树懒加载、query_files_page（含 logFilter 审计检查）与 locate_file_in_scope
-    let root_tree = cmd_get_tree_children(&state, part_offset, "", None).expect("get_tree_children");
+    let root_tree =
+        cmd_get_tree_children(&state, part_offset, "", None, None).expect("get_tree_children");
     assert!(!root_tree.nodes.is_empty());
     assert!(root_tree.nodes.iter().any(|n| n.kind == "directory" && n.scope_path.as_deref() == Some("DOCS")));
 
@@ -1409,6 +1410,170 @@ fn desktop_open_case_concurrent_external_mcp_write_and_hot_reload() {
     {
         let cg = state.case_lock.lock().expect("case_lock");
         assert!(!cg.as_ref().expect("active case").has_lock());
+    }
+
+    state.shutdown_all();
+}
+
+/// 回归测试：大镜像按需快速浏览模式（`browsing_directories = true`，初始 `inventory = 0`）下，
+/// 直接展开文件树 `/ 根目录` 与子目录 `DOCS` 应按需调用只读目录列举返回真实目录与文件，
+/// 同时保留多分支缓存、对无文件系统保留分区返回清晰中文错误，并保持审计链与短锁完好。
+#[test]
+fn large_image_quick_mode_lazy_tree_children_and_audit_integrity() {
+    use tracedesk_core::verify_audit_chain_at;
+
+    let tmp = tempdir().expect("create tempdir");
+    let cases_dir = tmp.path().join("cases");
+    std::fs::create_dir_all(&cases_dir).expect("mkdir cases");
+    let state = make_test_state(cases_dir.clone());
+    let demo_dd = demo_image_path();
+
+    // 1. 新建案件并加载真实 demo.dd，随后关闭案件并在 case.json 中模拟大镜像按需模式：
+    //    `evidence.large_image = true`、`partition_scans = null`、`inventory = []`，
+    //    并附加一个无文件系统的保留分区偏移（offset = 1）模拟 GPT MSR 分区。
+    let created = cmd_create_case(
+        &state,
+        &cases_dir.to_string_lossy(),
+        "LARGE-LAZY-01",
+        "测试员",
+        "大镜像按需目录树回归",
+        None,
+    )
+    .expect("create_case");
+    let loaded = cmd_load_image(&state, &demo_dd.to_string_lossy(), None).expect("load_image");
+    let real_part_offset = loaded
+        .evidence
+        .as_ref()
+        .expect("evidence loaded")
+        .partitions[0]
+        .offset;
+    cmd_close_case(&state).expect("close_case");
+
+    let case_json_path = PathBuf::from(&created.case_dir).join("case.json");
+    let raw_json = std::fs::read_to_string(&case_json_path).expect("read case.json");
+    let mut doc: Value = serde_json::from_str(&raw_json).expect("parse case.json");
+    doc["evidence"]["large_image"] = json!(true);
+    doc["partition_scans"] = Value::Null;
+    doc["inventory"] = json!([]);
+    doc.as_object_mut()
+        .expect("case.json object")
+        .remove("inventory_file");
+    doc.as_object_mut()
+        .expect("case.json object")
+        .remove("inventory_count");
+    let fake_msr_offset: u64 = 1;
+    doc["evidence"]["partitions"]
+        .as_array_mut()
+        .expect("partitions array")
+        .insert(
+            0,
+            json!({
+                "offset": fake_msr_offset,
+                "description": "Microsoft Reserved (MSR)"
+            }),
+        );
+    std::fs::write(
+        &case_json_path,
+        serde_json::to_string_pretty(&doc).expect("serialize case.json"),
+    )
+    .expect("write modified case.json");
+
+    // 2. 重新打开案件，确认进入大镜像按需模式且初始清单为 0 项。
+    let opened = cmd_open_case(&state, &created.case_dir).expect("open_case");
+    assert!(opened.browsing_directories, "应处于大镜像按需浏览模式");
+    assert_eq!(opened.inventory_count, 0, "初始未浏览前清单应为 0 项");
+    assert!(opened.partition_scans.is_empty(), "初始分区扫描状态应为空");
+
+    // 3. 在初始 inventory = 0 状态下直接调用 cmd_get_tree_children 展开根目录：
+    //    必须按需读取到真实目录与文件，且目录节点 has_children == true 且携带有效 inode。
+    let root_tree = cmd_get_tree_children(&state, real_part_offset, "", None, None)
+        .expect("lazy root tree children");
+    assert!(
+        !root_tree.nodes.is_empty(),
+        "按需展开 / 根目录不得为空，必须返回真实目录与文件节点"
+    );
+    let docs_node = root_tree
+        .nodes
+        .iter()
+        .find(|n| n.kind == "directory" && n.scope_path.as_deref() == Some("DOCS"))
+        .expect("根目录中应包含 DOCS 子目录");
+    assert!(
+        docs_node.has_children,
+        "按需模式下的目录节点必须标记 has_children = true 以便继续逐层展开"
+    );
+    let docs_inode = docs_node
+        .inode
+        .clone()
+        .filter(|s| !s.is_empty())
+        .expect("DOCS 目录节点必须携带有效 inode");
+
+    // 4. 传入 inode 继续按需展开子目录 DOCS，应返回真实文件 DOCS/CASE.TXT。
+    let docs_tree = cmd_get_tree_children(
+        &state,
+        real_part_offset,
+        "DOCS",
+        Some(docs_inode.as_str()),
+        None,
+    )
+    .expect("lazy DOCS tree children");
+    assert!(
+        docs_tree
+            .nodes
+            .iter()
+            .any(|n| n.kind == "file" && n.label.to_ascii_uppercase().contains("CASE.TXT")),
+        "按需展开 DOCS 子目录应返回真实的 CASE.TXT 文件节点"
+    );
+
+    // 5. 再次读取根目录分支，验证先前已加载的根目录缓存未因展开子目录而被清空。
+    let root_tree_again = cmd_get_tree_children(&state, real_part_offset, "", None, None)
+        .expect("cached root tree children");
+    assert!(
+        root_tree_again
+            .nodes
+            .iter()
+            .any(|n| n.kind == "directory" && n.scope_path.as_deref() == Some("DOCS")),
+        "根目录分支缓存应持续保留"
+    );
+
+    // 6. 展开无可读文件系统的保留分区（模拟 GPT MSR），应返回清晰中文错误而非静默空列表。
+    let msr_err = cmd_get_tree_children(&state, fake_msr_offset, "", None, None)
+        .expect_err("MSR 保留分区不应静默返回空列表");
+    assert!(
+        msr_err.contains("文件系统") || msr_err.contains("读取"),
+        "保留分区失败应返回清晰的中文错误提示，实际：{msr_err}"
+    );
+
+    // 7. 通过 cmd_browse_directory 刷新右侧列表，验证快照与条目同步正常。
+    let browsed = cmd_browse_directory(&state, real_part_offset, Some(docs_inode.as_str()), "DOCS")
+        .expect("cmd_browse_directory DOCS");
+    assert!(
+        browsed
+            .entries
+            .iter()
+            .any(|e| e.path.eq_ignore_ascii_case("DOCS/CASE.TXT")),
+        "右侧目录列表应包含 DOCS/CASE.TXT"
+    );
+    assert_eq!(
+        browsed
+            .snapshot
+            .quick_location
+            .as_ref()
+            .map(|l| l.path.as_str()),
+        Some("DOCS")
+    );
+
+    // 8. 核验完整 SHA-256 审计链 100% 有效，且桌面端依然不常驻占用 case.lock。
+    let audit =
+        cmd_list_audit_log(&state, "", None, None, None, None, "seq", false).expect("audit log");
+    assert!(audit.valid, "按需目录树浏览后审计链必须完整有效");
+    let _verified =
+        verify_audit_chain_at(Path::new(&created.case_dir)).expect("disk audit chain valid");
+    {
+        let cg = state.case_lock.lock().expect("case_lock");
+        assert!(
+            !cg.as_ref().expect("active case").has_lock(),
+            "按需目录浏览不得残留常驻 case.lock"
+        );
     }
 
     state.shutdown_all();

@@ -185,6 +185,13 @@ export interface TreeNodeDto {
   groupIndex?: number;
 }
 
+export interface GetTreeChildrenParams {
+  offset: number;
+  scopePath: string;
+  inode?: string | null;
+  groupIndex?: number;
+}
+
 export interface TreeChildrenResponse {
   nodes: TreeNodeDto[];
   grouped: boolean;

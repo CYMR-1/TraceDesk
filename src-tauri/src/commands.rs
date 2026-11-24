@@ -849,63 +849,40 @@ pub fn cmd_cancel_task(state: &Arc<AppState>) -> Result<CancelResponse, String> 
     Ok(CancelResponse { cancelled: true })
 }
 
-pub fn cmd_browse_directory(
-    state: &Arc<AppState>,
-    offset: u64,
-    inode: Option<&str>,
-    path: &str,
-) -> Result<BrowseDirectoryResponse, String> {
-    let mut case_guard = state
-        .case_lock
-        .lock()
-        .map_err(|_| "案件状态锁异常".to_string())?;
-    let case = case_guard
-        .as_mut()
-        .ok_or_else(|| "请先新建或打开案件".to_string())?;
-
-    let clean_inode = inode.map(str::trim).filter(|s| !s.is_empty());
-    let clean_path = path.replace('\\', "/").trim_matches('/').to_string();
-    case.browse_directory(offset, clean_inode, &clean_path, None)
-        .map_err(|e| e.to_string())?;
-
-    let mut view = state
-        .view
-        .write()
-        .map_err(|_| "视图缓存锁异常".to_string())?;
-    view.sync_from_case(case, true);
-    let snapshot = view.snapshot.clone().expect("snapshot updated");
-    let entries: Vec<EntryView> = view
-        .browser_index
-        .ordered()
-        .iter()
-        .enumerate()
-        .map(|(idx, e)| entry_to_view(idx, e, &view.fs_map))
-        .collect();
-
-    Ok(BrowseDirectoryResponse { snapshot, entries })
+/// 将按需目录读取错误转换为清晰的中文提示（尤其针对无文件系统的保留分区，如 GPT 128 扇区 MSR 分区）。
+fn format_browse_directory_error(offset: u64, scope_path: &str, err: &CoreError) -> String {
+    let raw = err.to_string();
+    let lower = raw.to_ascii_lowercase();
+    let target = if scope_path.is_empty() {
+        format!("分区偏移 {offset} 扇区根目录")
+    } else {
+        format!("目录 /{scope_path}（分区偏移 {offset}）")
+    };
+    if lower.contains("cannot determine file system type")
+        || lower.contains("invalid magic")
+        || lower.contains("unsupported file system")
+    {
+        format!(
+            "{target}未检测到可识别的文件系统（可能为 MSR 保留分区、未格式化区域或加密卷）：{raw}"
+        )
+    } else if raw.contains("分区") || raw.contains("目录") || raw.contains("镜像") {
+        raw
+    } else {
+        format!("读取{target}失败：{raw}")
+    }
 }
 
-pub fn cmd_get_tree_children(
-    state: &Arc<AppState>,
+/// 将指定 [`tracedesk_core::BrowserIndex`] 的某层分支转换为前端目录树所需的 [`TreeChildrenResponse`]。
+/// 当 `lazy_dir_expandable` 为 `true`（大镜像按需模式）时，仅读取了单层目录条目，无法预先得知子目录是否非空，
+/// 因此对具备有效 `inode` 的目录项一律置 `has_children = true`，允许用户继续逐层点击展开。
+fn build_tree_children_response(
+    index: &tracedesk_core::BrowserIndex,
     offset: u64,
     scope_path: &str,
     group_index: Option<usize>,
-) -> Result<TreeChildrenResponse, String> {
-    let view = state
-        .view
-        .read()
-        .map_err(|_| "视图缓存锁异常".to_string())?;
-    if view.snapshot.as_ref().and_then(|s| s.evidence.as_ref()).is_none() {
-        return Ok(TreeChildrenResponse {
-            nodes: Vec::new(),
-            grouped: false,
-            group_count: 0,
-        });
-    }
-
-    let page = view
-        .browser_index
-        .tree_children(offset, scope_path, group_index);
+    lazy_dir_expandable: bool,
+) -> TreeChildrenResponse {
+    let page = index.tree_children(offset, scope_path, group_index);
     let mut nodes = Vec::with_capacity(page.nodes.len());
 
     for n in page.nodes {
@@ -927,7 +904,7 @@ pub fn cmd_get_tree_children(
             });
         } else if n.directory {
             let tooltip = if let Some(idx) = n.entry_id
-                && let Some(entry) = view.browser_index.get(idx)
+                && let Some(entry) = index.get(idx)
             {
                 format!(
                     "{}\n{} · inode {}",
@@ -942,6 +919,11 @@ pub fn cmd_get_tree_children(
             } else {
                 n.path.clone()
             };
+            let has_children = if lazy_dir_expandable {
+                !n.inode.is_empty()
+            } else {
+                n.has_children
+            };
             nodes.push(TreeNodeIpcDto {
                 id: format!("dir:{}:{}", n.offset, n.path),
                 label: n.label,
@@ -953,12 +935,11 @@ pub fn cmd_get_tree_children(
                 inode: (!n.inode.is_empty()).then_some(n.inode),
                 entry_id: n.entry_id.map(|id| id.to_string()),
                 deleted: Some(n.deleted),
-                has_children: n.has_children,
+                has_children,
                 group_index: None,
             });
         } else {
-            let (icon_kind, status_str) = match n.entry_id.and_then(|id| view.browser_index.get(id))
-            {
+            let (icon_kind, status_str) = match n.entry_id.and_then(|id| index.get(id)) {
                 Some(entry) => (infer_entry_icon_kind(entry), entry_status(entry)),
                 None => ("file", "现存"),
             };
@@ -986,11 +967,201 @@ pub fn cmd_get_tree_children(
         }
     }
 
-    Ok(TreeChildrenResponse {
+    TreeChildrenResponse {
         nodes,
         grouped: page.grouped,
         group_count: page.group_count,
-    })
+    }
+}
+
+pub fn cmd_browse_directory(
+    state: &Arc<AppState>,
+    offset: u64,
+    inode: Option<&str>,
+    path: &str,
+) -> Result<BrowseDirectoryResponse, String> {
+    let mut case_guard = state
+        .case_lock
+        .lock()
+        .map_err(|_| "案件状态锁异常".to_string())?;
+    let case = case_guard
+        .as_mut()
+        .ok_or_else(|| "请先新建或打开案件".to_string())?;
+
+    let clean_inode = inode.map(str::trim).filter(|s| !s.is_empty());
+    let clean_path = tracedesk_core::browser_index::normalize_scope_path(path);
+    // 说明：`Case::browse_directory` 为只读按需列举单层目录（经 `check_source` 核对源镜像身份），
+    // 不写入 `case.json` 也不追加 `FILE_BROWSE` 审计日志，因此无需占用 `case.lock` 磁盘短锁，
+    // 避免与外部 MCP 写入产生不必要锁竞争。
+    let raw_entries = case
+        .browse_directory(offset, clean_inode, &clean_path, None)
+        .map_err(|e| format_browse_directory_error(offset, &clean_path, &e))?;
+
+    let mut view = state
+        .view
+        .write()
+        .map_err(|_| "视图缓存锁异常".to_string())?;
+    view.sync_from_case(case, true);
+    if case.browsing_directories() {
+        view.cache_quick_tree_branch(offset, &clean_path, &raw_entries);
+    }
+    let snapshot = view.snapshot.clone().expect("snapshot updated");
+    let entries: Vec<EntryView> = view
+        .browser_index
+        .ordered()
+        .iter()
+        .enumerate()
+        .map(|(idx, e)| entry_to_view(idx, e, &view.fs_map))
+        .collect();
+
+    Ok(BrowseDirectoryResponse { snapshot, entries })
+}
+
+pub fn cmd_get_tree_children(
+    state: &Arc<AppState>,
+    offset: u64,
+    scope_path: &str,
+    inode: Option<&str>,
+    group_index: Option<usize>,
+) -> Result<TreeChildrenResponse, String> {
+    let norm_scope = tracedesk_core::browser_index::normalize_scope_path(scope_path);
+    let clean_inode = inode.map(str::trim).filter(|s| !s.is_empty());
+
+    // 第 1 阶段：在视图读锁下检查全量模式或按需分支缓存命中，避免重复触发磁盘 I/O。
+    let fallback_inode = {
+        let view = state
+            .view
+            .read()
+            .map_err(|_| "视图缓存锁异常".to_string())?;
+        let Some(ref snap) = view.snapshot else {
+            return Ok(TreeChildrenResponse {
+                nodes: Vec::new(),
+                grouped: false,
+                group_count: 0,
+            });
+        };
+        if snap.evidence.is_none() {
+            return Ok(TreeChildrenResponse {
+                nodes: Vec::new(),
+                grouped: false,
+                group_count: 0,
+            });
+        }
+
+        let partition_ready = snap
+            .partition_scans
+            .iter()
+            .any(|s| s.offset == offset && s.status == "ready");
+        if !snap.browsing_directories || partition_ready {
+            // 全量扫描模式或该分区已完成全量索引：照常从内存完整清单索引返回子节点。
+            return Ok(build_tree_children_response(
+                &view.browser_index,
+                offset,
+                &norm_scope,
+                group_index,
+                false,
+            ));
+        }
+
+        // 大镜像按需模式：优先命中 ViewCache 中保留的多目录树分支缓存（支持多分区与 256 项分桶展开）。
+        if let Some(cached_idx) = view.quick_tree_branches.get(&(offset, norm_scope.clone())) {
+            return Ok(build_tree_children_response(
+                cached_idx,
+                offset,
+                &norm_scope,
+                group_index,
+                true,
+            ));
+        }
+
+        // 若当前 browser_index 恰好对应同一目录且已有节点（如通过外部状态同步加载），直接复用。
+        let quick_matches_browser = snap.quick_location.as_ref().is_some_and(|loc| {
+            loc.offset == offset
+                && tracedesk_core::browser_index::normalize_scope_path(&loc.path) == norm_scope
+        });
+        if quick_matches_browser
+            && !view.browser_index.branch_items(offset, &norm_scope).is_empty()
+        {
+            return Ok(build_tree_children_response(
+                &view.browser_index,
+                offset,
+                &norm_scope,
+                group_index,
+                true,
+            ));
+        }
+
+        if clean_inode.is_none() && !norm_scope.is_empty() {
+            view.find_directory_inode(offset, &norm_scope)
+        } else {
+            None
+        }
+    };
+
+    // 第 2 阶段：大镜像按需模式缓存未命中，调用 `case.browse_directory` 实时读取该层真实目录项。
+    let effective_inode = clean_inode.map(str::to_string).or(fallback_inode);
+    if !norm_scope.is_empty() && effective_inode.is_none() {
+        return Err(format!(
+            "无法按需展开子目录 /{norm_scope}：缺少目录 inode，请先展开上级目录。"
+        ));
+    }
+
+    let mut case_guard = state
+        .case_lock
+        .lock()
+        .map_err(|_| "案件状态锁异常".to_string())?;
+    let case = case_guard
+        .as_mut()
+        .ok_or_else(|| "请先新建或打开案件".to_string())?;
+
+    // 二次确认仍处于按需模式；若期间刚完成全盘扫描则回退到全量视图。
+    if !case.browsing_directories() {
+        let view = state
+            .view
+            .read()
+            .map_err(|_| "视图缓存锁异常".to_string())?;
+        return Ok(build_tree_children_response(
+            &view.browser_index,
+            offset,
+            &norm_scope,
+            group_index,
+            false,
+        ));
+    }
+
+    // 记录展开树节点前右侧列表正在浏览的位置，避免仅点击树箭头展开其他分区时破坏右侧已展示条目的索引上下文。
+    let prev_loc = case.directory_location().cloned();
+    let prev_can_restore_from_cache = prev_loc.as_ref().is_some_and(|loc| {
+        !(loc.offset == offset
+            && tracedesk_core::browser_index::normalize_scope_path(&loc.path) == norm_scope)
+            && case.displayed_entries().len() <= 20_000
+    });
+
+    // 说明：`Case::browse_directory` 为只读按需列举单层目录，不写 `case.json` 也不追加 `FILE_BROWSE` 审计日志，
+    // 不占用 `case.lock` 磁盘短锁，保持与外部 MCP 协同访问不冲突。
+    let entries = case
+        .browse_directory(offset, effective_inode.as_deref(), &norm_scope, None)
+        .map_err(|e| format_browse_directory_error(offset, &norm_scope, &e))?;
+
+    let dir_index = tracedesk_core::BrowserIndex::build(&entries);
+    let resp = build_tree_children_response(&dir_index, offset, &norm_scope, group_index, true);
+
+    // 若此前右侧列表正在浏览另一目录且该目录仍位于 LRU 缓存容量内，则 O(1) 恢复右侧上下文。
+    if prev_can_restore_from_cache && let Some(ref prev) = prev_loc {
+        let _ = case.browse_directory(prev.offset, prev.inode.as_deref(), &prev.path, None);
+    }
+
+    let mut view = state
+        .view
+        .write()
+        .map_err(|_| "视图缓存锁异常".to_string())?;
+    if prev_loc.is_none() {
+        // 案件刚加载大镜像、此前尚未浏览任何目录时，同步刷新快照与 browser_index。
+        view.sync_from_case(case, true);
+    }
+    view.cache_quick_tree_branch(offset, &norm_scope, &entries);
+
+    Ok(resp)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3047,9 +3218,16 @@ pub async fn get_tree_children(
     state: State<'_, Arc<AppState>>,
     offset: u64,
     scope_path: String,
+    inode: Option<String>,
     group_index: Option<usize>,
 ) -> Result<TreeChildrenResponse, String> {
-    cmd_get_tree_children(&state, offset, &scope_path, group_index)
+    let st = Arc::clone(&state);
+    // 大镜像按需模式下首次展开目录会调用 TSK `fls` 读盘，放入阻塞线程池避免卡住 UI 主线程。
+    tauri::async_runtime::spawn_blocking(move || {
+        cmd_get_tree_children(&st, offset, &scope_path, inode.as_deref(), group_index)
+    })
+    .await
+    .map_err(|e| format!("后台任务执行异常：{e}"))?
 }
 
 #[tauri::command]

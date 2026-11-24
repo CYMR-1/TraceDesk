@@ -1000,7 +1000,12 @@ export const demoBackend = {
     return { snapshot: currentCase, entries: DEMO_ENTRIES };
   },
 
-  async get_tree_children(args: { offset: number; scopePath: string; groupIndex?: number }): Promise<TreeChildrenResponse> {
+  async get_tree_children(args: {
+    offset: number;
+    scopePath: string;
+    inode?: string | null;
+    groupIndex?: number;
+  }): Promise<TreeChildrenResponse> {
     if (!currentCase?.evidence) return { nodes: [], grouped: false, groupCount: 0 };
     const parent = args.scopePath.replace(/^\/+|\/+$/g, '');
     const nodes: TreeNodeDto[] = DEMO_ENTRIES.filter((entry) => {

@@ -1073,6 +1073,9 @@ pub struct SearchSessionState {
     pub hits: Vec<StoredSearchHit>,
 }
 
+/// 大镜像按需浏览时，左侧文件树保留的已读取目录分支缓存上限（防止多分区展开后无限占用内存）。
+const QUICK_TREE_BRANCH_CACHE_LIMIT: usize = 128;
+
 /// 面向读多写少场景的快速视图缓存，确保目录树、分页、预览与时间线读取不会被耗时任务阻塞。
 #[derive(Default)]
 pub struct ViewCache {
@@ -1082,6 +1085,9 @@ pub struct ViewCache {
     pub is_large_image: bool,
     pub fs_map: HashMap<u64, String>,
     pub browser_index: BrowserIndex,
+    /// 大镜像按需模式下按 `(分区偏移, 归一化目录路径)` 保留的目录树分支索引，
+    /// 避免展开另一分区/目录时丢失已展开的树节点，并支持超过 2048 项时的 256 项分桶展开。
+    pub quick_tree_branches: HashMap<(u64, String), BrowserIndex>,
     pub timeline_index: Option<TimelineIndex>,
 }
 
@@ -1089,6 +1095,7 @@ impl ViewCache {
     /// 从当前活跃的 [`Case`] 同步 [`ViewCache`]。
     pub fn sync_from_case(&mut self, case: &Case, rebuild_browser_index: bool) {
         let prev_folder = self.case_folder.clone();
+        let prev_image = self.image_path.clone();
         let prev_count = self.snapshot.as_ref().map(|s| s.inventory_count);
         let prev_quick = self.snapshot.as_ref().and_then(|s| s.quick_location.clone());
 
@@ -1106,6 +1113,7 @@ impl ViewCache {
         );
 
         let folder_changed = prev_folder.as_ref() != Some(&folder);
+        let image_changed = prev_image != image_path;
         let entries_changed = prev_count != Some(snap.inventory_count)
             || prev_quick != snap.quick_location
             || rebuild_browser_index;
@@ -1115,11 +1123,68 @@ impl ViewCache {
             self.timeline_index = None;
         }
 
+        // 切换案件、更换镜像或已完成全盘索引切换至全量模式时，清空按需目录树分支缓存；
+        // 在同一大镜像按需浏览会话内切目录时则保留已展开分支，避免跨分区展开互相冲刷。
+        if folder_changed || image_changed || !snap.browsing_directories {
+            self.quick_tree_branches.clear();
+        }
+
         self.snapshot = Some(snap);
         self.case_folder = Some(folder);
         self.image_path = image_path;
         self.is_large_image = is_large;
         self.fs_map = fs_map;
+    }
+
+    /// 缓存大镜像按需模式下单个目录的 [`BrowserIndex`]，供树节点重复展开及分桶读取复用。
+    pub fn cache_quick_tree_branch(
+        &mut self,
+        offset: u64,
+        scope_path: &str,
+        entries: &[InventoryEntry],
+    ) {
+        let key = (
+            offset,
+            tracedesk_core::browser_index::normalize_scope_path(scope_path),
+        );
+        if !self.quick_tree_branches.contains_key(&key)
+            && self.quick_tree_branches.len() >= QUICK_TREE_BRANCH_CACHE_LIMIT
+            && let Some(evict_key) = self.quick_tree_branches.keys().next().cloned()
+        {
+            self.quick_tree_branches.remove(&evict_key);
+        }
+        self.quick_tree_branches
+            .insert(key, BrowserIndex::build(entries));
+    }
+
+    /// 在已缓存的按需目录树分支或当前 `browser_index` 中反查目标目录的 `inode`。
+    pub fn find_directory_inode(&self, offset: u64, scope_path: &str) -> Option<String> {
+        let norm = tracedesk_core::browser_index::normalize_scope_path(scope_path);
+        if norm.is_empty() {
+            return None;
+        }
+        let parent = tracedesk_core::browser_index::parent_dir(&norm).to_string();
+        if let Some(parent_idx) = self.quick_tree_branches.get(&(offset, parent)) {
+            for item in parent_idx.ordered() {
+                if item.offset == offset
+                    && item.directory
+                    && tracedesk_core::browser_index::normalize_scope_path(&item.path) == norm
+                    && !item.inode.is_empty()
+                {
+                    return Some(item.inode.clone());
+                }
+            }
+        }
+        for item in self.browser_index.ordered() {
+            if item.offset == offset
+                && item.directory
+                && tracedesk_core::browser_index::normalize_scope_path(&item.path) == norm
+                && !item.inode.is_empty()
+            {
+                return Some(item.inode.clone());
+            }
+        }
+        None
     }
 
     pub fn clear(&mut self) {
@@ -1129,6 +1194,7 @@ impl ViewCache {
         self.is_large_image = false;
         self.fs_map.clear();
         self.browser_index = BrowserIndex::default();
+        self.quick_tree_branches.clear();
         self.timeline_index = None;
     }
 

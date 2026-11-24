@@ -146,6 +146,7 @@ export const tauriApi = {
   getTreeChildren(params: {
     offset: number;
     scopePath: string;
+    inode?: string | null;
     groupIndex?: number;
   }): Promise<TreeChildrenResponse> {
     return callCommand<TreeChildrenResponse>('get_tree_children', params);

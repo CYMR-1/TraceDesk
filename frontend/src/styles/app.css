@@ -601,6 +601,35 @@
   color: var(--danger-fg);
 }
 
+/* 大镜像按需读取提示标签与柔和错误重试行 */
+.td-tree-hint {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.td-tree-error-row {
+  height: auto;
+  min-height: var(--row-height-tree);
+  padding-top: 3px;
+  padding-bottom: 3px;
+  white-space: normal;
+  line-height: 1.4;
+  font-size: 11.5px;
+  color: var(--warn-fg);
+}
+
+.td-tree-error-row:hover {
+  background: var(--warn-bg);
+}
+
+.td-tree-retry-link {
+  margin-left: 4px;
+  text-decoration: underline;
+  font-weight: 500;
+}
+
 .td-nav-footer {
   padding: 6px 10px;
   background: var(--chrome-subtle);

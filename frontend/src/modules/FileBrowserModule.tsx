@@ -24,6 +24,7 @@ interface TreeBranchState {
   loaded: boolean;
   loading: boolean;
   children: TreeNodeDto[];
+  error?: string | null;
 }
 
 interface FileBrowserModuleProps {
@@ -104,7 +105,8 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
     return parts[parts.length - 1] || evidence.path;
   }, [evidence?.path]);
 
-  // 案件或镜像结构变更时才重置目录树与范围（切换标签或记笔记/导出不清空展开状态与筛选）
+  // 案件或镜像结构变更时才重置目录树与范围（切换标签或记笔记/导出不清空展开状态与筛选）。
+  // 注意：大镜像按需模式下 inventoryCount 随当前浏览目录动态变化，不纳入 identity 以免切换目录时误清空左侧树缓存。
   const partitionScansSummary = useMemo(
     () =>
       (snapshot?.partitionScans ?? [])
@@ -112,36 +114,62 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
         .join(','),
     [snapshot?.partitionScans]
   );
-  const caseIdentity = `${snapshot?.id ?? ''}|${evidence?.path ?? ''}|${snapshot?.inventoryCount ?? 0}|${snapshot?.browsingDirectories ? 'q' : 'f'}|${partitionScansSummary}`;
+  const stableInventoryKey = snapshot?.browsingDirectories ? 'quick' : String(snapshot?.inventoryCount ?? 0);
+  const caseIdentity = `${snapshot?.id ?? ''}|${evidence?.path ?? ''}|${stableInventoryKey}|${snapshot?.browsingDirectories ? 'q' : 'f'}|${partitionScansSummary}`;
   const prevIdentityRef = useRef('');
 
   const loadTreeBranch = useCallback(
-    async (branchKey: string, offset: number, path: string, groupIndex?: number) => {
+    async (
+      branchKey: string,
+      offset: number,
+      path: string,
+      inode?: string | null,
+      groupIndex?: number
+    ) => {
       setBranches((prev) => {
         if (prev[branchKey]?.loading) return prev;
         return {
           ...prev,
-          [branchKey]: { loaded: prev[branchKey]?.loaded ?? false, loading: true, children: prev[branchKey]?.children ?? [] },
+          [branchKey]: {
+            loaded: prev[branchKey]?.loaded ?? false,
+            loading: true,
+            children: prev[branchKey]?.children ?? [],
+            error: null,
+          },
         };
       });
       try {
         const res = await tauriApi.getTreeChildren({
           offset,
           scopePath: path,
+          inode: inode ?? null,
           groupIndex,
         });
         setBranches((prev) => ({
           ...prev,
-          [branchKey]: { loaded: true, loading: false, children: res.nodes },
+          [branchKey]: {
+            loaded: true,
+            loading: false,
+            children: res.nodes,
+            error: null,
+          },
         }));
-      } catch {
+      } catch (err) {
+        const msg = formatError(err);
+        // 失败时不将 loaded 标记为 true，允许用户查看柔和错误提示并点击重试，而非永久缓存为空目录。
         setBranches((prev) => ({
           ...prev,
-          [branchKey]: { loaded: true, loading: false, children: [] },
+          [branchKey]: {
+            loaded: false,
+            loading: false,
+            children: [],
+            error: msg,
+          },
         }));
+        onDetailChange(`读取目录失败：${msg}`);
       }
     },
-    []
+    [onDetailChange]
   );
 
   useEffect(() => {
@@ -149,6 +177,7 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
     prevIdentityRef.current = caseIdentity;
 
     setBranches({});
+    setAncestors({});
     setScopeOffset(null);
     setScopePath(null);
     setSuffix('');
@@ -163,16 +192,18 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
     for (const part of partitions) {
       initialExpanded.add(`part:${part.offset}`);
       const scan = scanMap.get(part.offset);
-      if (scan?.status !== 'error') {
+      // 大镜像按需模式下不盲目自动展开所有分区的 / 根目录，保持默认折叠态（> 箭头）等待用户按需点击读取；
+      // 全量扫描模式下则照常自动展开可读分区的根目录。
+      if (!isQuickMode && scan?.status !== 'error') {
         const rootKey = `dir:${part.offset}:`;
         initialExpanded.add(rootKey);
         if (evidence) {
-          void loadTreeBranch(rootKey, part.offset, '');
+          void loadTreeBranch(rootKey, part.offset, '', null);
         }
       }
     }
     setExpandedIds(initialExpanded);
-  }, [caseIdentity, partitions, scanMap, evidence, loadTreeBranch]);
+  }, [caseIdentity, isQuickMode, partitions, scanMap, evidence, loadTreeBranch]);
 
   // 记录大镜像快速浏览时的父目录 inode 路径
   useEffect(() => {
@@ -273,7 +304,13 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
     setFilterSeq((n) => n + 1);
   };
 
-  const toggleTreeExpand = (nodeId: string, offset?: number, path?: string, groupIndex?: number) => {
+  const toggleTreeExpand = (
+    nodeId: string,
+    offset?: number,
+    path?: string,
+    inode?: string | null,
+    groupIndex?: number
+  ) => {
     setExpandedIds((prev) => {
       const next = new Set(prev);
       if (next.has(nodeId)) {
@@ -281,7 +318,7 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
       } else {
         next.add(nodeId);
         if (offset !== undefined && path !== undefined && !branches[nodeId]?.loaded) {
-          void loadTreeBranch(nodeId, offset, path, groupIndex);
+          void loadTreeBranch(nodeId, offset, path, inode, groupIndex);
         }
       }
       return next;
@@ -291,21 +328,31 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
   const handleExpandAll = () => {
     const next = new Set<string>(['__image__']);
     for (const p of partitions) {
+      const scan = scanMap.get(p.offset);
+      if (scan?.status === 'error') continue;
       next.add(`part:${p.offset}`);
       const rootKey = `dir:${p.offset}:`;
       next.add(rootKey);
-      if (!branches[rootKey]?.loaded) {
-        void loadTreeBranch(rootKey, p.offset, '');
+      if (!branches[rootKey]?.loaded && !branches[rootKey]?.loading) {
+        void loadTreeBranch(rootKey, p.offset, '', null);
       }
     }
     for (const [key, branch] of Object.entries(branches)) {
+      if (!branch.loaded) continue;
       next.add(key);
       for (const child of branch.children) {
         if (child.kind === 'directory' && child.offset !== undefined && child.scopePath !== undefined) {
           const ck = `dir:${child.offset}:${child.scopePath}`;
-          next.add(ck);
-          if (!branches[ck]?.loaded) {
-            void loadTreeBranch(ck, child.offset, child.scopePath);
+          if (isQuickMode) {
+            // 大镜像按需模式下仅展开已加载的子目录节点，避免递归触发大量 fls 读盘。
+            if (branches[ck]?.loaded) {
+              next.add(ck);
+            }
+          } else {
+            next.add(ck);
+            if (!branches[ck]?.loaded && !branches[ck]?.loading) {
+              void loadTreeBranch(ck, child.offset, child.scopePath, child.inode ?? null);
+            }
           }
         }
       }
@@ -341,7 +388,23 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
       if (!entry.directory) return;
       const cleanPath = entry.path.replace(/^\/+|\/+$/g, '');
       if (isQuickMode) {
-        void onBrowseDirectory(entry.offset, entry.inode || null, cleanPath);
+        const dirInode = entry.inode || null;
+        const dirKey = `dir:${entry.offset}:${cleanPath}`;
+        setAncestors((prev) => ({ ...prev, [`${entry.offset}:${cleanPath}`]: dirInode }));
+        void (async () => {
+          const entries = await onBrowseDirectory(entry.offset, dirInode, cleanPath);
+          if (entries) {
+            setSelectedTreeId(dirKey);
+            setExpandedIds((prev) => {
+              const next = new Set(prev);
+              next.add(`part:${entry.offset}`);
+              next.add(`dir:${entry.offset}:`);
+              next.add(dirKey);
+              return next;
+            });
+            void loadTreeBranch(dirKey, entry.offset, cleanPath, dirInode);
+          }
+        })();
         return;
       }
       setScopeOffset(entry.offset);
@@ -351,10 +414,15 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
       onSelectEntry(null);
       handleResetFilter();
     },
-    [isQuickMode, onBrowseDirectory, onSelectEntry]
+    [isQuickMode, onBrowseDirectory, onSelectEntry, loadTreeBranch]
   );
 
-  const handleTreeNodeClick = async (node: TreeNodeDto, nodeId: string) => {
+  const handleTreeNodeClick = async (
+    node: TreeNodeDto,
+    nodeId: string,
+    parentPath = '',
+    parentInode: string | null = null
+  ) => {
     setSelectedTreeId(nodeId);
     if (node.kind === 'image') {
       setScopeOffset(null);
@@ -372,7 +440,18 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
         return;
       }
       if (isQuickMode) {
-        void onBrowseDirectory(node.offset, null, '');
+        const rootId = `dir:${node.offset}:`;
+        const entries = await onBrowseDirectory(node.offset, null, '');
+        if (entries) {
+          setExpandedIds((prev) => {
+            const next = new Set(prev);
+            next.add(nodeId);
+            next.add(rootId);
+            return next;
+          });
+          // 后端 browse_directory 已写入分支缓存，同步刷新并展开左侧根目录树，保持左右一致。
+          void loadTreeBranch(rootId, node.offset, '', null);
+        }
         return;
       }
       setScopeOffset(node.offset);
@@ -384,7 +463,18 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
     if ((node.kind === 'root' || node.kind === 'directory') && node.offset !== undefined) {
       const targetPath = (node.scopePath ?? '').replace(/^\/+|\/+$/g, '');
       if (isQuickMode) {
-        void onBrowseDirectory(node.offset, node.inode ?? null, targetPath);
+        const targetInode = node.inode ?? null;
+        setAncestors((prev) => ({ ...prev, [`${node.offset}:${targetPath}`]: targetInode }));
+        const entries = await onBrowseDirectory(node.offset, targetInode, targetPath);
+        if (entries) {
+          setExpandedIds((prev) => {
+            const next = new Set(prev);
+            next.add(nodeId);
+            return next;
+          });
+          // 同步将该目录返回的条目刷新并展开到左侧文件树分支，避免左右视图割裂。
+          void loadTreeBranch(nodeId, node.offset, targetPath, targetInode);
+        }
         return;
       }
       setScopeOffset(node.offset);
@@ -392,15 +482,39 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
       setPage(0);
       onSelectEntry(null);
       if (!expandedIds.has(nodeId)) {
-        toggleTreeExpand(nodeId, node.offset, targetPath);
+        toggleTreeExpand(nodeId, node.offset, targetPath, node.inode ?? null);
       }
       return;
     }
     if (node.kind === 'group' && node.offset !== undefined) {
-      toggleTreeExpand(nodeId, node.offset, node.scopePath ?? '', node.groupIndex);
+      toggleTreeExpand(nodeId, node.offset, node.scopePath ?? '', null, node.groupIndex);
       return;
     }
     if (node.kind === 'file' && node.entryId) {
+      // 大镜像按需模式下：若所点文件不在当前右侧目录中，先按需切入其父目录再高亮选中。
+      if (isQuickMode && node.offset !== undefined) {
+        const curLoc = snapshot?.quickLocation;
+        const cleanParent = parentPath.replace(/^\/+|\/+$/g, '');
+        const alreadyInParent =
+          curLoc?.offset === node.offset && (curLoc.path ?? '').replace(/^\/+|\/+$/g, '') === cleanParent;
+        if (!alreadyInParent) {
+          const browsed = await onBrowseDirectory(node.offset, parentInode, cleanParent);
+          if (browsed) {
+            const matched =
+              browsed.find((e) => e.entryId === node.entryId) ??
+              browsed.find(
+                (e) =>
+                  !e.directory &&
+                  e.inode === (node.inode ?? '') &&
+                  Boolean(e.deleted) === Boolean(node.deleted)
+              );
+            if (matched) {
+              handleSelectRow(matched);
+            }
+          }
+          return;
+        }
+      }
       try {
         const loc = await tauriApi.locateFileInScope({ entryId: node.entryId });
         setScopeOffset(loc.scopeOffset);
@@ -434,7 +548,12 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
   };
 
   // 递归渲染左侧目录树
-  const renderTreeChildren = (nodes: TreeNodeDto[], depth: number): React.ReactNode =>
+  const renderTreeChildren = (
+    nodes: TreeNodeDto[],
+    depth: number,
+    parentPath: string,
+    parentInode: string | null
+  ): React.ReactNode =>
     nodes.map((node) => {
       const nodeId =
         node.kind === 'directory'
@@ -445,6 +564,8 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
       const expanded = expandedIds.has(nodeId);
       const branch = branches[nodeId];
       const isSelected = selectedTreeId === nodeId;
+      const nextParentPath = node.kind === 'directory' ? (node.scopePath ?? '') : parentPath;
+      const nextParentInode = node.kind === 'directory' ? (node.inode ?? null) : parentInode;
 
       return (
         <React.Fragment key={nodeId}>
@@ -452,7 +573,7 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
             className={`td-tree-row ${isSelected ? 'td-tree-row--selected' : ''}`}
             style={{ paddingLeft: 6 + depth * 14 }}
             title={node.tooltip ?? node.label}
-            onClick={() => void handleTreeNodeClick(node, nodeId)}
+            onClick={() => void handleTreeNodeClick(node, nodeId, parentPath, parentInode)}
             onContextMenu={(e) => {
               if (node.kind === 'file' && node.entryId) {
                 e.preventDefault();
@@ -470,7 +591,13 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
                 className="td-tree-toggle"
                 onClick={(e) => {
                   e.stopPropagation();
-                  toggleTreeExpand(nodeId, node.offset, node.scopePath ?? '', node.groupIndex);
+                  toggleTreeExpand(
+                    nodeId,
+                    node.offset,
+                    node.scopePath ?? '',
+                    node.kind === 'directory' ? (node.inode ?? null) : null,
+                    node.groupIndex
+                  );
                 }}
                 aria-label={expanded ? '折叠' : '展开'}
               >
@@ -496,10 +623,42 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
                   className="td-tree-row td-muted-text"
                   style={{ paddingLeft: 24 + (depth + 1) * 14, fontSize: 11.5 }}
                 >
-                  正在加载…
+                  正在读取目录…
                 </div>
               )}
-              {branch?.loaded && renderTreeChildren(branch.children, depth + 1)}
+              {branch?.error && !branch.loading && (
+                <div
+                  className="td-tree-row td-tree-error-row"
+                  style={{ paddingLeft: 24 + (depth + 1) * 14 }}
+                  title={branch.error}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (node.offset !== undefined) {
+                      void loadTreeBranch(
+                        nodeId,
+                        node.offset,
+                        node.scopePath ?? '',
+                        node.kind === 'directory' ? (node.inode ?? null) : null,
+                        node.groupIndex
+                      );
+                    }
+                  }}
+                >
+                  <span>读取失败：{branch.error}</span>
+                  <span className="td-tree-retry-link">点击重试</span>
+                </div>
+              )}
+              {branch?.loaded && !branch.loading && branch.children.length === 0 && (
+                <div
+                  className="td-tree-row td-muted-text"
+                  style={{ paddingLeft: 24 + (depth + 1) * 14, fontSize: 11.5 }}
+                >
+                  （空目录）
+                </div>
+              )}
+              {branch?.loaded &&
+                branch.children.length > 0 &&
+                renderTreeChildren(branch.children, depth + 1, nextParentPath, nextParentInode)}
             </>
           )}
         </React.Fragment>
@@ -768,22 +927,26 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
             const partId = `part:${part.offset}`;
             const rootId = `dir:${part.offset}:`;
             const scan = scanMap.get(part.offset);
+            const partExpanded = expandedIds.has(partId);
+            const rootExpanded = expandedIds.has(rootId);
+            const rootBranch = branches[rootId];
             const stateLabel =
               scan?.status === 'ready'
                 ? `已读取 ${scan.count ?? 0} 项`
                 : scan?.status === 'error'
                   ? '无法读取'
-                  : '待读取';
-            const partExpanded = expandedIds.has(partId);
-            const rootExpanded = expandedIds.has(rootId);
-            const rootBranch = branches[rootId];
+                  : isQuickMode && rootBranch?.error
+                    ? '无法读取'
+                    : isQuickMode && rootBranch?.loaded
+                      ? `已展开 ${rootBranch.children.length} 项`
+                      : '待读取';
 
             return (
               <React.Fragment key={partId}>
                 <div
                   className={`td-tree-row ${selectedTreeId === partId ? 'td-tree-row--selected' : ''}`}
                   style={{ paddingLeft: 20 }}
-                  title={`${part.description}\n偏移 ${part.offset} 扇区\n${scan?.error || stateLabel}`}
+                  title={`${part.description}\n偏移 ${part.offset} 扇区\n${scan?.error || rootBranch?.error || stateLabel}`}
                   onClick={() =>
                     void handleTreeNodeClick(
                       {
@@ -828,7 +991,11 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
                     <div
                       className={`td-tree-row ${selectedTreeId === rootId ? 'td-tree-row--selected' : ''}`}
                       style={{ paddingLeft: 34 }}
-                      title={`分区偏移 ${part.offset} / 根目录`}
+                      title={
+                        isQuickMode
+                          ? `分区偏移 ${part.offset} / 根目录（点击展开按需读取）`
+                          : `分区偏移 ${part.offset} / 根目录`
+                      }
                       onClick={() =>
                         void handleTreeNodeClick(
                           {
@@ -849,8 +1016,9 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
                         className="td-tree-toggle"
                         onClick={(e) => {
                           e.stopPropagation();
-                          toggleTreeExpand(rootId, part.offset, '');
+                          toggleTreeExpand(rootId, part.offset, '', null);
                         }}
+                        aria-label={rootExpanded ? '折叠根目录' : '展开根目录'}
                       >
                         <img
                           src={assetUrl(rootExpanded ? 'assets/branch-open.svg' : 'assets/branch-closed.svg')}
@@ -861,16 +1029,40 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
                         <EntryIcon kind="folder" size={15} />
                       </span>
                       <span className="td-tree-label">/ 根目录</span>
+                      {isQuickMode && !rootBranch?.loaded && !rootBranch?.loading && !rootBranch?.error && (
+                        <span className="td-tree-hint">点击展开按需读取</span>
+                      )}
                     </div>
 
                     {rootExpanded && (
                       <>
                         {rootBranch?.loading && (
                           <div className="td-tree-row td-muted-text" style={{ paddingLeft: 66, fontSize: 11.5 }}>
-                            正在加载…
+                            正在读取目录…
                           </div>
                         )}
-                        {rootBranch?.loaded && renderTreeChildren(rootBranch.children, 3)}
+                        {rootBranch?.error && !rootBranch.loading && (
+                          <div
+                            className="td-tree-row td-tree-error-row"
+                            style={{ paddingLeft: 66 }}
+                            title={rootBranch.error}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void loadTreeBranch(rootId, part.offset, '', null);
+                            }}
+                          >
+                            <span>读取失败：{rootBranch.error}</span>
+                            <span className="td-tree-retry-link">点击重试</span>
+                          </div>
+                        )}
+                        {rootBranch?.loaded && !rootBranch.loading && rootBranch.children.length === 0 && (
+                          <div className="td-tree-row td-muted-text" style={{ paddingLeft: 66, fontSize: 11.5 }}>
+                            （空目录）
+                          </div>
+                        )}
+                        {rootBranch?.loaded &&
+                          rootBranch.children.length > 0 &&
+                          renderTreeChildren(rootBranch.children, 3, '', null)}
                       </>
                     )}
                   </>
