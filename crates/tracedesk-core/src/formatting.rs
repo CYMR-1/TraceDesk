@@ -213,21 +213,23 @@ pub fn utf16_unit_len(s: &str) -> usize {
     s.chars().map(char::len_utf16).sum()
 }
 
+/// 判断文件名是否命中 Windows 保留设备名（取首个 `.` 之前并去除末尾空格后忽略大小写比对）。
+fn is_reserved_windows_name(candidate: &str) -> bool {
+    let stem = candidate.split('.').next().unwrap_or(candidate);
+    let device = stem.trim_end_matches(' ').to_uppercase();
+    RESERVED_WIN_DEVICE_RE.is_match(&device)
+}
+
 /// 按 Windows NTFS/FAT 规则净化单个文件名组件（对应 `core-contract.md` §3.1）。
 pub fn windows_filename(name: &str, max_units: usize) -> String {
     let mut cleaned = INVALID_WIN_CHARS_RE.replace_all(name, "_").into_owned();
-    let is_reserved = |candidate: &str| {
-        let stem = candidate.split('.').next().unwrap_or(candidate);
-        let device = stem.trim_end_matches(' ').to_uppercase();
-        RESERVED_WIN_DEVICE_RE.is_match(&device)
-    };
-    if is_reserved(&cleaned) {
+    if is_reserved_windows_name(&cleaned) {
         cleaned.insert(0, '_');
     }
     let truncated = truncate_utf16_units(&cleaned, max_units);
     let mut trimmed = truncated.trim_end_matches([' ', '.']).to_string();
     // 截断后可能再次落入 Windows 保留设备名（例如 "CONSOLE" 截断为 3 单元变成 "CON"），需二次校验。
-    if !trimmed.is_empty() && is_reserved(&trimmed) {
+    if !trimmed.is_empty() && is_reserved_windows_name(&trimmed) {
         trimmed.insert(0, '_');
         trimmed = truncate_utf16_units(&trimmed, max_units)
             .trim_end_matches([' ', '.'])
@@ -244,6 +246,96 @@ pub fn windows_filename(name: &str, max_units: usize) -> String {
 pub fn export_filename(source_path: &str) -> String {
     let leaf = source_path.rsplit('/').next().unwrap_or(source_path);
     windows_filename(leaf, 255)
+}
+
+/// 为导出文件生成带序号后缀的合法 Windows 文件名（对应 `core-contract.md` §3.1）。
+///
+/// - `index == 0`：返回净化后的原始文件名（不追加序号）；
+/// - `index >= 1`：在文件主名后、扩展名前插入 `({index})`
+///   （例如 `NOTES.TXT` -> `NOTES(1).TXT`、`archive.tar.gz` -> `archive.tar(1).gz`、
+///   无扩展名 `README` -> `README(1)`、隐藏文件 `.gitignore` -> `.gitignore(1)`）；
+/// - 严格遵守 255 UTF-16 代码单元上限与 Windows 合法文件名约束：超长时优先保留扩展名与
+///   序号后缀，截断主名并确保截断后不以空格/点结尾且不命中 Windows 保留设备名。
+pub fn numbered_export_filename(base_name: &str, index: usize) -> String {
+    numbered_export_filename_with_limit(base_name, index, 255)
+}
+
+fn numbered_export_filename_with_limit(
+    base_name: &str,
+    index: usize,
+    max_units: usize,
+) -> String {
+    let mut cleaned = INVALID_WIN_CHARS_RE.replace_all(base_name, "_").into_owned();
+    // 若原始名称命中 Windows 保留设备名，先加 "_" 前缀，确保 index=0 与 index>=1 命名前缀一致。
+    if is_reserved_windows_name(&cleaned) {
+        cleaned.insert(0, '_');
+    }
+    let cleaned = cleaned.trim_end_matches([' ', '.']);
+    let cleaned = if cleaned.is_empty() { "file" } else { cleaned };
+
+    // 按最后一个 `.` 拆分主名与扩展名；隐藏文件（仅首字符为 `.`，如 `.gitignore`）整体视为主名。
+    let (raw_stem, raw_ext) = match cleaned.rfind('.') {
+        Some(dot) if dot > 0 && dot + 1 < cleaned.len() => (&cleaned[..dot], &cleaned[dot..]),
+        _ => (cleaned, ""),
+    };
+
+    let suffix = if index == 0 {
+        String::new()
+    } else {
+        format!("({index})")
+    };
+    let suffix_units = utf16_unit_len(&suffix);
+    let raw_ext_units = utf16_unit_len(raw_ext);
+
+    // 优先保留扩展名与序号后缀；仅在极端超长扩展名导致 `suffix + ext` 超出上限时截断扩展名。
+    let ext = if suffix_units + raw_ext_units <= max_units {
+        raw_ext.to_string()
+    } else {
+        let ext_budget = max_units.saturating_sub(suffix_units);
+        let mut truncated_ext = truncate_utf16_units(raw_ext, ext_budget);
+        while truncated_ext.ends_with([' ', '.']) {
+            truncated_ext.pop();
+        }
+        truncated_ext
+    };
+    let ext_units = utf16_unit_len(&ext);
+    let stem_budget = max_units.saturating_sub(suffix_units + ext_units);
+
+    let raw_stem_units = utf16_unit_len(raw_stem);
+    let mut stem = if raw_stem_units <= stem_budget {
+        raw_stem.to_string()
+    } else {
+        truncate_utf16_units(raw_stem, stem_budget)
+            .trim_end_matches([' ', '.'])
+            .to_string()
+    };
+
+    // 当扩展名被超长截断为空且无序号后缀时，主名即为最终文件名末尾，必须剥离尾部空格与点。
+    if suffix.is_empty() && ext.is_empty() {
+        stem = stem.trim_end_matches([' ', '.']).to_string();
+    }
+
+    if stem.is_empty() && stem_budget >= 4 {
+        stem = "file".to_string();
+    } else if stem.is_empty() && suffix.is_empty() && ext.is_empty() {
+        stem = truncate_utf16_units("file", max_units);
+    }
+
+    // 截断主名后可能再次命中 Windows 保留设备名（例如 "CONSOLE" 截断为 3 单元变成 "CON"），
+    // 对主名及拼装后的完整文件名执行二次校验并在必要时补 "_" 前缀重截断。
+    let candidate = format!("{stem}{suffix}{ext}");
+    if (!stem.is_empty() && is_reserved_windows_name(&stem)) || is_reserved_windows_name(&candidate)
+    {
+        stem.insert(0, '_');
+        if utf16_unit_len(&stem) > stem_budget {
+            stem = truncate_utf16_units(&stem, stem_budget)
+                .trim_end_matches([' ', '.'])
+                .to_string();
+        }
+        format!("{stem}{suffix}{ext}")
+    } else {
+        candidate
+    }
 }
 
 /// 根据 `(number, examiner, target)` 派生默认案件目录名（以 `_` 分隔编号、人员与对象）。
@@ -400,4 +492,101 @@ pub fn format_size(size: u64) -> String {
         }
     }
     format!("{} 字节", format_commas(size))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numbered_export_filename_basic_and_edge_cases() {
+        // 常规文件：index == 0 返回原名，index >= 1 在主名后、扩展名前插入序号。
+        assert_eq!(numbered_export_filename("NOTES.TXT", 0), "NOTES.TXT");
+        assert_eq!(numbered_export_filename("NOTES.TXT", 1), "NOTES(1).TXT");
+        assert_eq!(numbered_export_filename("NOTES.TXT", 2), "NOTES(2).TXT");
+        assert_eq!(numbered_export_filename("NOTES.TXT", 12), "NOTES(12).TXT");
+
+        // 无扩展名文件。
+        assert_eq!(numbered_export_filename("README", 0), "README");
+        assert_eq!(numbered_export_filename("README", 1), "README(1)");
+        assert_eq!(numbered_export_filename("README", 2), "README(2)");
+
+        // 隐藏文件（仅首字符为 `.` 视作无扩展名；含后续 `.` 则按最后一个 `.` 拆分）。
+        assert_eq!(numbered_export_filename(".gitignore", 0), ".gitignore");
+        assert_eq!(numbered_export_filename(".gitignore", 1), ".gitignore(1)");
+        assert_eq!(numbered_export_filename(".env.local", 0), ".env.local");
+        assert_eq!(numbered_export_filename(".env.local", 1), ".env(1).local");
+
+        // 多点扩展名：按最后一个 `.` 拆分。
+        assert_eq!(
+            numbered_export_filename("archive.tar.gz", 0),
+            "archive.tar.gz"
+        );
+        assert_eq!(
+            numbered_export_filename("archive.tar.gz", 1),
+            "archive.tar(1).gz"
+        );
+        assert_eq!(
+            numbered_export_filename("report.v1.final.pdf", 3),
+            "report.v1.final(3).pdf"
+        );
+
+        // Windows 保留设备名：index == 0 与 index >= 1 保持一致前缀净化。
+        assert_eq!(numbered_export_filename("CON.txt", 0), "_CON.txt");
+        assert_eq!(numbered_export_filename("CON.txt", 1), "_CON(1).txt");
+        assert_eq!(numbered_export_filename("nul", 1), "_nul(1)");
+
+        // 超长文件名（恰好 255 UTF-16 码元）：优先保留扩展名与序号后缀并截断主名。
+        let max_base = format!("{}.txt", "a".repeat(251));
+        assert_eq!(utf16_unit_len(&max_base), 255);
+        assert_eq!(numbered_export_filename(&max_base, 0), max_base);
+        let n1 = numbered_export_filename(&max_base, 1);
+        assert_eq!(utf16_unit_len(&n1), 255);
+        assert!(n1.ends_with("(1).txt"));
+        assert_eq!(n1, format!("{}(1).txt", "a".repeat(248)));
+
+        // 超长截断后主名末尾出现空格或点：必须去除尾部空格/点再拼接序号与扩展名。
+        let trailing_space_dot = format!("{} .  xyz.txt", "a".repeat(245));
+        assert_eq!(utf16_unit_len(&trailing_space_dot), 256);
+        let n_trim = numbered_export_filename(&trailing_space_dot, 1);
+        assert!(utf16_unit_len(&n_trim) <= 255);
+        assert_eq!(n_trim, format!("{}(1).txt", "a".repeat(245)));
+
+        // 代理对（emoji 占 2 个 UTF-16 单元）截断时绝不能被拆分。
+        let emoji_long = format!("{}😀.txt", "a".repeat(247)); // 247 + 2 + 4 = 253
+        let emoji_n1 = numbered_export_filename(&emoji_long, 1); // stem_budget = 248 -> 只能放下 247 个 'a'
+        assert!(utf16_unit_len(&emoji_n1) <= 255);
+        assert_eq!(emoji_n1, format!("{}(1).txt", "a".repeat(247)));
+
+        // 截断主名后落入 Windows 保留设备名（例如 "CONSOLE" 截断为 3 单元变成 "CON"）必须二次净化。
+        let trunc_reserved = numbered_export_filename_with_limit("CONSOLE.txt", 1, 10);
+        // max=10, suffix="(1)"(3), ext=".txt"(4) => stem_budget=3 => "CON" -> 二次净化为 "_CO"
+        assert!(utf16_unit_len(&trunc_reserved) <= 10);
+        assert_eq!(trunc_reserved, "_CO(1).txt");
+        assert!(!is_reserved_windows_name(&trunc_reserved));
+
+        // 极端超长扩展名场景仍严格满足 255 UTF-16 码元上限且不以点或空格结尾。
+        let huge_ext = format!("a.{}", "x".repeat(253));
+        assert_eq!(utf16_unit_len(&huge_ext), 255);
+        let huge_n1 = numbered_export_filename(&huge_ext, 1);
+        assert!(utf16_unit_len(&huge_n1) <= 255);
+        assert!(huge_n1.starts_with("(1)."));
+        assert!(!huge_n1.ends_with([' ', '.']));
+
+        // 超长扩展名截断并剥离尾部空格/点后变为空时，index == 0 不得以空格/点结尾，且全空白主名回退为 "file"。
+        let space_ext_with_trailing_space = format!("foo .{}x", " ".repeat(254));
+        let fixed_foo = numbered_export_filename(&space_ext_with_trailing_space, 0);
+        assert_eq!(fixed_foo, "foo");
+        assert!(!fixed_foo.ends_with([' ', '.']));
+
+        let space_ext_with_trailing_dot = format!("a..{}x", " ".repeat(254));
+        let fixed_a = numbered_export_filename(&space_ext_with_trailing_dot, 0);
+        assert_eq!(fixed_a, "a");
+        assert!(!fixed_a.ends_with([' ', '.']));
+
+        let space_ext_blank_stem = format!("   .{}x", " ".repeat(254));
+        let fixed_blank = numbered_export_filename(&space_ext_blank_stem, 0);
+        assert_eq!(fixed_blank, "file");
+        assert!(!fixed_blank.ends_with([' ', '.']));
+    }
 }

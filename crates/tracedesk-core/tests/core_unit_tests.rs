@@ -17,13 +17,14 @@ use serde_json::{Map, Value, json};
 use tracedesk_core::decode_image_preview;
 use tracedesk_core::{
     AppPaths, AuditOrigin, AuditRecord, BrowserFilter, BrowserIndex, BuildBundleOptions, Case,
-    CoreError, PageWindow, PreviewEncoding, Provenance, StatusFilter, TREE_GROUP_SIZE,
-    TREE_GROUP_THRESHOLD, TimelineFilter, TimelineIndex, assess_coverage, audit_mcp_user,
-    audit_origin, audit_origin_label, build_bundle, canonical_json, case_folder_name,
-    compute_legacy_carry, display_timestamp, find_matches_in_reader, findings_text,
-    format_unix_east8_stack, normalize_event_filter, parse_pattern, preview_rows, preview_text,
-    record_note, render_report, save_json_atomic, source_status, strip_trailing_version,
-    verify_audit_chain_at, verify_bundle, windows_filename,
+    CoreError, ExportRecord, PageWindow, PreviewEncoding, Provenance, StatusFilter,
+    TREE_GROUP_SIZE, TREE_GROUP_THRESHOLD, TimelineFilter, TimelineIndex, assess_coverage,
+    audit_mcp_user, audit_origin, audit_origin_label, build_bundle, canonical_json,
+    case_folder_name, compute_legacy_carry, display_timestamp, find_matches_in_reader,
+    findings_text, format_unix_east8_stack, inspect_bundle_exports, normalize_event_filter,
+    numbered_export_filename, parse_pattern, preview_rows, preview_text, record_note,
+    render_report, resolve_export_path, save_json_atomic, source_status, strip_trailing_version,
+    utf16_unit_len, verify_audit_chain_at, verify_bundle, windows_filename,
 };
 use tracedesk_engines::{InventoryEntry, PartitionInfo};
 use zip::write::SimpleFileOptions;
@@ -970,4 +971,133 @@ fn windows_filename_rechecks_reserved_name_after_truncation_and_report_handles_n
     };
     let md = render_report(&data, &[], "无证据兜底");
     assert!(md.contains("NO-EV-001"));
+}
+
+#[test]
+fn numbered_export_filename_rules_and_duplicate_export_review_bundle() {
+    // 1. 单元测试 `numbered_export_filename`：覆盖常规、无扩展名、多点扩展名、隐藏文件与超长截断。
+    assert_eq!(numbered_export_filename("NOTES.TXT", 0), "NOTES.TXT");
+    assert_eq!(numbered_export_filename("NOTES.TXT", 1), "NOTES(1).TXT");
+    assert_eq!(numbered_export_filename("NOTES.TXT", 2), "NOTES(2).TXT");
+    assert_eq!(numbered_export_filename("README", 0), "README");
+    assert_eq!(numbered_export_filename("README", 1), "README(1)");
+    assert_eq!(numbered_export_filename("README", 2), "README(2)");
+    assert_eq!(numbered_export_filename("archive.tar.gz", 1), "archive.tar(1).gz");
+    assert_eq!(numbered_export_filename(".gitignore", 0), ".gitignore");
+    assert_eq!(numbered_export_filename(".gitignore", 1), ".gitignore(1)");
+    assert_eq!(numbered_export_filename(".env.local", 1), ".env(1).local");
+
+    // 超长文件名（255 UTF-16 码元）：追加序号后严格 <= 255 码元，优先保留扩展名与序号后缀。
+    let long_with_ext = format!("{}.docx", "长".repeat(250));
+    assert_eq!(utf16_unit_len(&long_with_ext), 255);
+    let long_1 = numbered_export_filename(&long_with_ext, 1);
+    let long_10 = numbered_export_filename(&long_with_ext, 10);
+    assert_eq!(utf16_unit_len(&long_1), 255);
+    assert_eq!(utf16_unit_len(&long_10), 255);
+    assert!(long_1.ends_with("(1).docx"));
+    assert!(long_10.ends_with("(10).docx"));
+
+    // 超长截断边界出现尾部空格/点时必须自动裁剪。
+    let long_space_dot = format!("{} .  tail.txt", "b".repeat(245));
+    let trimmed_1 = numbered_export_filename(&long_space_dot, 1);
+    assert!(utf16_unit_len(&trimmed_1) <= 255);
+    assert_eq!(trimmed_1, format!("{}(1).txt", "b".repeat(245)));
+
+    // 截断后恰好落入 Windows 保留设备名（"CONSOLE" 截断为 3 单元变成 "CON"）不得命中保留名。
+    let long_ext_reserved = format!("CONSOLE.{}", "x".repeat(248)); // 7 + 1 + 248 = 256
+    let safe_reserved = numbered_export_filename(&long_ext_reserved, 1);
+    assert!(utf16_unit_len(&safe_reserved) <= 255);
+    assert!(safe_reserved.starts_with("_CO(1)."));
+
+    // 2. 端到端验证连续三次导出同一文件：在 exports/ 下生成 NOTES.TXT、NOTES(1).TXT、NOTES(2).TXT，
+    //    不创建任何 `同名副本-*` 子目录，且复核包定位与核验全部通过。
+    let paths = AppPaths::discover();
+    let demo_dd = paths.evidence_dir.join("demo.dd");
+    assert!(demo_dd.is_file(), "缺少测试镜像 demo.dd");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut case = Case::create(
+        tmp.path(),
+        "DUP-EXP-001",
+        "测试取证员",
+        "同名序号导出与复核包定位测试",
+        None,
+        None,
+        AuditOrigin::Manual,
+    )
+    .expect("create case");
+    case.load_image(&demo_dd, None, None, None).expect("load demo.dd");
+    let inv = case.scan_partitions(None, None, None).expect("scan partitions");
+    let notes = inv
+        .iter()
+        .find(|e| e.path == "NOTES.TXT")
+        .expect("NOTES.TXT")
+        .clone();
+
+    let p0 = case.export(&notes, None).expect("export #1");
+    let p1 = case.export(&notes, None).expect("export #2");
+    let p2 = case.export(&notes, None).expect("export #3");
+
+    let exports_dir = case.folder().join("exports");
+    assert_eq!(p0.file_name().and_then(|s| s.to_str()), Some("NOTES.TXT"));
+    assert_eq!(p1.file_name().and_then(|s| s.to_str()), Some("NOTES(1).TXT"));
+    assert_eq!(p2.file_name().and_then(|s| s.to_str()), Some("NOTES(2).TXT"));
+    assert_eq!(p0.parent(), Some(exports_dir.as_path()));
+    assert_eq!(p1.parent(), Some(exports_dir.as_path()));
+    assert_eq!(p2.parent(), Some(exports_dir.as_path()));
+
+    // 确认 exports/ 目录下不存在任何子目录（不再产生 `同名副本-*` 文件夹）。
+    let subdirs: Vec<_> = fs::read_dir(&exports_dir)
+        .expect("read exports dir")
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .collect();
+    assert!(subdirs.is_empty(), "不应创建任何子目录：{subdirs:?}");
+
+    // 确认三份副本内容均完整保留、互不覆盖。
+    let bytes0 = fs::read(&p0).expect("read p0");
+    let bytes1 = fs::read(&p1).expect("read p1");
+    let bytes2 = fs::read(&p2).expect("read p2");
+    assert_eq!(bytes0, bytes1);
+    assert_eq!(bytes1, bytes2);
+
+    // 确认 `inspect_bundle_exports` 与 `resolve_export_path` 能准确定位带序号副本。
+    let rows = inspect_bundle_exports(&case).expect("inspect bundle exports");
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|r| r.exists));
+    assert_eq!(rows[0].relative, "NOTES.TXT");
+    assert_eq!(rows[1].relative, "NOTES(1).TXT");
+    assert_eq!(rows[2].relative, "NOTES(2).TXT");
+
+    // 确认即使案件记录中的路径前缀来自其他目录，仍能定位新版序号文件与历史 `同名副本-*` 文件。
+    let moved_numbered = ExportRecord {
+        path: r"D:\old_location\case_x\exports\NOTES(1).TXT".to_string(),
+        ..case.data().exports[1].clone()
+    };
+    let (resolved_num, rel_num) =
+        resolve_export_path(&case, &moved_numbered).expect("resolve moved numbered export");
+    assert_eq!(rel_num, PathBuf::from("NOTES(1).TXT"));
+    assert!(resolved_num.is_file());
+
+    let legacy_dir = exports_dir.join("同名副本-legacy99");
+    fs::create_dir(&legacy_dir).expect("create legacy dup dir");
+    let legacy_file = legacy_dir.join("NOTES.TXT");
+    fs::write(&legacy_file, &bytes0).expect("write legacy dup file");
+    let legacy_rec = ExportRecord {
+        path: r"D:\old_location\case_x\exports\同名副本-legacy99\NOTES.TXT".to_string(),
+        ..case.data().exports[0].clone()
+    };
+    let (resolved_legacy, rel_legacy) =
+        resolve_export_path(&case, &legacy_rec).expect("resolve legacy subdir export");
+    assert_eq!(rel_legacy, PathBuf::from("同名副本-legacy99").join("NOTES.TXT"));
+    assert!(resolved_legacy.is_file());
+
+    // 构建复核包并用原生 `verify_bundle` 全量核验。
+    let bundle = build_bundle(&mut case, &BuildBundleOptions::default(), None)
+        .expect("build review bundle with numbered exports");
+    assert_eq!(bundle.included_exports, 3);
+    assert_eq!(bundle.omitted_exports, 0);
+    verify_bundle(&bundle.bundle_path, Some(&bundle.sha256))
+        .expect("verify review bundle with numbered exports");
+    case.close();
 }

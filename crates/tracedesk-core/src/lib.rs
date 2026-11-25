@@ -58,8 +58,8 @@ pub use formatting::{
     case_folder_name, create_unique_case_folder, deleted_export_summary, deleted_source_note,
     display_iso_time, display_time, display_timestamp, east_8, entry_name, entry_status,
     export_filename, format_commas, format_size, format_unix_east8_stack, hex_lower,
-    next_case_folder_path, now, parse_iso_to_east8, sha256_hex, truncate_utf16_units,
-    utf16_unit_len, windows_filename,
+    next_case_folder_path, now, numbered_export_filename, parse_iso_to_east8, sha256_hex,
+    truncate_utf16_units, utf16_unit_len, windows_filename,
 };
 pub use paths::{AppPaths, is_within, resolve_clean, strip_verbatim_prefix};
 pub use preview::{

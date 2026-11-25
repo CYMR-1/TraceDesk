@@ -86,11 +86,15 @@ pub struct BuildBundleResult {
 }
 
 /// 解析导出记录在 `<case_dir>/exports/` 下的本地文件路径，即使案件目录曾被整体移动仍可定位。
+///
+/// - 新版导出（含同名序号后缀，如 `NOTES(1).TXT`）均直接位于 `<case_dir>/exports/` 下；
+/// - 保留对历史案件中 `同名副本-*` 子目录导出记录的向后兼容解析。
 pub fn resolve_export_path(case: &Case, item: &ExportRecord) -> CoreResult<(PathBuf, PathBuf)> {
     let original = Path::new(&item.path);
     let file_name = original
         .file_name()
         .ok_or_else(|| CoreError::InvalidInput("导出记录文件名无效".to_string()))?;
+    // 兼容历史案件中的 `exports/同名副本-*/<filename>` 目录结构；新版序号命名直接按文件名定位。
     let relative = if let Some(parent_name) = original
         .parent()
         .and_then(Path::file_name)

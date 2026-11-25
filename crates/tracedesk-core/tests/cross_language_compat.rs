@@ -163,7 +163,7 @@ fn rust_end_to_end_demo_dd_and_dual_verify_bundle() {
     let txt_files = case.filtered("txt", "").expect("filter txt");
     assert_eq!(txt_files.len(), 3);
 
-    // 7. 导出 CASE.TXT、NOTES.TXT 及重复导出 NOTES.TXT（触发 `同名副本-` 子目录）
+    // 7. 导出 CASE.TXT、NOTES.TXT 及重复导出 NOTES.TXT（在 exports/ 同级生成 `NOTES(1).TXT`）
     let case_txt = inventory
         .iter()
         .find(|e| e.path == "DOCS/CASE.TXT")
@@ -182,14 +182,20 @@ fn rust_end_to_end_demo_dd_and_dual_verify_bundle() {
     let exported_notes_1 = case.export(&notes_txt, None).expect("export NOTES.TXT #1");
     let exported_notes_2 = case.export(&notes_txt, None).expect("export NOTES.TXT #2");
     assert_ne!(exported_notes_1, exported_notes_2);
-    assert!(
+    assert_eq!(
+        exported_notes_1.file_name().and_then(|s| s.to_str()),
+        Some("NOTES.TXT")
+    );
+    assert_eq!(
+        exported_notes_2.file_name().and_then(|s| s.to_str()),
+        Some("NOTES(1).TXT")
+    );
+    assert_eq!(
         exported_notes_2
             .parent()
-            .unwrap()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with("同名副本-")
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str()),
+        Some("exports")
     );
 
     // 8. 取证发现：笔记 + 单文件哈希 + 副本比对 + export_findings

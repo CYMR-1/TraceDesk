@@ -28,7 +28,8 @@ use crate::error::{CoreError, CoreResult};
 use crate::findings::{AuditOrigin, AuditRecord};
 use crate::formatting::{
     can_export, canonical_json_value, case_folder_name, create_unique_case_folder,
-    entry_name, export_filename, hex_lower, now, sha256_hex, windows_filename,
+    entry_name, export_filename, hex_lower, now, numbered_export_filename, sha256_hex,
+    windows_filename,
 };
 use crate::paths::{is_within, resolve_clean, strip_verbatim_prefix};
 use crate::reporting::render_report;
@@ -2435,7 +2436,8 @@ impl Case {
     }
 
     /// 将镜像内的普通文件或已删除文件导出至 `<case_dir>/exports/`，
-    /// 采用无覆盖原子重名处理（`同名副本-<random>/`）并记录 `FILE_EXPORT` 审计日志。
+    /// 重名时在同一目录下按无覆盖原子方式依次追加序号后缀（`stem(1).ext`、`stem(2).ext`…）
+    /// 并记录 `FILE_EXPORT` 审计日志。
     pub fn export(&mut self, entry: &InventoryEntry, tsk: Option<&TskCli>) -> CoreResult<PathBuf> {
         self.ensure_open()?;
         if !self.displayed_entries().contains(entry) || !can_export(entry) {
@@ -2447,7 +2449,6 @@ impl Case {
         let name = export_filename(&entry.path);
         let exports_dir = self.folder.join("exports");
         let mut destination = exports_dir.join(&name);
-        let mut duplicate_folder: Option<PathBuf> = None;
         let mut published = false;
         let mut committed = false;
 
@@ -2499,33 +2500,68 @@ impl Case {
                 ));
             }
 
-            // 原子发布至 `destination`，严禁覆盖任何已存在文件。
-            match fs::hard_link(&partial, &destination) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let dup_dir = tempfile::Builder::new()
-                        .prefix("同名副本-")
-                        .tempdir_in(&exports_dir)?
-                        .keep();
-                    let dup_dest = dup_dir.join(&name);
-                    fs::hard_link(&partial, &dup_dest).or_else(|_| fs::rename(&partial, &dup_dest))?;
-                    duplicate_folder = Some(dup_dir);
-                    destination = dup_dest;
-                }
-                Err(_) => {
-                    // 在不支持硬链接的文件系统（如 FAT32）上回退为重命名发布。
-                    if destination.exists() {
-                        let dup_dir = tempfile::Builder::new()
-                            .prefix("同名副本-")
-                            .tempdir_in(&exports_dir)?
-                            .keep();
-                        let dup_dest = dup_dir.join(&name);
-                        fs::rename(&partial, &dup_dest)?;
-                        duplicate_folder = Some(dup_dir);
-                        destination = dup_dest;
-                    } else {
-                        fs::rename(&partial, &destination)?;
+            // 在 `<case_dir>/exports/` 下按 `name`、`stem(1).ext`、`stem(2).ext`… 依次尝试无覆盖原子发布：
+            // 优先使用硬链接（零拷贝原子操作）；遇到已存在则递增序号；若文件系统不支持硬链接（如 FAT32/exFAT），
+            // 则回退为 `create_new(true)` 独占创建后流式复制，绝不覆盖任何已有文件。
+            let mut use_hard_link = true;
+            let mut index = 0usize;
+            loop {
+                let candidate_name = numbered_export_filename(&name, index);
+                let candidate = exports_dir.join(&candidate_name);
+                if use_hard_link {
+                    match fs::hard_link(&partial, &candidate) {
+                        Ok(()) => {
+                            destination = candidate;
+                            break;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                            index = index.checked_add(1).ok_or_else(|| {
+                                CoreError::Other("同类导出文件序号溢出".to_string())
+                            })?;
+                            continue;
+                        }
+                        Err(_) if candidate.exists() => {
+                            index = index.checked_add(1).ok_or_else(|| {
+                                CoreError::Other("同类导出文件序号溢出".to_string())
+                            })?;
+                            continue;
+                        }
+                        Err(_) => {
+                            // 当前文件系统不支持硬链接，切换为无覆盖独占创建回退路径。
+                            use_hard_link = false;
+                        }
                     }
+                }
+
+                match OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&candidate)
+                {
+                    Ok(mut dst_file) => {
+                        let copy_res = (|| -> std::io::Result<()> {
+                            let mut src_file = File::open(&partial)?;
+                            std::io::copy(&mut src_file, &mut dst_file)?;
+                            dst_file.flush()?;
+                            Ok(())
+                        })();
+                        if let Err(err) = copy_res {
+                            drop(dst_file);
+                            let _ = fs::remove_file(&candidate);
+                            return Err(CoreError::Io(err));
+                        }
+                        destination = candidate;
+                        break;
+                    }
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::AlreadyExists || candidate.exists() =>
+                    {
+                        index = index.checked_add(1).ok_or_else(|| {
+                            CoreError::Other("同类导出文件序号溢出".to_string())
+                        })?;
+                        continue;
+                    }
+                    Err(e) => return Err(CoreError::Io(e)),
                 }
             }
             published = true;
@@ -2586,11 +2622,6 @@ impl Case {
         if let Err(err) = res {
             if published && !committed {
                 let _ = fs::remove_file(&destination);
-            }
-            if let Some(dup) = duplicate_folder
-                && !committed
-            {
-                let _ = fs::remove_dir(dup);
             }
             let mut details = Map::new();
             details.insert("error".to_string(), Value::String(err.to_string()));
