@@ -14,7 +14,7 @@ use crate::types::{ByteInterval, EntryReadPlan, InventoryEntry};
 const ENTRY_CACHE_CAP: usize = 256;
 
 enum CachedPartition {
-    Ntfs(NtfsVolume),
+    Ntfs(Arc<NtfsVolume>),
     Fat(FatVolume),
     Unsupported,
 }
@@ -39,7 +39,7 @@ enum ResolvedEntry {
 pub struct VolumeReader {
     media: Arc<dyn MediaReader>,
     partitions: HashMap<u64, CachedPartition>,
-    entry_cache: LruCache<EntryCacheKey, ResolvedEntry>,
+    entry_cache: LruCache<EntryCacheKey, Arc<ResolvedEntry>>,
 }
 
 impl VolumeReader {
@@ -56,6 +56,33 @@ impl VolumeReader {
             partitions: HashMap::new(),
             entry_cache: LruCache::new(NonZeroUsize::new(ENTRY_CACHE_CAP).expect("non-zero")),
         }
+    }
+
+    /// 派生一个工作线程专用的 [`VolumeReader`]：共享底层介质句柄及已解析的只读
+    /// `Arc<NtfsVolume>` 元数据，避免每个工作线程和滚动窗口重复解析引导扇区与 `$MFT`。
+    pub fn fork_worker(&self) -> Self {
+        let mut partitions = HashMap::with_capacity(self.partitions.len());
+        for (&offset, part) in &self.partitions {
+            match part {
+                CachedPartition::Ntfs(ntfs) => {
+                    partitions.insert(offset, CachedPartition::Ntfs(Arc::clone(ntfs)));
+                }
+                CachedPartition::Unsupported => {
+                    partitions.insert(offset, CachedPartition::Unsupported);
+                }
+                CachedPartition::Fat(_) => {}
+            }
+        }
+        Self {
+            media: Arc::clone(&self.media),
+            partitions,
+            entry_cache: LruCache::new(NonZeroUsize::new(ENTRY_CACHE_CAP).expect("non-zero")),
+        }
+    }
+
+    /// 预先探测并缓存指定偏移处的分区元数据，供后续并行工作线程通过 [`Self::fork_worker`] 复用。
+    pub fn prime_partition(&mut self, offset: u64) {
+        let _ = self.ensure_partition(offset);
     }
 
     /// 返回底层 [`MediaReader`] 的引用。
@@ -82,7 +109,7 @@ impl VolumeReader {
         if &boot[3..11] == b"NTFS    "
             && let Ok(ntfs) = NtfsVolume::open(Arc::clone(&self.media), offset)
         {
-            return CachedPartition::Ntfs(ntfs);
+            return CachedPartition::Ntfs(Arc::new(ntfs));
         }
         if let Ok(fat) = FatVolume::open(Arc::clone(&self.media), offset) {
             return CachedPartition::Fat(fat);
@@ -90,7 +117,7 @@ impl VolumeReader {
         CachedPartition::Unsupported
     }
 
-    fn resolve_entry(&mut self, entry: &InventoryEntry) -> EngineResult<ResolvedEntry> {
+    fn resolve_entry(&mut self, entry: &InventoryEntry) -> EngineResult<Arc<ResolvedEntry>> {
         if entry.directory || entry.extents.is_some() {
             return Err(EngineError::RandomRead("目录或空间区域不支持文件随机读".to_string()));
         }
@@ -111,11 +138,11 @@ impl VolumeReader {
             deleted: entry.deleted,
         };
         if let Some(cached) = self.entry_cache.get(&key) {
-            return Ok(cached.clone());
+            return Ok(Arc::clone(cached));
         }
 
         let part = self.ensure_partition(entry.offset);
-        let resolved = match part {
+        let resolved = Arc::new(match part {
             CachedPartition::Ntfs(ntfs) => {
                 let data = ntfs.resolve_entry(ino_num, attr_type, attr_id, entry.size)?;
                 ResolvedEntry::Ntfs(data)
@@ -135,9 +162,9 @@ impl VolumeReader {
                     "当前分区文件系统不支持进程内随机读，需回退 icat".to_string(),
                 ));
             }
-        };
+        });
 
-        self.entry_cache.put(key, resolved.clone());
+        self.entry_cache.put(key, Arc::clone(&resolved));
         Ok(resolved)
     }
 
@@ -149,7 +176,7 @@ impl VolumeReader {
         let Ok(resolved) = self.resolve_entry(entry) else {
             return EntryReadPlan::FallbackToIcat;
         };
-        match resolved {
+        match resolved.as_ref() {
             ResolvedEntry::Ntfs(data) => {
                 let intervals = data.non_sparse_intervals(needle);
                 EntryReadPlan::Direct {
@@ -174,6 +201,35 @@ impl VolumeReader {
         }
     }
 
+    /// 从 `entry` 的 `file_offset` 处精确读取并填充至调用方提供的缓冲区 `buf`（避免每块重复分配）。
+    pub fn read_entry_into(
+        &mut self,
+        entry: &InventoryEntry,
+        file_offset: u64,
+        buf: &mut [u8],
+    ) -> EngineResult<()> {
+        let resolved = self.resolve_entry(entry)?;
+        if buf.is_empty() {
+            if file_offset > entry.size {
+                return Err(EngineError::RandomRead("读取偏移超出文件长度".to_string()));
+            }
+            return Ok(());
+        }
+        let part = self.ensure_partition(entry.offset);
+        match (part, resolved.as_ref()) {
+            (CachedPartition::Ntfs(ntfs), ResolvedEntry::Ntfs(data)) => {
+                ntfs.read_entry_data_at(data, file_offset, buf)?;
+            }
+            (CachedPartition::Fat(fat), ResolvedEntry::Fat(runs)) => {
+                fat.read_file_at(runs, file_offset, buf)?;
+            }
+            _ => {
+                return Err(EngineError::RandomRead("分区与缓存条目类型不一致".to_string()));
+            }
+        }
+        Ok(())
+    }
+
     /// 从 `entry` 的 `file_offset` 处精确读取 `len` 字节。
     pub fn read_entry_at(
         &mut self,
@@ -181,26 +237,12 @@ impl VolumeReader {
         file_offset: u64,
         len: usize,
     ) -> EngineResult<Vec<u8>> {
-        let resolved = self.resolve_entry(entry)?;
         if len == 0 {
-            if file_offset > entry.size {
-                return Err(EngineError::RandomRead("读取偏移超出文件长度".to_string()));
-            }
+            self.read_entry_into(entry, file_offset, &mut [])?;
             return Ok(Vec::new());
         }
         let mut buf = vec![0u8; len];
-        let part = self.ensure_partition(entry.offset);
-        match (part, &resolved) {
-            (CachedPartition::Ntfs(ntfs), ResolvedEntry::Ntfs(data)) => {
-                ntfs.read_entry_data_at(data, file_offset, &mut buf)?;
-            }
-            (CachedPartition::Fat(fat), ResolvedEntry::Fat(runs)) => {
-                fat.read_file_at(runs, file_offset, &mut buf)?;
-            }
-            _ => {
-                return Err(EngineError::RandomRead("分区与缓存条目类型不一致".to_string()));
-            }
-        }
+        self.read_entry_into(entry, file_offset, &mut buf)?;
         Ok(buf)
     }
 }

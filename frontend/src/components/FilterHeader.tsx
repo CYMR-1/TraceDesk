@@ -205,7 +205,7 @@ const SingleCheckMark: React.FC = () => (
   </span>
 );
 
-export const FilterHeader: React.FC<FilterHeaderProps> = ({
+const FilterHeaderInner: React.FC<FilterHeaderProps> = ({
   columns,
   columnWidths,
   onResizeColumn,
@@ -228,10 +228,18 @@ export const FilterHeader: React.FC<FilterHeaderProps> = ({
     minWidth: number;
   } | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [hoveredCol, setHoveredCol] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
   const [menuPos, setMenuPos] = useState<{ left: number; top: number }>({ left: 0, top: 0 });
+
+  // 组件卸载时确保清理正在进行的列宽拖拽监听与动画帧
+  useEffect(() => {
+    return () => {
+      resizeCleanupRef.current?.();
+      resizeCleanupRef.current = null;
+    };
+  }, []);
 
   const openOptions = useMemo(
     () => (openMenu ? filterOptions[openMenu.columnKey] ?? [] : []),
@@ -241,6 +249,8 @@ export const FilterHeader: React.FC<FilterHeaderProps> = ({
     () => (openMenu ? activeFilters[openMenu.columnKey] ?? [] : []),
     [openMenu, activeFilters]
   );
+  // 使用 Set 实现 O(1) 选中态判定，避免大选项列表下的线性 includes 查找
+  const openSelectedSet = useMemo(() => new Set(openSelected), [openSelected]);
   const showSearch = openOptions.length > SEARCH_THRESHOLD;
 
   // 切换列或关闭弹层时清空搜索词
@@ -259,17 +269,19 @@ export const FilterHeader: React.FC<FilterHeaderProps> = ({
     return undefined;
   }, [openMenu, showSearch]);
 
-  // 根据实际渲染尺寸避让视口左右/底部边界
+  // 根据实际渲染尺寸避让视口上下左右边界（包含横向滚动导致触发点为负值的情况）
   useLayoutEffect(() => {
     if (!openMenu) return;
     const el = menuRef.current;
     if (!el) {
-      setMenuPos({ left: openMenu.x, top: openMenu.y });
+      setMenuPos({ left: Math.max(8, openMenu.x), top: Math.max(8, openMenu.y) });
       return;
     }
     const rect = el.getBoundingClientRect();
-    const left = Math.min(openMenu.x, Math.max(8, window.innerWidth - rect.width - 8));
-    const top = Math.min(openMenu.y, Math.max(8, window.innerHeight - rect.height - 8));
+    const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+    const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
+    const left = Math.max(8, Math.min(openMenu.x, maxLeft));
+    const top = Math.max(8, Math.min(openMenu.y, maxTop));
     setMenuPos({ left, top });
   }, [openMenu, openOptions.length, searchQuery]);
 
@@ -301,17 +313,41 @@ export const FilterHeader: React.FC<FilterHeaderProps> = ({
   const startResize = (e: React.MouseEvent, index: number, minWidth: number) => {
     e.stopPropagation();
     e.preventDefault();
+    resizeCleanupRef.current?.();
     const startX = e.clientX;
     const startW = columnWidths[index] ?? columns[index].width;
+    let rafId: number | null = null;
+    let latestX = startX;
 
-    const onMove = (moveEvent: MouseEvent) => {
-      const next = Math.max(minWidth, startW + (moveEvent.clientX - startX));
+    // 通过 requestAnimationFrame 节流列宽拖拽更新，避免每帧触发多次整表重排
+    const applyWidth = () => {
+      rafId = null;
+      const next = Math.max(minWidth, Math.round(startW + (latestX - startX)));
       onResizeColumn?.(index, next);
     };
-    const onUp = () => {
+
+    const onMove = (moveEvent: MouseEvent) => {
+      latestX = moveEvent.clientX;
+      if (rafId === null) {
+        rafId = window.requestAnimationFrame(applyWidth);
+      }
+    };
+
+    const cleanup = () => {
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+        rafId = null;
+      }
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
+
+    const onUp = () => {
+      cleanup();
+      resizeCleanupRef.current = null;
+    };
+
+    resizeCleanupRef.current = cleanup;
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
   };
@@ -364,7 +400,7 @@ export const FilterHeader: React.FC<FilterHeaderProps> = ({
 
   const renderOptionButton = (item: ParsedFilterOption) => {
     if (!openMenu) return null;
-    const checked = openSelected.includes(item.value);
+    const checked = openSelectedSet.has(item.value);
     const isSingle = openMenu.mode === 'single';
 
     return (
@@ -411,7 +447,6 @@ export const FilterHeader: React.FC<FilterHeaderProps> = ({
           const isFiltered = Boolean(col.filterable && selected.length > 0);
           const isSorted = Boolean(col.sortable && sortColumn === col.key);
           const isInteractive = Boolean(col.checkable || col.filterable || col.sortable);
-          const isHovered = hoveredCol === col.key;
           const isMenuOpen = openMenu?.columnKey === col.key;
 
           const displayLabel = isFiltered
@@ -437,7 +472,12 @@ export const FilterHeader: React.FC<FilterHeaderProps> = ({
               key={col.key}
               role="columnheader"
               data-filter-trigger={col.filterable ? col.key : undefined}
-              style={{ width, minWidth: col.minWidth ?? 44 }}
+              style={{
+                width,
+                minWidth: col.minWidth ?? 44,
+                // 末列表头与数据行单元格保持一致的弹性铺满，避免宽屏下表头右边界错位
+                flexGrow: idx === columns.length - 1 ? 1 : 0,
+              }}
               title={headerTooltip}
               className={[
                 'td-header-cell',
@@ -449,8 +489,6 @@ export const FilterHeader: React.FC<FilterHeaderProps> = ({
               ]
                 .filter(Boolean)
                 .join(' ')}
-              onMouseEnter={() => setHoveredCol(col.key)}
-              onMouseLeave={() => setHoveredCol(null)}
               onClick={(e) => {
                 if (col.checkable) {
                   onToggleCheckAll?.(checkState !== 'checked');
@@ -491,7 +529,7 @@ export const FilterHeader: React.FC<FilterHeaderProps> = ({
                 <>
                   <span className="td-header-cell-label">{displayLabel}</span>
                   {col.filterable && (
-                    <span className="td-header-indicator" aria-hidden="true">
+                    <span className="td-header-indicator td-header-indicator--filter" aria-hidden="true">
                       {isFiltered ? (
                         <svg width="10" height="10" viewBox="0 0 10 10">
                           <polygon points="1.5,3 8.5,3 5,7.4" fill="var(--accent)" />
@@ -501,7 +539,7 @@ export const FilterHeader: React.FC<FilterHeaderProps> = ({
                           <path
                             d="M1.8 3.5 5 6.8 8.2 3.5"
                             fill="none"
-                            stroke={isHovered || isMenuOpen ? 'var(--accent)' : 'var(--text-muted)'}
+                            stroke="currentColor"
                             strokeWidth="1.5"
                             strokeLinecap="round"
                             strokeLinejoin="round"
@@ -511,7 +549,10 @@ export const FilterHeader: React.FC<FilterHeaderProps> = ({
                     </span>
                   )}
                   {col.sortable && (
-                    <span className="td-header-indicator" aria-hidden="true">
+                    <span
+                      className={`td-header-indicator ${isSorted ? '' : 'td-header-indicator--sort-idle'}`}
+                      aria-hidden="true"
+                    >
                       {isSorted ? (
                         <svg width="10" height="10" viewBox="0 0 10 10">
                           {sortDescending ? (
@@ -534,7 +575,7 @@ export const FilterHeader: React.FC<FilterHeaderProps> = ({
                             />
                           )}
                         </svg>
-                      ) : isHovered ? (
+                      ) : (
                         <svg width="10" height="12" viewBox="0 0 10 12">
                           <path
                             d="M2.4 4.6 5 2 7.6 4.6"
@@ -553,7 +594,7 @@ export const FilterHeader: React.FC<FilterHeaderProps> = ({
                             strokeLinejoin="round"
                           />
                         </svg>
-                      ) : null}
+                      )}
                     </span>
                   )}
                 </>
@@ -706,3 +747,5 @@ export const FilterHeader: React.FC<FilterHeaderProps> = ({
     </>
   );
 };
+
+export const FilterHeader = React.memo(FilterHeaderInner);

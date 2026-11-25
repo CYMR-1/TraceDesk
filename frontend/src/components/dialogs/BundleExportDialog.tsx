@@ -1,7 +1,7 @@
 /**
  * 复核包材料选择与缺失核查弹窗 (BundleExportDialog 1:1)
  */
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { BundleExportRow, BundleMaterialsResponse, BundleSearchRow } from '../../types/ipc';
 import { copyToClipboard, formatBytes } from '../../utils/assets';
 import { UiIcon } from '../Icons';
@@ -34,6 +34,16 @@ export const BundleExportDialog: React.FC<BundleExportDialogProps> = ({
   const [onlyMissingExports, setOnlyMissingExports] = useState(false);
   const [onlyMissingSearches, setOnlyMissingSearches] = useState(false);
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
+  const copyTimerRef = useRef<number | null>(null);
+
+  // 组件卸载时清理未触发的提示定时器
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+    };
+  }, []);
 
   const hasMissing = missingExports.length > 0 || missingSearches.length > 0;
 
@@ -147,7 +157,13 @@ export const BundleExportDialog: React.FC<BundleExportDialogProps> = ({
     const ok = await copyToClipboard(materials.missingText);
     if (ok) {
       setCopyNotice('已复制缺失材料清单到剪贴板');
-      window.setTimeout(() => setCopyNotice(null), 2500);
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      copyTimerRef.current = window.setTimeout(() => {
+        setCopyNotice(null);
+        copyTimerRef.current = null;
+      }, 2500);
     }
   };
 

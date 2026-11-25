@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -32,6 +32,18 @@ pub const LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
 
 /// 单个 Streamable HTTP 请求体允许的最大字节数（16 MiB），防止恶意超长请求体导致 OOM。
 pub const MAX_HTTP_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// 单次 HTTP 请求允许的最大请求头数量，防止无限请求头导致内存膨胀。
+pub const MAX_HTTP_HEADERS: usize = 64;
+
+/// 分块传输（chunked）尾部 trailer 允许的最大行数。
+pub const MAX_CHUNKED_TRAILERS: usize = 32;
+
+/// `Mcp-Session-Id` 头允许的最大字节长度。
+pub const MAX_SESSION_ID_BYTES: usize = 128;
+
+/// 本地回环 HTTP MCP 服务允许同时处理的 TCP 连接上限，防止连接耗尽线程资源。
+pub const MAX_CONCURRENT_HTTP_CONNS: usize = 64;
 
 /// 校验监听地址是否属于本机回环地址（`127.0.0.1` / `localhost` / `::1`）。
 pub fn validate_loopback_host(host: &str) -> McpResult<String> {
@@ -62,7 +74,7 @@ pub fn normalize_http_path(path: &str) -> String {
 }
 
 /// 规范化入站 HTTP 请求路径（仅去除尾部冗余 `/`，根路径保留为 `"/"`，绝不回退到 `/mcp`）。
-fn normalize_request_path(raw_path: &str) -> String {
+pub fn normalize_request_path(raw_path: &str) -> String {
     let clean = raw_path.trim().trim_end_matches('/');
     if clean.is_empty() {
         "/".to_string()
@@ -70,6 +82,50 @@ fn normalize_request_path(raw_path: &str) -> String {
         clean.to_string()
     } else {
         format!("/{clean}")
+    }
+}
+
+/// 校验并清理 `Mcp-Session-Id` 请求头，拒绝控制字符/空白/超长输入以防止 HTTP 响应头注入（CRLF 拆分）；
+/// 若输入缺失或非法则自动生成新的随机 UUID 会话 ID。
+pub fn sanitize_session_id(raw: Option<&str>) -> String {
+    if let Some(trimmed) = raw.map(str::trim)
+        && !trimmed.is_empty()
+        && trimmed.len() <= MAX_SESSION_ID_BYTES
+        && trimmed.bytes().all(|b| (0x21..=0x7E).contains(&b))
+    {
+        return trimmed.to_string();
+    }
+    Uuid::new_v4().simple().to_string()
+}
+
+/// 并发连接计数 RAII 守卫，离开作用域时自动归还连接名额。
+pub struct HttpConnectionPermit {
+    active: Arc<AtomicUsize>,
+}
+
+impl HttpConnectionPermit {
+    /// 尝试占用一个并发连接槽位；达到 `max` 上限时返回 `None`。
+    pub fn try_acquire(active: &Arc<AtomicUsize>, max: usize) -> Option<Self> {
+        let mut cur = active.load(Ordering::Relaxed);
+        loop {
+            if cur >= max {
+                return None;
+            }
+            match active.compare_exchange_weak(cur, cur + 1, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => {
+                    return Some(Self {
+                        active: Arc::clone(active),
+                    });
+                }
+                Err(next) => cur = next,
+            }
+        }
+    }
+}
+
+impl Drop for HttpConnectionPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -255,14 +311,18 @@ pub fn verify_dns_rebinding(
     Ok(())
 }
 
-struct ParsedHttpRequest {
-    method: String,
-    target: String,
-    headers: HashMap<String, String>,
-    body: Vec<u8>,
+/// 已解析的 HTTP/1.1 请求（供独立版与桌面内嵌 Streamable HTTP 服务共享）。
+pub struct ParsedHttpRequest {
+    pub method: String,
+    pub target: String,
+    pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
 }
 
-fn read_crlf_line<R: BufRead>(reader: &mut R, max_len: usize) -> io::Result<Option<String>> {
+fn read_crlf_line<R: BufRead>(
+    reader: &mut R,
+    max_len: usize,
+) -> Result<Option<String>, HttpParseError> {
     let mut buf = Vec::new();
     loop {
         let available = reader.fill_buf()?;
@@ -273,27 +333,42 @@ fn read_crlf_line<R: BufRead>(reader: &mut R, max_len: usize) -> io::Result<Opti
             break;
         }
         if let Some(pos) = available.iter().position(|&b| b == b'\n') {
-            buf.extend_from_slice(&available[..=pos]);
+            // 在找到换行符的分支同样强制检查长度上限，避免单次 fill_buf 绕过 max_len。
+            let slice = &available[..=pos];
+            if buf.len().saturating_add(slice.len()) > max_len {
+                reader.consume(pos + 1);
+                return Err(HttpParseError::BadRequest("HTTP header line too long"));
+            }
+            buf.extend_from_slice(slice);
             reader.consume(pos + 1);
             break;
         }
         let len = available.len();
+        if buf.len().saturating_add(len) > max_len {
+            reader.consume(len);
+            return Err(HttpParseError::BadRequest("HTTP header line too long"));
+        }
         buf.extend_from_slice(available);
         reader.consume(len);
-        if buf.len() > max_len {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "HTTP header line too long",
-            ));
-        }
     }
-    while matches!(buf.last(), Some(b'\r' | b'\n')) {
+    if buf.last() == Some(&b'\n') {
         buf.pop();
+    }
+    if buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
+    // 拒绝行内裸回车符，防止请求走私与 HTTP 响应头拆分。
+    if buf.contains(&b'\r') {
+        return Err(HttpParseError::BadRequest(
+            "invalid bare CR in HTTP header line",
+        ));
     }
     Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
 }
 
-enum HttpParseError {
+/// HTTP 请求解析错误分类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpParseError {
     Io,
     BadRequest(&'static str),
     PayloadTooLarge,
@@ -312,13 +387,23 @@ fn read_chunked_body<R: BufRead>(reader: &mut R) -> Result<Vec<u8>, HttpParseErr
             return Err(HttpParseError::Io);
         };
         let hex_part = size_line.split(';').next().unwrap_or("").trim();
+        if hex_part.is_empty() {
+            return Err(HttpParseError::BadRequest("empty chunk size in HTTP body"));
+        }
         let chunk_len = usize::from_str_radix(hex_part, 16)
             .map_err(|_| HttpParseError::BadRequest("invalid chunk size in HTTP body"))?;
         if chunk_len == 0 {
-            // 读取并跳过尾部 chunked trailer 头直至遇到空行。
+            // 读取并跳过尾部 chunked trailer 头直至遇到空行，同时限制最大行数防止 DoS。
+            let mut trailer_count = 0usize;
             while let Some(trailer) = read_crlf_line(reader, 4096)? {
                 if trailer.is_empty() {
                     break;
+                }
+                trailer_count += 1;
+                if trailer_count > MAX_CHUNKED_TRAILERS {
+                    return Err(HttpParseError::BadRequest(
+                        "too many chunked trailer headers",
+                    ));
                 }
             }
             break;
@@ -332,12 +417,21 @@ fn read_chunked_body<R: BufRead>(reader: &mut R) -> Result<Vec<u8>, HttpParseErr
         }
         out.resize(next_len, 0);
         reader.read_exact(&mut out[start..next_len])?;
-        let _ = read_crlf_line(reader, 64)?;
+        // 严格校验每个 chunk 数据后的 CRLF 终止空行，防止 keep-alive 流错位。
+        match read_crlf_line(reader, 64)? {
+            Some(ref term) if term.is_empty() => {}
+            _ => {
+                return Err(HttpParseError::BadRequest(
+                    "invalid chunk terminator in HTTP body",
+                ));
+            }
+        }
     }
     Ok(out)
 }
 
-fn parse_http_request<R: BufRead>(
+/// 解析单条 HTTP/1.1 请求（支持 `Content-Length`、`Transfer-Encoding: chunked` 与安全头校验）。
+pub fn parse_http_request<R: BufRead>(
     reader: &mut R,
 ) -> Result<Option<ParsedHttpRequest>, HttpParseError> {
     let Some(request_line) = read_crlf_line(reader, 8192)? else {
@@ -354,13 +448,42 @@ fn parse_http_request<R: BufRead>(
     }
 
     let mut headers = HashMap::new();
+    let mut header_count = 0usize;
     while let Some(line) = read_crlf_line(reader, 16384)? {
         if line.is_empty() {
             break;
         }
-        if let Some((k, v)) = line.split_once(':') {
-            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+        header_count += 1;
+        if header_count > MAX_HTTP_HEADERS {
+            return Err(HttpParseError::BadRequest("too many HTTP headers"));
         }
+        let Some((k, v)) = line.split_once(':') else {
+            return Err(HttpParseError::BadRequest("malformed HTTP header line"));
+        };
+        let key = k.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return Err(HttpParseError::BadRequest("empty HTTP header name"));
+        }
+        let val = v.trim().to_string();
+        // 拒绝重复的安全与分帧关键头，防止通过后置头覆盖绕过 DNS 重绑定检查或造成请求走私。
+        if matches!(
+            key.as_str(),
+            "host" | "origin" | "content-length" | "transfer-encoding"
+        ) && headers.contains_key(&key)
+        {
+            return Err(HttpParseError::BadRequest(
+                "duplicate critical HTTP header",
+            ));
+        }
+        headers.insert(key, val);
+    }
+
+    let has_te = headers.contains_key("transfer-encoding");
+    let has_cl = headers.contains_key("content-length");
+    if has_te && has_cl {
+        return Err(HttpParseError::BadRequest(
+            "conflicting Transfer-Encoding and Content-Length headers",
+        ));
     }
 
     let body = if headers
@@ -394,7 +517,8 @@ fn parse_http_request<R: BufRead>(
     }))
 }
 
-fn write_http_response<W: Write>(
+/// 输出完整 HTTP/1.1 响应报文并刷新流。
+pub fn write_http_response<W: Write>(
     writer: &mut W,
     status_code: u16,
     reason: &str,
@@ -521,14 +645,8 @@ fn handle_client_connection(
             continue;
         }
 
-        // 3. 按 HTTP 方法分发请求
-        let session_id = req
-            .headers
-            .get("mcp-session-id")
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+        // 3. 按 HTTP 方法分发请求（清理并校验 Mcp-Session-Id 防止响应头注入）
+        let session_id = sanitize_session_id(req.headers.get("mcp-session-id").map(String::as_str));
 
         match req.method.as_str() {
             "OPTIONS" => {
@@ -704,6 +822,7 @@ impl McpHttpServerHandle {
         let host_bg = clean_host.clone();
         let path_bg = clean_path.clone();
 
+        let active_conns = Arc::new(AtomicUsize::new(0));
         let join_handle = thread::Builder::new()
             .name("tracedesk-mcp-http".to_string())
             .spawn(move || {
@@ -711,19 +830,36 @@ impl McpHttpServerHandle {
                     if shutdown_bg.load(Ordering::Relaxed) {
                         break;
                     }
-                    let Ok(stream) = incoming else {
+                    let Ok(mut stream) = incoming else {
                         if shutdown_bg.load(Ordering::Relaxed) {
                             break;
                         }
+                        continue;
+                    };
+                    let Some(permit) =
+                        HttpConnectionPermit::try_acquire(&active_conns, MAX_CONCURRENT_HTTP_CONNS)
+                    else {
+                        let _ = write_http_response(
+                            &mut stream,
+                            503,
+                            "Service Unavailable",
+                            Some("application/json; charset=utf-8"),
+                            &[],
+                            b"{\"error\":\"Too many concurrent HTTP connections\"}",
+                            true,
+                        );
                         continue;
                     };
                     let srv = Arc::clone(&server_arc);
                     let h = host_bg.clone();
                     let p = path_bg.clone();
                     let sd = Arc::clone(&shutdown_bg);
-                    thread::spawn(move || {
-                        handle_client_connection(stream, srv, h, actual_port, p, sd);
-                    });
+                    let _ = thread::Builder::new()
+                        .name("tracedesk-mcp-http-conn".to_string())
+                        .spawn(move || {
+                            let _permit = permit;
+                            handle_client_connection(stream, srv, h, actual_port, p, sd);
+                        });
                 }
             })?;
 
@@ -766,8 +902,17 @@ impl McpHttpServerHandle {
     pub fn stop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         if let Some(handle) = self.join_handle.take() {
-            // 发起一次本机回环连接，立即唤醒阻塞中的 `accept()`。
-            let _ = TcpStream::connect_timeout(&self.bind_addr, Duration::from_millis(50));
+            // 发起本机回环连接以立即唤醒阻塞中的 `accept()`；若首次尝试未能立即唤醒则短时重试避免 join 卡死。
+            for _ in 0..10 {
+                if handle.is_finished() {
+                    break;
+                }
+                let _ = TcpStream::connect_timeout(&self.bind_addr, Duration::from_millis(50));
+                if handle.is_finished() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(15));
+            }
             let _ = handle.join();
         }
     }

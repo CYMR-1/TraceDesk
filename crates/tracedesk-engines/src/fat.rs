@@ -315,13 +315,23 @@ pub fn map_fat_regions(
     };
 
     let max_slots = geom.max_dir_slots();
+    let dir_area_base = geom.base + geom.directory_sector * geom.sector;
+    let dir_area_end = geom.base + geom.total_sectors * geom.sector;
+    // 为 32 字节 FAT 目录项读取建立 64 KiB 分页 LRU 缓存，避免大卷上产生数十万次 ReadFile 系统调用。
+    let mut dir_pages: LruCache<u64, Vec<u8>> =
+        LruCache::new(NonZeroUsize::new(FAT_PAGE_CACHE_CAP).expect("non-zero"));
     let mut record = [0u8; 32];
 
     for (index, entry) in entries.iter_mut().enumerate() {
         if index.is_multiple_of(1024) && cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return Err(EngineError::Cancelled("已取消建立索引".to_string()));
         }
-        if !(entry.mode.starts_with("r/") || entry.mode.starts_with("d/")) {
+        let is_active_file_or_dir = entry.mode.starts_with("r/") || entry.mode.starts_with("d/");
+        let is_deleted_file_or_dir = entry.deleted
+            && (is_active_file_or_dir
+                || entry.mode.starts_with("-/r")
+                || entry.mode.starts_with("-/d"));
+        if !is_active_file_or_dir && !is_deleted_file_or_dir {
             continue;
         }
         let inode_num = entry
@@ -334,8 +344,28 @@ pub fn map_fat_regions(
         if slot >= max_slots {
             return Err(EngineError::Fat("FAT 目录项超出分区边界".to_string()));
         }
-        file_read_exact_at(&file, geom.dir_entry_offset(slot), &mut record)
-            .map_err(|_| EngineError::Fat("无法完整读取 FAT 目录项".to_string()))?;
+        let rel_off = slot * 32;
+        let page_idx = rel_off / (FAT_PAGE_SIZE as u64);
+        let in_page = (rel_off % (FAT_PAGE_SIZE as u64)) as usize;
+        if let Some(page) = dir_pages.get(&page_idx) {
+            if in_page + 32 > page.len() {
+                return Err(EngineError::Fat("无法完整读取 FAT 目录项".to_string()));
+            }
+            record.copy_from_slice(&page[in_page..in_page + 32]);
+        } else {
+            let page_start = dir_area_base + page_idx * (FAT_PAGE_SIZE as u64);
+            let page_len = dir_area_end
+                .saturating_sub(page_start)
+                .min(FAT_PAGE_SIZE as u64) as usize;
+            if in_page + 32 > page_len {
+                return Err(EngineError::Fat("无法完整读取 FAT 目录项".to_string()));
+            }
+            let mut page = vec![0u8; page_len];
+            file_read_exact_at(&file, page_start, &mut page)
+                .map_err(|_| EngineError::Fat("无法完整读取 FAT 目录项".to_string()))?;
+            record.copy_from_slice(&page[in_page..in_page + 32]);
+            dir_pages.put(page_idx, page);
+        }
 
         if (record[11] & 0x08) != 0 {
             continue;

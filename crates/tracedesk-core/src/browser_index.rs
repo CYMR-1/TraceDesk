@@ -3,8 +3,73 @@
 
 use std::collections::{HashMap, HashSet};
 
+use memchr::memchr2;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracedesk_engines::{InventoryEntry, entry_name, entry_status};
+
+/// 零堆分配 ASCII 大小写不敏感后缀匹配（`needle_lower` 须为全小写 ASCII）。
+#[inline]
+fn ends_with_ascii_icase(haystack: &[u8], needle_lower: &[u8]) -> bool {
+    if needle_lower.len() > haystack.len() {
+        return false;
+    }
+    let tail = &haystack[haystack.len() - needle_lower.len()..];
+    tail.iter()
+        .zip(needle_lower.iter())
+        .all(|(&h, &n)| h.to_ascii_lowercase() == n)
+}
+
+/// 零堆分配 ASCII 大小写不敏感子串匹配（使用 SIMD `memchr2` 加速首字节跳跃）。
+#[inline]
+fn contains_ascii_icase(haystack: &[u8], needle_lower: &[u8]) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    if needle_lower.len() > haystack.len() {
+        return false;
+    }
+    let first_lo = needle_lower[0];
+    let first_hi = first_lo.to_ascii_uppercase();
+    let max_start = haystack.len() - needle_lower.len();
+    let mut pos = 0usize;
+    while pos <= max_start {
+        let Some(rel) = memchr2(first_lo, first_hi, &haystack[pos..=max_start]) else {
+            return false;
+        };
+        let idx = pos + rel;
+        if haystack[idx + 1..idx + needle_lower.len()]
+            .iter()
+            .zip(&needle_lower[1..])
+            .all(|(&h, &n)| h.to_ascii_lowercase() == n)
+        {
+            return true;
+        }
+        pos = idx + 1;
+    }
+    false
+}
+
+/// 零堆分配的路径前缀匹配（忽略首尾斜杠、将 `\` 视作 `/` 并按 ASCII 大小写不敏感比较）。
+#[inline]
+fn matches_ascii_path_prefix(raw_path: &str, prefix_lower: &[u8]) -> bool {
+    let trimmed = raw_path.trim_matches(['/', '\\']).as_bytes();
+    if trimmed.len() < prefix_lower.len() {
+        return false;
+    }
+    let head_ok = trimmed[..prefix_lower.len()]
+        .iter()
+        .zip(prefix_lower.iter())
+        .all(|(&h, &p)| {
+            let norm = if h == b'\\' { b'/' } else { h.to_ascii_lowercase() };
+            norm == p
+        });
+    if !head_ok {
+        return false;
+    }
+    trimmed.len() == prefix_lower.len()
+        || matches!(trimmed[prefix_lower.len()], b'/' | b'\\')
+}
 
 /// 分页文件列表的默认每页条数。
 pub const DEFAULT_PAGE_SIZE: usize = 100;
@@ -156,51 +221,94 @@ pub struct EntryLocation {
 #[derive(Debug, Clone, Default)]
 pub struct BrowserIndex {
     ordered: Vec<InventoryEntry>,
-    branches: HashMap<(u64, String), Vec<TreeBranchItem>>,
-    children: HashMap<(u64, String), Vec<usize>>,
+    branches: HashMap<u64, HashMap<String, Vec<TreeBranchItem>>>,
+    children: HashMap<u64, HashMap<String, Vec<usize>>>,
 }
 
 impl BrowserIndex {
     /// 从未排序的 [`InventoryEntry`] 记录切片构建 [`BrowserIndex`]。
     pub fn build(entries: &[InventoryEntry]) -> Self {
-        let mut ordered = entries.to_vec();
-        ordered.sort_by(cmp_canonical);
+        // 预先一次性计算斜杠深度与系统项标记，结合原始下标作为稳定平局键进行多核并行排序，
+        // 避免在 O(N log N) 比较中反复扫描路径字符串。
+        let mut keyed: Vec<(usize, u32, bool)> = entries
+            .iter()
+            .enumerate()
+            .map(|(idx, row)| {
+                let depth = row.path.bytes().filter(|&b| b == b'/').count() as u32;
+                let is_sys = row.mode.len() >= 2 && row.mode.as_bytes()[..2].eq_ignore_ascii_case(b"v/");
+                (idx, depth, is_sys)
+            })
+            .collect();
+        keyed.par_sort_unstable_by(|&(ia, da, sa), &(ib, db, sb)| {
+            let a = &entries[ia];
+            let b = &entries[ib];
+            (a.offset, da, sa, !a.directory, a.path.as_str(), a.deleted, ia).cmp(&(
+                b.offset,
+                db,
+                sb,
+                !b.directory,
+                b.path.as_str(),
+                b.deleted,
+                ib,
+            ))
+        });
+        let ordered: Vec<InventoryEntry> = keyed
+            .into_iter()
+            .map(|(idx, _, _)| entries[idx].clone())
+            .collect();
 
-        let mut directories: HashSet<(u64, String)> = HashSet::new();
+        let mut directories: HashMap<u64, HashSet<String>> = HashMap::new();
         for row in &ordered {
             if row.directory {
-                directories.insert((row.offset, row.path.trim_matches('/').to_string()));
+                directories
+                    .entry(row.offset)
+                    .or_default()
+                    .insert(row.path.trim_matches('/').to_string());
             }
         }
 
-        let mut branches: HashMap<(u64, String), Vec<TreeBranchItem>> = HashMap::new();
-        let mut children: HashMap<(u64, String), Vec<usize>> = HashMap::new();
+        let mut branches: HashMap<u64, HashMap<String, Vec<TreeBranchItem>>> = HashMap::new();
+        let mut children: HashMap<u64, HashMap<String, Vec<usize>>> = HashMap::new();
 
         for (idx, row) in ordered.iter().enumerate() {
             let offset = row.offset;
             let trimmed = row.path.trim_matches('/');
-            let mut parent = parent_dir(trimmed).to_string();
+            let parent_slice = parent_dir(trimmed);
 
-            children.entry((offset, parent.clone())).or_default().push(idx);
-            branches
-                .entry((offset, parent.clone()))
-                .or_default()
-                .push(TreeBranchItem {
-                    path: trimmed.to_string(),
-                    entry_index: Some(idx),
-                });
+            // 按 `&str` 优先查找已有父目录槽位，命中时零堆分配，仅首次遇到新目录时分配键名。
+            let part_children = children.entry(offset).or_default();
+            if let Some(list) = part_children.get_mut(parent_slice) {
+                list.push(idx);
+            } else {
+                part_children.insert(parent_slice.to_string(), vec![idx]);
+            }
 
-            while !parent.is_empty() && !directories.contains(&(offset, parent.clone())) {
-                directories.insert((offset, parent.clone()));
-                let ancestor = parent_dir(&parent).to_string();
-                branches
-                    .entry((offset, ancestor.clone()))
-                    .or_default()
-                    .push(TreeBranchItem {
-                        path: parent,
-                        entry_index: None,
-                    });
-                parent = ancestor;
+            let part_branches = branches.entry(offset).or_default();
+            let item = TreeBranchItem {
+                path: trimmed.to_string(),
+                entry_index: Some(idx),
+            };
+            if let Some(list) = part_branches.get_mut(parent_slice) {
+                list.push(item);
+            } else {
+                part_branches.insert(parent_slice.to_string(), vec![item]);
+            }
+
+            let dir_set = directories.entry(offset).or_default();
+            let mut cur_parent = parent_slice;
+            while !cur_parent.is_empty() && !dir_set.contains(cur_parent) {
+                dir_set.insert(cur_parent.to_string());
+                let ancestor = parent_dir(cur_parent);
+                let virtual_item = TreeBranchItem {
+                    path: cur_parent.to_string(),
+                    entry_index: None,
+                };
+                if let Some(list) = part_branches.get_mut(ancestor) {
+                    list.push(virtual_item);
+                } else {
+                    part_branches.insert(ancestor.to_string(), vec![virtual_item]);
+                }
+                cur_parent = ancestor;
             }
         }
 
@@ -228,14 +336,22 @@ impl BrowserIndex {
 
     /// 获取 `(offset, scope_path)` 下的原始分支条目（含虚拟祖先目录）。
     pub fn branch_items(&self, offset: u64, scope_path: &str) -> &[TreeBranchItem] {
-        let key = (offset, normalize_scope_path(scope_path));
-        self.branches.get(&key).map(Vec::as_slice).unwrap_or(&[])
+        let norm = normalize_scope_path(scope_path);
+        self.branches
+            .get(&offset)
+            .and_then(|m| m.get(norm.as_str()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// 获取 `(offset, scope_path)` 下的直接实际子条目 ID 列表。
     pub fn direct_children(&self, offset: u64, scope_path: &str) -> &[usize] {
-        let key = (offset, normalize_scope_path(scope_path));
-        self.children.get(&key).map(Vec::as_slice).unwrap_or(&[])
+        let norm = normalize_scope_path(scope_path);
+        self.children
+            .get(&offset)
+            .and_then(|m| m.get(norm.as_str()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// 延迟展开 `(offset, scope_path)` 的目录树子节点。
@@ -250,7 +366,11 @@ impl BrowserIndex {
         group_index: Option<usize>,
     ) -> TreeChildrenPage {
         let norm_scope = normalize_scope_path(scope_path);
-        let items = self.branch_items(offset, &norm_scope);
+        let part_branches = self.branches.get(&offset);
+        let items = part_branches
+            .and_then(|m| m.get(norm_scope.as_str()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
         let total_children = items.len();
 
         if total_children > TREE_GROUP_THRESHOLD && group_index.is_none() {
@@ -310,8 +430,8 @@ impl BrowserIndex {
                         };
                         name.push_str(&format!("  [已删除 · {ino}]"));
                     }
-                    let has_children =
-                        row.directory && self.branches.contains_key(&(offset, item.path.clone()));
+                    let has_children = row.directory
+                        && part_branches.is_some_and(|m| m.contains_key(item.path.as_str()));
                     TreeNodeDto {
                         label: name,
                         path: item.path.clone(),
@@ -328,7 +448,8 @@ impl BrowserIndex {
                 }
                 None => {
                     let name = leaf_name(&item.path);
-                    let has_children = self.branches.contains_key(&(offset, item.path.clone()));
+                    let has_children =
+                        part_branches.is_some_and(|m| m.contains_key(item.path.as_str()));
                     TreeNodeDto {
                         label: if name.is_empty() {
                             "/".to_string()
@@ -375,27 +496,28 @@ impl BrowserIndex {
                 s
             }
         };
+        let suffix_is_ascii = suffix_clean.is_ascii();
         let keyword_clean = filter.keyword.trim().to_lowercase();
+        let keyword_is_ascii = keyword_clean.is_ascii();
         let prefix_clean = filter
             .path_prefix
             .as_deref()
             .map(normalize_scope_path)
             .filter(|s| !s.is_empty())
             .map(|s| s.to_lowercase());
+        let prefix_is_ascii = prefix_clean.as_deref().is_some_and(str::is_ascii);
+        // 预先构造 `"{pfx}/"` 避免在热循环中对每条记录重复分配。
+        let prefix_with_slash = prefix_clean.as_ref().map(|p| format!("{p}/"));
 
         let scope_path_norm = filter.scope_path.as_deref().map(normalize_scope_path);
+        let scoped_direct = match (filter.scope_offset, scope_path_norm.as_deref()) {
+            (Some(off), Some(sp)) => Some(self.direct_children(off, sp)),
+            _ => None,
+        };
 
-        let candidate_ids: Vec<usize> =
-            if let (Some(off), Some(sp)) = (filter.scope_offset, &scope_path_norm) {
-                self.direct_children(off, sp).to_vec()
-            } else {
-                (0..self.ordered.len()).collect()
-            };
-
-        let matched: Vec<usize> = candidate_ids
-            .into_iter()
-            .filter(|&idx| {
-                let row = &self.ordered[idx];
+        let matches_entry = |idx: usize| -> bool {
+            let row = &self.ordered[idx];
+            if scoped_direct.is_none() {
                 if let Some(off) = filter.scope_offset
                     && row.offset != off
                 {
@@ -406,55 +528,95 @@ impl BrowserIndex {
                 {
                     return false;
                 }
-                if filter.files_only && (row.directory || row.mode.starts_with("V/")) {
+            }
+            if filter.files_only && (row.directory || row.mode.starts_with("V/")) {
+                return false;
+            }
+            match filter.status {
+                StatusFilter::All => {}
+                StatusFilter::ActiveFile => {
+                    if row.deleted
+                        || row.directory
+                        || (row.mode.len() >= 2
+                            && row.mode.as_bytes()[..2].eq_ignore_ascii_case(b"v/"))
+                    {
+                        return false;
+                    }
+                }
+                StatusFilter::ActiveStatus => {
+                    if entry_status(row) != "现存" {
+                        return false;
+                    }
+                }
+                StatusFilter::Deleted => {
+                    if !row.deleted {
+                        return false;
+                    }
+                }
+                StatusFilter::System => {
+                    if !(row.mode.starts_with("v/") || row.mode.starts_with("V/")) {
+                        return false;
+                    }
+                }
+            }
+            if let Some(ref pfx) = prefix_clean {
+                if prefix_is_ascii {
+                    if !matches_ascii_path_prefix(&row.path, pfx.as_bytes()) {
+                        return false;
+                    }
+                } else {
+                    let row_norm = normalize_scope_path(&row.path).to_lowercase();
+                    let pfx_slash = prefix_with_slash.as_deref().unwrap_or("");
+                    if row_norm != *pfx && !row_norm.starts_with(pfx_slash) {
+                        return false;
+                    }
+                }
+            }
+            let mut cached_path_lc: Option<String> = None;
+            if !suffix_clean.is_empty() {
+                let ok = if suffix_is_ascii {
+                    ends_with_ascii_icase(row.path.as_bytes(), suffix_clean.as_bytes())
+                } else {
+                    let lc = cached_path_lc.get_or_insert_with(|| row.path.to_lowercase());
+                    lc.ends_with(&suffix_clean)
+                };
+                if !ok {
                     return false;
                 }
-                match filter.status {
-                    StatusFilter::All => {}
-                    StatusFilter::ActiveFile => {
-                        if row.deleted
-                            || row.directory
-                            || (row.mode.len() >= 2
-                                && row.mode.as_bytes()[..2].eq_ignore_ascii_case(b"v/"))
+            }
+            if !keyword_clean.is_empty() {
+                if keyword_is_ascii {
+                    if !contains_ascii_icase(row.path.as_bytes(), keyword_clean.as_bytes()) {
+                        // 仅当系统条目（`v/`）可能具有友好展示名（如 `FAT 1 ($FAT1)`）时再构造 `entry_name`。
+                        if !row.mode.starts_with("v/")
+                            || !contains_ascii_icase(
+                                entry_name(row).as_bytes(),
+                                keyword_clean.as_bytes(),
+                            )
                         {
                             return false;
                         }
                     }
-                    StatusFilter::ActiveStatus => {
-                        if entry_status(row) != "现存" {
-                            return false;
-                        }
-                    }
-                    StatusFilter::Deleted => {
-                        if !row.deleted {
-                            return false;
-                        }
-                    }
-                    StatusFilter::System => {
-                        if !(row.mode.starts_with("v/") || row.mode.starts_with("V/")) {
-                            return false;
-                        }
-                    }
-                }
-                if let Some(ref pfx) = prefix_clean {
-                    let row_norm = normalize_scope_path(&row.path).to_lowercase();
-                    if row_norm != *pfx && !row_norm.starts_with(&format!("{pfx}/")) {
+                } else {
+                    let lc = cached_path_lc.get_or_insert_with(|| row.path.to_lowercase());
+                    if !lc.contains(&keyword_clean)
+                        && (!row.mode.starts_with("v/")
+                            || !entry_name(row).to_lowercase().contains(&keyword_clean))
+                    {
                         return false;
                     }
                 }
-                if !suffix_clean.is_empty() && !row.path.to_lowercase().ends_with(&suffix_clean) {
-                    return false;
-                }
-                if !keyword_clean.is_empty() {
-                    let path_lc = row.path.to_lowercase();
-                    let name_lc = entry_name(row).to_lowercase();
-                    if !path_lc.contains(&keyword_clean) && !name_lc.contains(&keyword_clean) {
-                        return false;
-                    }
-                }
-                true
-            })
-            .collect();
+            }
+            true
+        };
+
+        // 惰性遍历候选集合，避免为全量扫描额外分配 `0..ordered.len()` 临时向量。
+        let matched: Vec<usize> = match scoped_direct {
+            Some(ids) => ids.iter().copied().filter(|&idx| matches_entry(idx)).collect(),
+            None => (0..self.ordered.len())
+                .filter(|&idx| matches_entry(idx))
+                .collect(),
+        };
 
         let total = matched.len();
         let total_pages = if total == 0 {
@@ -485,7 +647,8 @@ impl BrowserIndex {
         let row = self.ordered.get(entry_id)?;
         let scope_path = parent_dir(row.path.trim_matches('/')).to_string();
         let siblings = self.direct_children(row.offset, &scope_path);
-        let pos = siblings.iter().position(|&id| id == entry_id)?;
+        // `direct_children` 按 `ordered` 升序插入，使用二分查找将定位复杂度降至 O(log N)。
+        let pos = siblings.binary_search(&entry_id).ok()?;
         let ps = page_size.max(1);
         Some(EntryLocation {
             scope_offset: row.offset,

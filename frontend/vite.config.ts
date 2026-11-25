@@ -19,9 +19,22 @@ export default defineConfig({
     assetsInlineLimit: 4096,
     rollupOptions: {
       output: {
-        manualChunks: {
-          react: ['react', 'react-dom'],
-          tauri: ['@tauri-apps/api', '@tauri-apps/plugin-dialog'],
+        // 按依赖目录稳定分包，避免 React 19 子入口（react-dom/client、scheduler）落入主业务包
+        manualChunks(id) {
+          if (
+            id.includes('/node_modules/react/') ||
+            id.includes('/node_modules/react-dom/') ||
+            id.includes('/node_modules/scheduler/') ||
+            id.includes('\\node_modules\\react\\') ||
+            id.includes('\\node_modules\\react-dom\\') ||
+            id.includes('\\node_modules\\scheduler\\')
+          ) {
+            return 'react';
+          }
+          if (id.includes('/node_modules/@tauri-apps/') || id.includes('\\node_modules\\@tauri-apps\\')) {
+            return 'tauri';
+          }
+          return undefined;
         },
       },
     },

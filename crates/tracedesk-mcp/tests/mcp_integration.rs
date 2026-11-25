@@ -936,8 +936,9 @@ fn test_stdio_jsonrpc_and_subprocess_end_to_end() {
     assert_eq!(call_data["total"].as_u64(), Some(1));
     assert_eq!(call_data["items"][0]["number"].as_str(), Some("MCP-STDIO"));
 
-    // 2. 启动真实 `tracedesk-mcp.exe` 子进程并通过 stdio 进行端到端通信
+    // 2. 启动真实 `tracedesk-mcp.exe` 子进程并通过 stdio 进行端到端通信（将遥测日志隔离到临时目录）
     let exe = env!("CARGO_BIN_EXE_tracedesk-mcp");
+    let logs_dir = tmp.path().join("logs");
     let mut child = Command::new(exe)
         .args([
             "--transport",
@@ -945,6 +946,7 @@ fn test_stdio_jsonrpc_and_subprocess_end_to_end() {
             "--cases-dir",
             &cases_dir.to_string_lossy(),
         ])
+        .env("TRACEDESK_LOGS_DIR", &logs_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1051,7 +1053,11 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
     );
 
     let port = free_local_port();
-    let manager = LocalHttpMcpManager::new(Some(cases_dir.clone()), None);
+    let isolated_sink = std::sync::Arc::new(FileActivitySink::new(
+        tmp.path().join("logs").join(ACTIVITY_LOG_FILENAME),
+    ));
+    let manager = LocalHttpMcpManager::new(Some(cases_dir.clone()), None)
+        .with_activity_sink(std::sync::Arc::clone(&isolated_sink) as _);
     let url = manager
         .start("127.0.0.1", port, "/mcp")
         .expect("start http server");
@@ -1064,7 +1070,8 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
     assert_eq!(snap.tools.len(), 19);
 
     // 第二个管理器尝试绑定同一端口时必须返回端口占用错误
-    let manager2 = LocalHttpMcpManager::new(Some(cases_dir), None);
+    let manager2 =
+        LocalHttpMcpManager::new(Some(cases_dir), None).with_activity_sink(isolated_sink);
     let port_err = manager2.start("127.0.0.1", port, "/mcp").unwrap_err();
     assert!(
         port_err.to_string().contains("占用"),
@@ -1421,7 +1428,11 @@ fn test_mcp_caller_identity_stdio_http_headers_and_actor_combination() {
 
     // 2. streamable-http 传输：验证 Mcp-Session-Id 隔离、无 session 回退、HTTP 头优先级与 --actor 合并。
     let port = free_local_port();
-    let http_server = McpServer::new(Some(cases_dir.clone()), None);
+    let http_server = McpServer::new(Some(cases_dir.clone()), None).with_activity_sink(
+        std::sync::Arc::new(FileActivitySink::new(
+            tmp.path().join("logs").join(ACTIVITY_LOG_FILENAME),
+        )),
+    );
     let mut handle = McpHttpServerHandle::start(http_server, "127.0.0.1", port, "/mcp")
         .expect("启动本地 HTTP MCP 服务");
     let host_hdr = format!("127.0.0.1:{port}");
@@ -1633,7 +1644,10 @@ fn test_mcp_caller_identity_stdio_http_headers_and_actor_combination() {
 
     // 3. 独立 HTTP 服务实例：校验非通用 User-Agent 回退、通用 curl UA 忽略以及 --actor 默认操作人合并。
     let port2 = free_local_port();
-    let actor_server = McpServer::new(Some(cases_dir.clone()), Some("王五".to_string()));
+    let actor_server = McpServer::new(Some(cases_dir.clone()), Some("王五".to_string()))
+        .with_activity_sink(std::sync::Arc::new(FileActivitySink::new(
+            tmp.path().join("logs").join(ACTIVITY_LOG_FILENAME),
+        )));
     let mut handle2 = McpHttpServerHandle::start(actor_server, "127.0.0.1", port2, "/mcp")
         .expect("启动带默认 actor 的 HTTP MCP 服务");
     let host_hdr2 = format!("127.0.0.1:{port2}");
@@ -2058,4 +2072,228 @@ fn test_stdio_and_http_activity_telemetry_lifecycle_and_jsonl_tailing() {
     );
     // 校验所有记录均为合法 McpActivityRecord 并按 camelCase 序列化。
     let _: McpActivityRecord = snapshot.activities[0].clone();
+}
+
+#[test]
+fn test_http_hardening_client_registry_and_input_validation_regressions() {
+    use std::sync::Arc;
+    use tracedesk_mcp::{HttpParseError, parse_http_request, sanitize_session_id};
+
+    // 1. `sanitize_session_id` 必须拦截含控制字符/空白或超长的会话 ID，防止响应头注入。
+    let clean_sid = sanitize_session_id(Some("valid-session_123"));
+    assert_eq!(clean_sid, "valid-session_123");
+    let injected_sid = sanitize_session_id(Some("abc\rX-Evil: 1"));
+    assert_ne!(injected_sid, "abc\rX-Evil: 1");
+    assert!(!injected_sid.contains('\r') && !injected_sid.contains('\n'));
+    let too_long = "a".repeat(200);
+    let sanitized_long = sanitize_session_id(Some(&too_long));
+    assert!(sanitized_long.len() <= 128);
+
+    // 2. HTTP 解析器安全加固：重复关键头、冲突分帧头、裸 CR、单缓冲超长行、非法 chunk 终止符均须返回 400。
+    let dup_host = b"POST /mcp HTTP/1.1\r\nHost: evil.com\r\nHost: 127.0.0.1:8765\r\nContent-Length: 2\r\n\r\n{}";
+    assert!(matches!(
+        parse_http_request(&mut BufReader::new(Cursor::new(dup_host.as_slice()))),
+        Err(HttpParseError::BadRequest(_))
+    ));
+
+    let dup_origin = b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nOrigin: https://evil.com\r\nOrigin: http://127.0.0.1:8765\r\nContent-Length: 2\r\n\r\n{}";
+    assert!(matches!(
+        parse_http_request(&mut BufReader::new(Cursor::new(dup_origin.as_slice()))),
+        Err(HttpParseError::BadRequest(_))
+    ));
+
+    let te_and_cl = b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nTransfer-Encoding: chunked\r\nContent-Length: 2\r\n\r\n0\r\n\r\n";
+    assert!(matches!(
+        parse_http_request(&mut BufReader::new(Cursor::new(te_and_cl.as_slice()))),
+        Err(HttpParseError::BadRequest(_))
+    ));
+
+    let bare_cr = b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nMcp-Session-Id: a\rX-Injected: 1\r\nContent-Length: 2\r\n\r\n{}";
+    assert!(matches!(
+        parse_http_request(&mut BufReader::new(Cursor::new(bare_cr.as_slice()))),
+        Err(HttpParseError::BadRequest(_))
+    ));
+
+    let bad_chunk_term = b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}GARBAGE\r\n0\r\n\r\n";
+    assert!(matches!(
+        parse_http_request(&mut BufReader::new(Cursor::new(bad_chunk_term.as_slice()))),
+        Err(HttpParseError::BadRequest(_))
+    ));
+
+    let overlong_chunk_size = format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nTransfer-Encoding: chunked\r\n\r\n0;{}\r\n\r\n",
+        "x".repeat(1200)
+    );
+    assert!(matches!(
+        parse_http_request(&mut BufReader::new(Cursor::new(overlong_chunk_size.as_bytes()))),
+        Err(HttpParseError::BadRequest(_))
+    ));
+
+    // 3. JSON-RPC 2.0 缺少 `method` 与 `id` 的非法对象 `{}` 应返回 `-32600`（而非静默吞掉）。
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cases_dir = tmp.path().join("cases");
+    let log_path = tmp.path().join("logs").join(ACTIVITY_LOG_FILENAME);
+    let server = McpServer::new(Some(cases_dir.clone()), None)
+        .with_activity_sink(Arc::new(FileActivitySink::new(log_path.clone())));
+    let invalid_resp = server
+        .handle_jsonrpc_value(json!({}))
+        .expect("empty object must yield -32600");
+    assert_eq!(invalid_resp["error"]["code"].as_i64(), Some(-32600));
+
+    // 4. `ClientRegistry` 回归：非通用 User-Agent 优先于其他会话的 `last_initialized`，
+    //    且会话 `DELETE` 移除后清理该会话设置的 `last_initialized`，防止跨会话误归因。
+    let port = free_local_port();
+    let http_server = McpServer::new(Some(cases_dir.clone()), None)
+        .with_activity_sink(Arc::new(FileActivitySink::new(log_path)));
+    let mut handle = McpHttpServerHandle::start(http_server, "127.0.0.1", port, "/mcp")
+        .expect("start isolated http server");
+    let host_hdr = format!("127.0.0.1:{port}");
+
+    // 4a. 会话 A 初始化为 "Cursor"
+    let init_body = serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "protocolVersion": "2025-03-26", "clientInfo": { "name": "Cursor", "version": "1.0" } }
+    }))
+    .unwrap();
+    let (code_init, hdrs_init, _) = send_http(
+        port,
+        "POST",
+        "/mcp",
+        &[("Host", &host_hdr), ("Content-Type", "application/json")],
+        &init_body,
+    );
+    assert_eq!(code_init, 200);
+    let sid_a = hdrs_init
+        .get("mcp-session-id")
+        .cloned()
+        .expect("session id A");
+
+    // 4b. 未初始化客户端 B 携带非通用 User-Agent `AuditBot/2.0` 建案 -> 审计来源必须归因为 `AuditBot` 而非 `Cursor`。
+    let create_b = serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedesk_create_case",
+            "arguments": {
+                "number": "UA-PRIO-01",
+                "examiner": "测试员",
+                "target": "UA 优先级测试",
+                "response_format": "json"
+            }
+        }
+    }))
+    .unwrap();
+    let (code_b, _, body_b) = send_http(
+        port,
+        "POST",
+        "/mcp",
+        &[
+            ("Host", &host_hdr),
+            ("Content-Type", "application/json"),
+            ("User-Agent", "AuditBot/2.0"),
+        ],
+        &create_b,
+    );
+    assert_eq!(code_b, 200);
+    let rpc_b: Value = serde_json::from_str(&body_b).unwrap();
+    let res_b: Value = serde_json::from_str(rpc_b["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(res_b["mcp_client"].as_str(), Some("AuditBot"));
+
+    // 4c. 结束会话 A（DELETE）后，无标识客户端 C 不得继承已销毁的 `Cursor` 身份，应回退为默认标签。
+    let (code_del, _, _) = send_http(
+        port,
+        "DELETE",
+        "/mcp",
+        &[("Host", &host_hdr), ("Mcp-Session-Id", &sid_a)],
+        "",
+    );
+    assert_eq!(code_del, 200);
+    let create_c = serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedesk_create_case",
+            "arguments": {
+                "number": "NO-STALE-01",
+                "examiner": "测试员",
+                "target": "会话清理防串号",
+                "response_format": "json"
+            }
+        }
+    }))
+    .unwrap();
+    let (code_c, _, body_c) = send_http(
+        port,
+        "POST",
+        "/mcp",
+        &[("Host", &host_hdr), ("Content-Type", "application/json")],
+        &create_c,
+    );
+    assert_eq!(code_c, 200);
+    let rpc_c: Value = serde_json::from_str(&body_c).unwrap();
+    let res_c: Value = serde_json::from_str(rpc_c["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(res_c["mcp_client"].as_str(), Some(DEFAULT_MCP_CLIENT_LABEL));
+    handle.stop();
+
+    // 5. `search_content` 保留文本检索首尾空格 + `preview_file` 只读缓存快路径 + `build_review_bundle` 拒绝 0 序号。
+    let (img_path, _) = prepare_demo_image(&tmp.path().join("evidence"));
+    let created = call_json(
+        &server,
+        "tracedesk_create_case",
+        json!({"number": "VAL-01", "examiner": "测试员", "target": "校验回归"}),
+    );
+    let case_dir = created["case_dir"].as_str().unwrap().to_string();
+    call_json(
+        &server,
+        "tracedesk_load_image",
+        json!({"case_dir": case_dir, "image_path": img_path.to_string_lossy(), "scan_all": true}),
+    );
+
+    // 含首尾空格的 UTF-8 检索词 `" forensic "` 在 `README.TXT`（"TraceDesk forensic demonstration."）中应精确命中且不丢失空格。
+    let space_search = call_json(
+        &server,
+        "tracedesk_search_content",
+        json!({
+            "case_dir": case_dir,
+            "query": " forensic ",
+            "encoding": "UTF-8"
+        }),
+    );
+    assert_eq!(space_search["query"].as_str(), Some(" forensic "));
+    assert_eq!(space_search["total"].as_u64(), Some(1));
+
+    // `preview_file` 只读缓存快路径连续读取内容正确。
+    let preview = call_json(
+        &server,
+        "tracedesk_preview_file",
+        json!({
+            "case_dir": case_dir,
+            "path": "README.TXT",
+            "page": 0,
+            "page_bytes": 64,
+            "encoding": "UTF-8",
+            "mode": "text"
+        }),
+    );
+    assert!(
+        preview["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("TraceDesk forensic demonstration")
+    );
+
+    // `build_review_bundle` 拒绝从 0 开始的非法导出/搜索序号。
+    let bad_bundle = server.call_tool(
+        "tracedesk_build_review_bundle",
+        json!({
+            "case_dir": case_dir,
+            "selected_export_indices": [0]
+        }),
+    );
+    assert!(bad_bundle.is_error);
+    assert!(bad_bundle.text().contains("从 1 开始"));
 }

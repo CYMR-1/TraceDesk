@@ -29,10 +29,10 @@ import {
   formatPhaseLabel,
   formatPrettyJson,
   formatTransportLabel,
-  stripTrailingVersion,
 } from '../utils/mcpActivity';
 
 interface McpMonitorModuleProps {
+  isActive: boolean;
   snapshot: CaseSnapshot | null;
   mcpStatus: McpStatus | null;
   activities: McpActivityRecord[];
@@ -56,7 +56,111 @@ interface ToolRowWithStats extends ToolCatalogItem {
   avgDurationMs: number;
 }
 
-export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
+/** 记忆化的单条 MCP 实时步骤行，避免新增事件或切换选中时重绘全部未变化卡片 */
+const McpStepRow: React.FC<{
+  item: McpActivityRecord;
+  isSelected: boolean;
+  onSelect: (callId: string) => void;
+}> = React.memo(({ item, isSelected, onSelect }) => {
+  const isRunning = item.phase === 'started';
+  const isFailed = item.phase === 'failed';
+  const clientName = item.client.trim() || '未知客户端';
+
+  return (
+    <div
+      role="option"
+      aria-selected={isSelected}
+      className={`td-mcp-step-row ${
+        isSelected ? 'td-mcp-step-row--selected' : ''
+      } ${isRunning ? 'td-mcp-step-row--running' : ''}`}
+      onClick={() => onSelect(item.callId)}
+    >
+      {/* 左侧状态指示轨与语义图标 */}
+      <div className="td-mcp-step-rail" aria-hidden="true">
+        {isRunning ? (
+          <span className="td-mcp-spinner" />
+        ) : isFailed ? (
+          <UiIcon
+            name="x_circle"
+            size={16}
+            color="var(--danger-fg)"
+            fill="var(--danger-bg)"
+          />
+        ) : (
+          <UiIcon
+            name="check_circle"
+            size={16}
+            color="var(--ok-fg)"
+            fill="var(--ok-bg)"
+          />
+        )}
+        <div className="td-mcp-step-rail-line" />
+      </div>
+
+      {/* 步骤内容主体 */}
+      <div className="td-mcp-step-main">
+        <div className="td-mcp-step-top">
+          <span className="td-mcp-step-time" title={item.timestamp}>
+            {formatActivityShortTime(item.timestamp)}
+          </span>
+          <span className="td-mcp-step-title" title={item.toolTitle}>
+            {item.toolTitle}
+          </span>
+          {item.toolName && (
+            <span className="td-mcp-step-rawname" title={item.toolName}>
+              {item.toolName}
+            </span>
+          )}
+          <span
+            className={`td-mcp-step-duration ${
+              isRunning
+                ? 'td-mcp-step-duration--running'
+                : isFailed
+                  ? 'td-mcp-step-duration--failed'
+                  : ''
+            }`}
+          >
+            {isRunning ? '执行中…' : formatDurationMs(item.durationMs)}
+          </span>
+        </div>
+
+        <div className="td-mcp-step-meta">
+          <SemanticPill text={`MCP · ${clientName}`} fallback="system" />
+          <SemanticPill text={formatTransportLabel(item.transport)} fallback="neutral" />
+          <SemanticPill
+            text={item.readOnly ? '只读' : '受控写入'}
+            fallback={item.readOnly ? 'ok' : 'warn'}
+          />
+          {item.caseNumber && (
+            <span
+              className="td-pill td-pill--neutral td-mono"
+              title={item.caseDir ?? item.caseNumber}
+            >
+              {item.caseNumber}
+            </span>
+          )}
+          {item.paramsSummary && (
+            <span className="td-mcp-step-params" title={item.paramsSummary}>
+              {item.paramsSummary}
+            </span>
+          )}
+        </div>
+
+        {(isFailed && item.error) || item.resultSummary ? (
+          <div
+            className={`td-mcp-step-outcome ${isFailed ? 'td-mcp-step-outcome--error' : ''}`}
+            title={isFailed && item.error ? item.error : item.resultSummary}
+          >
+            {isFailed && item.error ? `错误：${item.error}` : item.resultSummary}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+});
+
+const McpMonitorModuleInner: React.FC<McpMonitorModuleProps> = ({
+  isActive,
   snapshot,
   mcpStatus,
   activities,
@@ -68,8 +172,8 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
   onRefreshCurrentCase,
 }) => {
   const [subView, setSubView] = useState<SubViewKey>('stream');
-  const [port, setPort] = useState<number>(mcpStatus?.port ?? 8765);
   const [portInput, setPortInput] = useState<string>(String(mcpStatus?.port ?? 8765));
+  const [portEdited, setPortEdited] = useState<boolean>(false);
   const [actionBusy, setActionBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -90,6 +194,7 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
 
   const feedbackTimerRef = useRef<number | null>(null);
   const prevTopCallIdRef = useRef<string | null>(null);
+  const statusReqSeqRef = useRef(0);
 
   /** 短暂展示操作反馈文案 */
   const showFeedback = useCallback((text: string) => {
@@ -111,42 +216,53 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
     };
   }, []);
 
-  // 服务运行中时同步真实监听端口
+  // 服务运行中（或首次加载状态且用户尚未手动改端口）时同步真实监听端口
   useEffect(() => {
     if (mcpStatus?.running) {
-      setPort(mcpStatus.port);
+      setPortInput(String(mcpStatus.port));
+      setPortEdited(false);
+    } else if (mcpStatus && !portEdited) {
       setPortInput(String(mcpStatus.port));
     }
-  }, [mcpStatus?.running, mcpStatus?.port]);
+  }, [mcpStatus, portEdited]);
 
-  // 归一化后的活跃客户端名称（温和去尾版本号并去重）
+  // 统计字段中的活跃客户端在入队与统计时已完成去尾版本号规范化，此处直接去重复用
   const normalizedActiveClients = useMemo(() => {
     const set = new Set<string>();
     for (const raw of stats.activeClients) {
-      const clean = stripTrailingVersion(raw);
+      const clean = raw.trim();
       if (clean) set.add(clean);
     }
     return Array.from(set);
   }, [stats.activeClients]);
 
-  // 动态提取所有出现过的客户端名称用于筛选下拉（与活跃客户端保持同一去尾版本口径）
+  // 动态提取所有出现过的客户端名称用于筛选下拉（活动记录入队时已完成去尾版本清洗）
   const knownClients = useMemo(() => {
+    if (!isActive) return normalizedActiveClients;
     const set = new Set<string>(normalizedActiveClients);
     for (const item of activities) {
-      const clean = stripTrailingVersion(item.client);
+      const clean = item.client.trim();
       if (clean) set.add(clean);
     }
     return Array.from(set);
-  }, [activities, normalizedActiveClients]);
+  }, [isActive, activities, normalizedActiveClients]);
 
-  // 过滤后的实时操作流列表
+  // 若清空监控流或活跃客户端变化导致当前选中的 clientFilter 已不存在，自动回退为“全部客户端”
+  useEffect(() => {
+    if (clientFilter !== 'all' && !knownClients.includes(clientFilter)) {
+      setClientFilter('all');
+    }
+  }, [clientFilter, knownClients]);
+
+  // 过滤后的实时操作流列表（标签页不可见时跳过 O(N) 过滤与重绘，切回后即时计算）
   const filteredActivities = useMemo(() => {
+    if (!isActive) return [];
     const kw = keyword.trim().toLowerCase();
     return activities.filter((item) => {
       if (statusFilter !== 'all' && item.phase !== statusFilter) return false;
       if (modeFilter === 'readonly' && !item.readOnly) return false;
       if (modeFilter === 'write' && item.readOnly) return false;
-      const cleanClient = stripTrailingVersion(item.client);
+      const cleanClient = item.client.trim();
       if (clientFilter !== 'all' && cleanClient !== clientFilter) return false;
       if (transportFilter !== 'all' && item.transport !== transportFilter) return false;
       if (kw) {
@@ -169,44 +285,50 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
       }
       return true;
     });
-  }, [activities, statusFilter, modeFilter, clientFilter, transportFilter, keyword]);
+  }, [isActive, activities, statusFilter, modeFilter, clientFilter, transportFilter, keyword]);
 
-  // 仅当有新步骤到达且开启“自动选中最新”时，自动高亮最新步骤；若列表首次出现数据且未选中也默认选中首条
+  // 仅当标签页可见且有新步骤到达并开启“自动选中最新”时自动高亮；筛选结果为空时清空选中
   useEffect(() => {
+    if (!isActive) return;
     const topCallId = activities[0]?.callId ?? null;
     const hasNewHead = topCallId !== null && topCallId !== prevTopCallIdRef.current;
     prevTopCallIdRef.current = topCallId;
 
-    if (hasNewHead && autoSelectLatest) {
-      const topInFiltered = filteredActivities.find((a) => a.callId === topCallId);
-      setSelectedCallId(topInFiltered ? topCallId : filteredActivities[0]?.callId ?? topCallId);
+    if (filteredActivities.length === 0) {
+      if (selectedCallId !== null) {
+        setSelectedCallId(null);
+      }
       return;
     }
 
-    if (selectedCallId === null && filteredActivities.length > 0) {
-      setSelectedCallId(filteredActivities[0].callId);
-    } else if (
-      selectedCallId !== null &&
-      filteredActivities.length > 0 &&
+    if (hasNewHead && autoSelectLatest) {
+      const topInFiltered = filteredActivities.find((a) => a.callId === topCallId);
+      setSelectedCallId(topInFiltered ? topCallId : filteredActivities[0].callId);
+      return;
+    }
+
+    if (
+      selectedCallId === null ||
       !filteredActivities.some((a) => a.callId === selectedCallId)
     ) {
       setSelectedCallId(filteredActivities[0].callId);
     }
-  }, [activities, filteredActivities, autoSelectLatest, selectedCallId]);
+  }, [isActive, activities, filteredActivities, autoSelectLatest, selectedCallId]);
 
   const selectedActivity = useMemo(
-    () =>
-      filteredActivities.find((a) => a.callId === selectedCallId) ??
-      activities.find((a) => a.callId === selectedCallId) ??
-      null,
-    [filteredActivities, activities, selectedCallId]
+    () => (isActive ? filteredActivities.find((a) => a.callId === selectedCallId) ?? null : null),
+    [isActive, filteredActivities, selectedCallId]
   );
 
   // 当前正在执行的工具列表（用于指标卡提示）
   const runningActivities = useMemo(
-    () => activities.filter((a) => a.phase === 'started'),
-    [activities]
+    () => (isActive ? activities.filter((a) => a.phase === 'started') : []),
+    [isActive, activities]
   );
+
+  const handleSelectCallId = useCallback((callId: string) => {
+    setSelectedCallId(callId);
+  }, []);
 
   // 成功率计算（仅针对已结束调用）
   const finishedCount = stats.succeededCalls + stats.failedCalls;
@@ -215,19 +337,32 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
   const totalRwCount = stats.readOnlyCalls + stats.writeCalls;
   const readRatioPct = totalRwCount > 0 ? Math.round((stats.readOnlyCalls * 100) / totalRwCount) : 0;
 
+  // 带序号守卫的端口配置预览同步，防止快速键入导致旧响应覆盖新端口 JSON
+  const syncPreviewPortStatus = useCallback(
+    (targetPort: number) => {
+      const seq = ++statusReqSeqRef.current;
+      void tauriApi
+        .getMcpStatus({ port: targetPort })
+        .then((next) => {
+          if (seq === statusReqSeqRef.current) {
+            onStatusChange(next);
+          }
+        })
+        .catch(() => {
+          // 输入过程忽略偶发查询错误
+        });
+    },
+    [onStatusChange]
+  );
+
   // 端口输入处理
   const handlePortInputChange = (raw: string) => {
     setPortInput(raw);
+    setPortEdited(true);
     const parsed = Number.parseInt(raw, 10);
     if (!Number.isNaN(parsed) && parsed >= 1024 && parsed <= 65535) {
-      setPort(parsed);
       if (!mcpStatus?.running) {
-        void tauriApi
-          .getMcpStatus({ port: parsed })
-          .then(onStatusChange)
-          .catch(() => {
-            // 输入过程忽略偶发查询错误
-          });
+        syncPreviewPortStatus(parsed);
       }
     }
   };
@@ -235,15 +370,9 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
   const handlePortBlur = () => {
     const parsed = Number.parseInt(portInput, 10);
     const clamped = Number.isNaN(parsed) ? 8765 : Math.max(1024, Math.min(65535, parsed));
-    setPort(clamped);
     setPortInput(String(clamped));
     if (!mcpStatus?.running) {
-      void tauriApi
-        .getMcpStatus({ port: clamped })
-        .then(onStatusChange)
-        .catch(() => {
-          // 忽略预览端口同步失败
-        });
+      syncPreviewPortStatus(clamped);
     }
   };
 
@@ -253,11 +382,19 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
     setErrorMsg(null);
     try {
       if (mcpStatus?.running) {
+        statusReqSeqRef.current += 1;
         const next = await tauriApi.stopMcpHttp();
         onStatusChange(next);
         showFeedback('本地 HTTP MCP 服务已停止');
       } else {
-        const next = await tauriApi.startMcpHttp({ port });
+        // 启动前即时解析并校验端口输入，防止未失焦直接点击启动时使用旧端口
+        const parsed = Number.parseInt(portInput, 10);
+        const targetPort = Number.isNaN(parsed)
+          ? 8765
+          : Math.max(1024, Math.min(65535, parsed));
+        setPortInput(String(targetPort));
+        statusReqSeqRef.current += 1;
+        const next = await tauriApi.startMcpHttp({ port: targetPort });
         onStatusChange(next);
         showFeedback(`本地 HTTP MCP 服务已启动：${next.url}`);
       }
@@ -282,13 +419,14 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
     }
   };
 
-  // 清空监控流
+  // 清空监控流（同步重置客户端筛选与选中态，避免残留已消失客户端条件隐藏后续事件）
   const handleClearStream = async () => {
     setActionBusy(true);
     setErrorMsg(null);
     try {
       await onClearActivities();
       setSelectedCallId(null);
+      setClientFilter('all');
       showFeedback('已清空实时监控流');
     } catch (err) {
       setErrorMsg(`清空监控流失败：${formatError(err)}`);
@@ -412,14 +550,22 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
 
   const running = Boolean(mcpStatus?.running);
   const activeCaseNumber = snapshot?.number ?? mcpStatus?.activeCaseNumber ?? null;
+  // 精确按 JSON 原文依赖做缓存，避免同一调用状态更新时重复解析/美化 16 KiB 参数或结果
+  const selectedParamsJson = selectedActivity?.paramsJson ?? '';
+  const selectedResponsePreview = selectedActivity?.responsePreview ?? '';
   const formattedParams = useMemo(
-    () => (selectedActivity ? formatPrettyJson(selectedActivity.paramsJson) : ''),
-    [selectedActivity]
+    () => (selectedParamsJson ? formatPrettyJson(selectedParamsJson) : ''),
+    [selectedParamsJson]
   );
   const formattedResponse = useMemo(
-    () => (selectedActivity?.responsePreview ? formatPrettyJson(selectedActivity.responsePreview) : ''),
-    [selectedActivity]
+    () => (selectedResponsePreview ? formatPrettyJson(selectedResponsePreview) : ''),
+    [selectedResponsePreview]
   );
+
+  // 标签页隐藏时跳过重型 500 条卡片树协调，保留组件实例与筛选状态
+  if (!isActive) {
+    return null;
+  }
 
   const hasActiveFilter =
     statusFilter !== 'all' ||
@@ -895,113 +1041,14 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
                     )
                   ) : (
                     <div className="td-mcp-stream-list" role="listbox" aria-label="MCP 实时步骤时间线">
-                      {filteredActivities.map((item) => {
-                        const isSelected = selectedActivity?.callId === item.callId;
-                        const isRunning = item.phase === 'started';
-                        const isFailed = item.phase === 'failed';
-                        return (
-                          <div
-                            key={item.callId}
-                            role="option"
-                            aria-selected={isSelected}
-                            className={`td-mcp-step-row ${
-                              isSelected ? 'td-mcp-step-row--selected' : ''
-                            } ${isRunning ? 'td-mcp-step-row--running' : ''}`}
-                            onClick={() => setSelectedCallId(item.callId)}
-                          >
-                            {/* 左侧状态指示轨与语义图标 */}
-                            <div className="td-mcp-step-rail" aria-hidden="true">
-                              {isRunning ? (
-                                <span className="td-mcp-spinner" />
-                              ) : isFailed ? (
-                                <UiIcon
-                                  name="x_circle"
-                                  size={16}
-                                  color="var(--danger-fg)"
-                                  fill="var(--danger-bg)"
-                                />
-                              ) : (
-                                <UiIcon
-                                  name="check_circle"
-                                  size={16}
-                                  color="var(--ok-fg)"
-                                  fill="var(--ok-bg)"
-                                />
-                              )}
-                              <div className="td-mcp-step-rail-line" />
-                            </div>
-
-                            {/* 步骤内容主体 */}
-                            <div className="td-mcp-step-main">
-                              <div className="td-mcp-step-top">
-                                <span className="td-mcp-step-time" title={item.timestamp}>
-                                  {formatActivityShortTime(item.timestamp)}
-                                </span>
-                                <span className="td-mcp-step-title" title={item.toolTitle}>
-                                  {item.toolTitle}
-                                </span>
-                                {item.toolName && (
-                                  <span className="td-mcp-step-rawname" title={item.toolName}>
-                                    {item.toolName}
-                                  </span>
-                                )}
-                                <span
-                                  className={`td-mcp-step-duration ${
-                                    isRunning
-                                      ? 'td-mcp-step-duration--running'
-                                      : isFailed
-                                        ? 'td-mcp-step-duration--failed'
-                                        : ''
-                                  }`}
-                                >
-                                  {isRunning ? '执行中…' : formatDurationMs(item.durationMs)}
-                                </span>
-                              </div>
-
-                              <div className="td-mcp-step-meta">
-                                <SemanticPill
-                                  text={`MCP · ${stripTrailingVersion(item.client) || '未知客户端'}`}
-                                  fallback="system"
-                                />
-                                <SemanticPill
-                                  text={formatTransportLabel(item.transport)}
-                                  fallback="neutral"
-                                />
-                                <SemanticPill
-                                  text={item.readOnly ? '只读' : '受控写入'}
-                                  fallback={item.readOnly ? 'ok' : 'warn'}
-                                />
-                                {item.caseNumber && (
-                                  <span
-                                    className="td-pill td-pill--neutral td-mono"
-                                    title={item.caseDir ?? item.caseNumber}
-                                  >
-                                    {item.caseNumber}
-                                  </span>
-                                )}
-                                {item.paramsSummary && (
-                                  <span className="td-mcp-step-params" title={item.paramsSummary}>
-                                    {item.paramsSummary}
-                                  </span>
-                                )}
-                              </div>
-
-                              {(isFailed && item.error) || item.resultSummary ? (
-                                <div
-                                  className={`td-mcp-step-outcome ${
-                                    isFailed ? 'td-mcp-step-outcome--error' : ''
-                                  }`}
-                                  title={isFailed && item.error ? item.error : item.resultSummary}
-                                >
-                                  {isFailed && item.error
-                                    ? `错误：${item.error}`
-                                    : item.resultSummary}
-                                </div>
-                              ) : null}
-                            </div>
-                          </div>
-                        );
-                      })}
+                      {filteredActivities.map((item) => (
+                        <McpStepRow
+                          key={item.callId}
+                          item={item}
+                          isSelected={selectedActivity?.callId === item.callId}
+                          onSelect={handleSelectCallId}
+                        />
+                      ))}
                     </div>
                   )}
                 </div>
@@ -1096,7 +1143,7 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
                             <span className="td-mcp-meta-label">调用客户端</span>
                             <span className="td-mcp-meta-val">
                               <SemanticPill
-                                text={`MCP · ${stripTrailingVersion(selectedActivity.client) || '未知客户端'}`}
+                                text={`MCP · ${selectedActivity.client.trim() || '未知客户端'}`}
                                 fallback="system"
                               />
                             </span>
@@ -1402,3 +1449,5 @@ export const McpMonitorModule: React.FC<McpMonitorModuleProps> = ({
     </div>
   );
 };
+
+export const McpMonitorModule = React.memo(McpMonitorModuleInner);

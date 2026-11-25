@@ -29,8 +29,8 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }
     const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
     const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
     setPos({
-      left: Math.min(x, maxLeft),
-      top: Math.min(y, maxTop),
+      left: Math.max(8, Math.min(x, maxLeft)),
+      top: Math.max(8, Math.min(y, maxTop)),
     });
   }, [x, y]);
 

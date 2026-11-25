@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use adler2::adler32_slice;
-use flate2::read::ZlibDecoder;
+use flate2::{Decompress, FlushDecompress, Status};
 use lru::LruCache;
 use rayon::prelude::*;
 use regex::Regex;
@@ -409,8 +409,15 @@ impl EwfIndex {
         let mut saw_done = false;
 
         for (idx, seg_path) in segments.iter().enumerate() {
+            if saw_done {
+                return Err(EngineError::Ewf(
+                    "EWF1 已在之前分段遇到 done 节，但后续仍存在多余分段".to_string(),
+                ));
+            }
             let seg_idx = u16::try_from(idx)
                 .map_err(|_| EngineError::Ewf("EWF 分段数超过上限".to_string()))?;
+            let expected_seg_num = u16::try_from(idx + 1)
+                .map_err(|_| EngineError::Ewf("EWF 分段序号超过上限".to_string()))?;
             let file = File::open(seg_path)?;
             let file_len = file.metadata()?.len();
             if file_len < FILE_HEADER_LEN + SECTION_DESC_LEN as u64 {
@@ -431,10 +438,10 @@ impl EwfIndex {
                 return Err(EngineError::Ewf("EWF1 文件头字段无效".to_string()));
             }
             let seg_num = read_u16_le(&file_hdr, 9);
-            if seg_num != seg_idx + 1 {
+            if seg_num != expected_seg_num {
                 return Err(EngineError::Ewf(format!(
                     "EWF1 分段序号不匹配：期望 {}，实际 {}",
-                    seg_idx + 1,
+                    expected_seg_num,
                     seg_num
                 )));
             }
@@ -503,6 +510,11 @@ impl EwfIndex {
                         ));
                     }
                     "table" => {
+                        if last_table_failed {
+                            return Err(EngineError::Ewf(
+                                "EWF1 前序 table 节损坏且无有效 table2 备份".to_string(),
+                            ));
+                        }
                         match parse_table_section(
                             &file,
                             seg_idx,
@@ -616,20 +628,44 @@ impl EwfIndex {
     }
 }
 
-/// 解码并校验单个 EWF1 数据块（zlib 压缩块，或原始数据加末尾小端 Adler-32 校验和）。
-fn decode_chunk(
+/// 复用 `flate2::Decompress` 状态解码并校验单个 EWF1 数据块
+/// （zlib 压缩块，或原始数据加末尾小端 Adler-32 校验和）。
+fn decode_chunk_with(
+    decompress: &mut Decompress,
     raw: &[u8],
     compressed: bool,
     chunk_size: usize,
     expected_logical_len: usize,
 ) -> EngineResult<Vec<u8>> {
     if compressed {
-        let mut decoder = ZlibDecoder::new(raw);
-        let mut out = Vec::with_capacity(chunk_size);
-        let mut limited = decoder.by_ref().take((chunk_size + 1) as u64);
-        limited
-            .read_to_end(&mut out)
-            .map_err(|e| EngineError::Ewf(format!("EWF1 压缩块 zlib/Adler-32 解压失败：{e}")))?;
+        decompress.reset(true);
+        let mut out = Vec::with_capacity(chunk_size + 1);
+        loop {
+            let before_in = decompress.total_in() as usize;
+            let before_out = out.len();
+            let status = decompress
+                .decompress_vec(&raw[before_in..], &mut out, FlushDecompress::Finish)
+                .map_err(|e| EngineError::Ewf(format!("EWF1 压缩块 zlib/Adler-32 解压失败：{e}")))?;
+            match status {
+                Status::StreamEnd => break,
+                Status::Ok | Status::BufError => {
+                    if out.len() > chunk_size {
+                        return Err(EngineError::Ewf(format!(
+                            "EWF1 压缩块解压长度异常：{}（期望 {}..={}）",
+                            out.len(),
+                            expected_logical_len,
+                            chunk_size
+                        )));
+                    }
+                    let after_in = decompress.total_in() as usize;
+                    if after_in == before_in && out.len() == before_out {
+                        return Err(EngineError::Ewf(
+                            "EWF1 压缩块 zlib 流提前截断或损坏".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
         if out.len() < expected_logical_len || out.len() > chunk_size {
             return Err(EngineError::Ewf(format!(
                 "EWF1 压缩块解压长度异常：{}（期望 {}..={}）",
@@ -658,6 +694,17 @@ fn decode_chunk(
             "EWF1 非压缩块 Adler-32 校验失败或长度不符".to_string(),
         ))
     }
+}
+
+/// 解码并校验单个 EWF1 数据块（单块随机读路径便捷封装）。
+fn decode_chunk(
+    raw: &[u8],
+    compressed: bool,
+    chunk_size: usize,
+    expected_logical_len: usize,
+) -> EngineResult<Vec<u8>> {
+    let mut decompress = Decompress::new(true);
+    decode_chunk_with(&mut decompress, raw, compressed, chunk_size, expected_logical_len)
 }
 
 /// 带有分片 LRU 块缓存的 EWF1 多分段镜像线程安全随机读取器。
@@ -791,34 +838,59 @@ pub fn hash_logical_ewf1_parallel(
     let total_chunks = index.chunks.len();
     let chunk_size = index.chunk_size;
 
+    // 复用单块连续原始缓冲区与分片描述符，减少每批次 256 次堆分配。
+    let mut batch_raw_buf: Vec<u8> = Vec::new();
+    let mut batch_meta: Vec<(usize, usize, bool, usize)> = Vec::with_capacity(PARALLEL_BATCH_CHUNKS);
+
     let mut batch_start = 0usize;
     while batch_start < total_chunks {
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
             return Err(EngineError::Cancelled("已取消 EWF 逻辑流哈希计算".to_string()));
         }
         let batch_end = (batch_start + PARALLEL_BATCH_CHUNKS).min(total_chunks);
-        let mut raw_batch = Vec::with_capacity(batch_end - batch_start);
+        let batch_total_raw: usize = index.chunks[batch_start..batch_end]
+            .iter()
+            .map(|c| c.stored_size as usize)
+            .sum();
+        batch_raw_buf.resize(batch_total_raw, 0);
+        batch_meta.clear();
 
-        // 阶段 1：按磁盘顺序执行顺序 I/O，读取压缩或原始块载荷。
+        // 阶段 1：按磁盘顺序执行顺序 I/O，写入复用连续缓冲区。
+        let mut raw_cursor = 0usize;
         for chunk_idx in batch_start..batch_end {
             let loc = index.chunks[chunk_idx];
-            let mut raw = vec![0u8; loc.stored_size as usize];
-            file_read_exact_at(&files[loc.segment_idx as usize], loc.file_offset, &mut raw)?;
+            let sz = loc.stored_size as usize;
+            file_read_exact_at(
+                &files[loc.segment_idx as usize],
+                loc.file_offset,
+                &mut batch_raw_buf[raw_cursor..raw_cursor + sz],
+            )?;
             let expected_len = index.expected_chunk_logical_len(chunk_idx);
-            raw_batch.push((raw, loc.compressed, expected_len));
+            batch_meta.push((raw_cursor, sz, loc.compressed, expected_len));
+            raw_cursor += sz;
         }
 
-        // 阶段 2：通过 rayon 执行多核并行 zlib 解压与 Adler-32 校验。
-        let decoded_batch: Vec<Vec<u8>> = raw_batch
-            .into_par_iter()
-            .map(|(raw, compressed, expected_len)| {
-                if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
-                    return Err(EngineError::Cancelled(
-                        "已取消 EWF 逻辑流哈希计算".to_string(),
-                    ));
-                }
-                decode_chunk(&raw, compressed, chunk_size, expected_len)
-            })
+        // 阶段 2：每个 rayon 工作线程复用同一个 zlib Decompress 状态，并行执行解压与 Adler-32 校验。
+        let raw_slice = &batch_raw_buf[..raw_cursor];
+        let decoded_batch: Vec<Vec<u8>> = batch_meta
+            .par_iter()
+            .map_init(
+                || Decompress::new(true),
+                |decompress, &(off, sz, compressed, expected_len)| {
+                    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                        return Err(EngineError::Cancelled(
+                            "已取消 EWF 逻辑流哈希计算".to_string(),
+                        ));
+                    }
+                    decode_chunk_with(
+                        decompress,
+                        &raw_slice[off..off + sz],
+                        compressed,
+                        chunk_size,
+                        expected_len,
+                    )
+                },
+            )
             .collect::<EngineResult<Vec<Vec<u8>>>>()?;
 
         // 阶段 3：按确定顺序依次送入 SHA-256 计算。

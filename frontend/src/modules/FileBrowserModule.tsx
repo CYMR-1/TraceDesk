@@ -45,7 +45,7 @@ interface FileBrowserModuleProps {
   onSearchInFile: (entry: EntryView) => void;
 }
 
-export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
+const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
   snapshot,
   registry,
   busy,
@@ -87,6 +87,16 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
   // 右键菜单状态
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: EntryView } | null>(null);
 
+  // 异步竞态与去重守卫：按案件代次隔离树分支回写，按递增序号隔离分页列表响应
+  const caseGenRef = useRef(0);
+  const filesReqSeqRef = useRef(0);
+  const loadingBranchesRef = useRef<Set<string>>(new Set());
+  const selectedEntryRef = useRef<EntryView | null>(selectedEntry);
+  selectedEntryRef.current = selectedEntry;
+  /** 点击左侧树中的文件时登记待选中条目，待统一分页查询返回后自动高亮，避免并发双发 queryFilesPage */
+  const pendingSelectRef = useRef<{ entryId: string; fallbackIndex?: number } | null>(null);
+  const lastQuickLocKeyRef = useRef<string>('');
+
   const evidence = snapshot?.evidence ?? null;
   const isLargeImage = Boolean(evidence && (evidence.largeImage ?? evidence.large_image));
   const isQuickMode = Boolean(snapshot?.browsingDirectories);
@@ -126,18 +136,22 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
       inode?: string | null,
       groupIndex?: number
     ) => {
-      setBranches((prev) => {
-        if (prev[branchKey]?.loading) return prev;
-        return {
-          ...prev,
-          [branchKey]: {
-            loaded: prev[branchKey]?.loaded ?? false,
-            loading: true,
-            children: prev[branchKey]?.children ?? [],
-            error: null,
-          },
-        };
-      });
+      const gen = caseGenRef.current;
+      const inflightKey = `${gen}|${branchKey}`;
+      // 同步检查在途集合，防止双击或快速重复展开触发重复 getTreeChildren IPC
+      if (loadingBranchesRef.current.has(inflightKey)) {
+        return;
+      }
+      loadingBranchesRef.current.add(inflightKey);
+      setBranches((prev) => ({
+        ...prev,
+        [branchKey]: {
+          loaded: prev[branchKey]?.loaded ?? false,
+          loading: true,
+          children: prev[branchKey]?.children ?? [],
+          error: null,
+        },
+      }));
       try {
         const res = await tauriApi.getTreeChildren({
           offset,
@@ -145,6 +159,7 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
           inode: inode ?? null,
           groupIndex,
         });
+        if (gen !== caseGenRef.current) return;
         setBranches((prev) => ({
           ...prev,
           [branchKey]: {
@@ -155,6 +170,7 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
           },
         }));
       } catch (err) {
+        if (gen !== caseGenRef.current) return;
         const msg = formatError(err);
         // 失败时不将 loaded 标记为 true，允许用户查看柔和错误提示并点击重试，而非永久缓存为空目录。
         setBranches((prev) => ({
@@ -167,6 +183,8 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
           },
         }));
         onDetailChange(`读取目录失败：${msg}`);
+      } finally {
+        loadingBranchesRef.current.delete(inflightKey);
       }
     },
     [onDetailChange]
@@ -175,6 +193,11 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
   useEffect(() => {
     if (prevIdentityRef.current === caseIdentity) return;
     prevIdentityRef.current = caseIdentity;
+    caseGenRef.current += 1;
+    filesReqSeqRef.current += 1;
+    loadingBranchesRef.current.clear();
+    pendingSelectRef.current = null;
+    lastQuickLocKeyRef.current = '';
 
     setBranches({});
     setAncestors({});
@@ -205,30 +228,54 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
     setExpandedIds(initialExpanded);
   }, [caseIdentity, isQuickMode, partitions, scanMap, evidence, loadTreeBranch]);
 
-  // 记录大镜像快速浏览时的父目录 inode 路径
+  // 记录大镜像快速浏览时的父目录 inode 路径，并在目录切换时重置页号为 0 避免沿用旧目录页码
   useEffect(() => {
     if (snapshot?.quickLocation) {
       const { offset, inode, path } = snapshot.quickLocation;
       setAncestors((prev) => ({ ...prev, [`${offset}:${path}`]: inode }));
+      const locKey = `${offset}:${path}`;
+      if (lastQuickLocKeyRef.current !== locKey) {
+        lastQuickLocKeyRef.current = locKey;
+        setPage(0);
+      }
+    } else {
+      lastQuickLocKeyRef.current = '';
     }
   }, [snapshot?.quickLocation]);
 
-  // 查询当前分页文件列表（一次性消费 pendingLogFilterRef，避免翻页/切目录重复写 FILE_FILTER 审计记录）
+  const handleSelectRow = useCallback(
+    (entry: EntryView) => {
+      onSelectEntry(entry);
+      onDetailChange(
+        `${entry.path}  ·  ${entry.status}  ·  inode ${entry.inode || '—'}  ·  ${entry.size} 字节  ·  分区偏移 ${entry.offset}`
+      );
+    },
+    [onSelectEntry, onDetailChange]
+  );
+
+  const quickLocOffset = snapshot?.quickLocation?.offset ?? null;
+  const quickLocPath = snapshot?.quickLocation?.path ?? null;
+  const hasSnapshot = Boolean(snapshot);
+  const hasEvidence = Boolean(evidence);
+
+  // 查询当前分页文件列表（递增序号防过期覆盖，一次性消费 pendingLogFilterRef 避免重复记审计）
   const fetchFilesPage = useCallback(
     async (targetPage: number) => {
+      const seq = ++filesReqSeqRef.current;
       const shouldLogFilter = pendingLogFilterRef.current;
       pendingLogFilterRef.current = false;
-      if (!snapshot || !evidence) {
+      if (!hasSnapshot || !hasEvidence) {
         setItems([]);
         setTotal(0);
         setTotalPages(1);
+        setLoadingList(false);
         return;
       }
       setLoadingList(true);
       try {
         const res = await tauriApi.queryFilesPage({
-          scopeOffset: isQuickMode ? snapshot.quickLocation?.offset ?? scopeOffset : scopeOffset,
-          scopePath: isQuickMode ? snapshot.quickLocation?.path ?? '' : scopePath,
+          scopeOffset: isQuickMode ? quickLocOffset ?? scopeOffset : scopeOffset,
+          scopePath: isQuickMode ? quickLocPath ?? '' : scopePath,
           suffix: appliedSuffix,
           keyword: appliedKeyword,
           status: statusFilter,
@@ -236,32 +283,56 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
           pageSize: PAGE_SIZE,
           logFilter: shouldLogFilter,
         });
+        if (seq !== filesReqSeqRef.current) return;
         setItems(res.items);
         setTotal(res.total);
         setPage(res.page);
         setTotalPages(Math.max(1, res.totalPages));
-        if (selectedEntry && !res.items.some((i) => i.entryId === selectedEntry.entryId)) {
+
+        // 优先处理来自左侧树文件点击的待选中条目，避免与当前分页查询竞态清空选中态
+        const pendingSel = pendingSelectRef.current;
+        if (pendingSel) {
+          pendingSelectRef.current = null;
+          const found =
+            res.items.find((i) => i.entryId === pendingSel.entryId) ??
+            (pendingSel.fallbackIndex !== undefined ? res.items[pendingSel.fallbackIndex] : undefined);
+          if (found) {
+            handleSelectRow(found);
+            return;
+          }
+        }
+        const curSelected = selectedEntryRef.current;
+        if (curSelected && !res.items.some((i) => i.entryId === curSelected.entryId)) {
           onSelectEntry(null);
         }
       } catch (err) {
+        if (seq !== filesReqSeqRef.current) return;
         onDetailChange(`读取文件列表失败：${formatError(err)}`);
         setItems([]);
         setTotal(0);
         setTotalPages(1);
       } finally {
-        setLoadingList(false);
+        if (seq === filesReqSeqRef.current) {
+          setLoadingList(false);
+        }
       }
     },
     [
-      snapshot,
-      evidence,
+      hasSnapshot,
+      hasEvidence,
+      snapshot?.id,
+      snapshot?.inventoryCount,
+      evidence?.path,
+      partitionScansSummary,
       isQuickMode,
+      quickLocOffset,
+      quickLocPath,
       scopeOffset,
       scopePath,
       appliedSuffix,
       appliedKeyword,
       statusFilter,
-      selectedEntry,
+      handleSelectRow,
       onSelectEntry,
       onDetailChange,
     ]
@@ -269,31 +340,17 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
 
   useEffect(() => {
     void fetchFilesPage(page);
-  }, [
-    snapshot?.id,
-    snapshot?.inventoryCount,
-    snapshot?.quickLocation?.offset,
-    snapshot?.quickLocation?.path,
-    evidence?.path,
-    partitionScansSummary,
-    scopeOffset,
-    scopePath,
-    appliedSuffix,
-    appliedKeyword,
-    statusFilter,
-    page,
-    filterSeq,
-  ]);
+  }, [fetchFilesPage, page, filterSeq]);
 
-  const handleApplyFilter = () => {
+  const handleApplyFilter = useCallback(() => {
     pendingLogFilterRef.current = true;
     setAppliedSuffix(suffix);
     setAppliedKeyword(keyword);
     setPage(0);
     setFilterSeq((n) => n + 1);
-  };
+  }, [suffix, keyword]);
 
-  const handleResetFilter = () => {
+  const handleResetFilter = useCallback(() => {
     pendingLogFilterRef.current = false;
     setSuffix('');
     setKeyword('');
@@ -302,7 +359,7 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
     setStatusFilter('all');
     setPage(0);
     setFilterSeq((n) => n + 1);
-  };
+  }, []);
 
   const toggleTreeExpand = (
     nodeId: string,
@@ -373,16 +430,6 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
     void onBrowseDirectory(offset, parentInode, parent);
   };
 
-  const handleSelectRow = useCallback(
-    (entry: EntryView) => {
-      onSelectEntry(entry);
-      onDetailChange(
-        `${entry.path}  ·  ${entry.status}  ·  inode ${entry.inode || '—'}  ·  ${entry.size} 字节  ·  分区偏移 ${entry.offset}`
-      );
-    },
-    [onSelectEntry, onDetailChange]
-  );
-
   const handleDoubleClickRow = useCallback(
     (entry: EntryView) => {
       if (!entry.directory) return;
@@ -390,9 +437,12 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
       if (isQuickMode) {
         const dirInode = entry.inode || null;
         const dirKey = `dir:${entry.offset}:${cleanPath}`;
+        const gen = caseGenRef.current;
         setAncestors((prev) => ({ ...prev, [`${entry.offset}:${cleanPath}`]: dirInode }));
+        setPage(0);
         void (async () => {
           const entries = await onBrowseDirectory(entry.offset, dirInode, cleanPath);
+          if (gen !== caseGenRef.current) return;
           if (entries) {
             setSelectedTreeId(dirKey);
             setExpandedIds((prev) => {
@@ -414,7 +464,7 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
       onSelectEntry(null);
       handleResetFilter();
     },
-    [isQuickMode, onBrowseDirectory, onSelectEntry, loadTreeBranch]
+    [isQuickMode, onBrowseDirectory, onSelectEntry, loadTreeBranch, handleResetFilter]
   );
 
   const handleTreeNodeClick = async (
@@ -441,7 +491,9 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
       }
       if (isQuickMode) {
         const rootId = `dir:${node.offset}:`;
+        const gen = caseGenRef.current;
         const entries = await onBrowseDirectory(node.offset, null, '');
+        if (gen !== caseGenRef.current) return;
         if (entries) {
           setExpandedIds((prev) => {
             const next = new Set(prev);
@@ -464,8 +516,10 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
       const targetPath = (node.scopePath ?? '').replace(/^\/+|\/+$/g, '');
       if (isQuickMode) {
         const targetInode = node.inode ?? null;
+        const gen = caseGenRef.current;
         setAncestors((prev) => ({ ...prev, [`${node.offset}:${targetPath}`]: targetInode }));
         const entries = await onBrowseDirectory(node.offset, targetInode, targetPath);
+        if (gen !== caseGenRef.current) return;
         if (entries) {
           setExpandedIds((prev) => {
             const next = new Set(prev);
@@ -491,32 +545,45 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
       return;
     }
     if (node.kind === 'file' && node.entryId) {
-      // 大镜像按需模式下：若所点文件不在当前右侧目录中，先按需切入其父目录再高亮选中。
+      const gen = caseGenRef.current;
+      // 大镜像按需模式下：若所点文件不在当前右侧目录中，先按需切入其父目录并登记待选中条目，待统一分页刷新后高亮。
       if (isQuickMode && node.offset !== undefined) {
         const curLoc = snapshot?.quickLocation;
         const cleanParent = parentPath.replace(/^\/+|\/+$/g, '');
         const alreadyInParent =
           curLoc?.offset === node.offset && (curLoc.path ?? '').replace(/^\/+|\/+$/g, '') === cleanParent;
         if (!alreadyInParent) {
+          setPage(0);
+          pendingSelectRef.current = { entryId: node.entryId };
           const browsed = await onBrowseDirectory(node.offset, parentInode, cleanParent);
-          if (browsed) {
-            const matched =
-              browsed.find((e) => e.entryId === node.entryId) ??
-              browsed.find(
-                (e) =>
-                  !e.directory &&
-                  e.inode === (node.inode ?? '') &&
-                  Boolean(e.deleted) === Boolean(node.deleted)
-              );
-            if (matched) {
-              handleSelectRow(matched);
-            }
+          if (gen !== caseGenRef.current) return;
+          if (!browsed) {
+            // 浏览失败或被并发锁拒绝时及时清空待选标记，避免泄漏到后续分页查询
+            pendingSelectRef.current = null;
+            return;
+          }
+          const matched =
+            browsed.find((e) => e.entryId === node.entryId) ??
+            browsed.find(
+              (e) =>
+                !e.directory &&
+                e.inode === (node.inode ?? '') &&
+                Boolean(e.deleted) === Boolean(node.deleted)
+            );
+          if (matched) {
+            pendingSelectRef.current = { entryId: matched.entryId };
+            handleSelectRow(matched);
+          } else {
+            pendingSelectRef.current = null;
           }
           return;
         }
       }
       try {
         const loc = await tauriApi.locateFileInScope({ entryId: node.entryId });
+        if (gen !== caseGenRef.current) return;
+        // 登记待选中条目并统一交由状态变更触发单次 fetchFilesPage，避免并发双发 queryFilesPage 竞态
+        pendingSelectRef.current = { entryId: node.entryId, fallbackIndex: loc.indexInPage };
         setScopeOffset(loc.scopeOffset);
         setScopePath(loc.scopePath);
         setSuffix('');
@@ -525,22 +592,7 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
         setAppliedKeyword('');
         setStatusFilter('all');
         setPage(loc.page);
-        const pageRes = await tauriApi.queryFilesPage({
-          scopeOffset: loc.scopeOffset,
-          scopePath: loc.scopePath,
-          suffix: '',
-          keyword: '',
-          status: 'all',
-          page: loc.page,
-          pageSize: PAGE_SIZE,
-        });
-        setItems(pageRes.items);
-        setTotal(pageRes.total);
-        setTotalPages(Math.max(1, pageRes.totalPages));
-        const found = pageRes.items.find((e) => e.entryId === node.entryId) ?? pageRes.items[loc.indexInPage];
-        if (found) {
-          handleSelectRow(found);
-        }
+        setFilterSeq((n) => n + 1);
       } catch {
         // 忽略定位失败
       }
@@ -1248,3 +1300,5 @@ export const FileBrowserModule: React.FC<FileBrowserModuleProps> = ({
     </div>
   );
 };
+
+export const FileBrowserModule = React.memo(FileBrowserModuleInner);

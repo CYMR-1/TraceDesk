@@ -1953,15 +1953,18 @@ struct ClientRegistry {
     sessions: HashMap<String, Option<String>>,
     /// 按写入顺序记录会话 ID，超出上限时淘汰最老会话。
     session_order: VecDeque<String>,
-    /// 最近一次 `initialize` 解析到的客户端标识，供无 session 头请求或直接调用回退使用。
-    last_initialized: Option<String>,
+    /// 最近一次 `initialize` 解析到的 `(session_id, client_name)`，供无 session 头请求或直接调用回退使用。
+    last_initialized: Option<(Option<String>, String)>,
 }
 
 impl ClientRegistry {
     fn record_initialize(&mut self, session_id: Option<&str>, client_info: Option<String>) {
-        if let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) {
-            let sid_owned = sid.to_string();
-            if !self.sessions.contains_key(&sid_owned) {
+        let normalized_sid = session_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(ref sid_owned) = normalized_sid {
+            if !self.sessions.contains_key(sid_owned) {
                 while self.sessions.len() >= MAX_TRACKED_SESSIONS {
                     let Some(oldest) = self.session_order.pop_front() else {
                         break;
@@ -1970,10 +1973,10 @@ impl ClientRegistry {
                 }
                 self.session_order.push_back(sid_owned.clone());
             }
-            self.sessions.insert(sid_owned, client_info.clone());
+            self.sessions.insert(sid_owned.clone(), client_info.clone());
         }
         if let Some(info) = client_info {
-            self.last_initialized = Some(info);
+            self.last_initialized = Some((normalized_sid, info));
         }
     }
 
@@ -1988,12 +1991,15 @@ impl ClientRegistry {
         {
             return entry.clone().or_else(|| ctx.user_agent_client.clone());
         }
-        // 优先级 3：无 session 头或未登记 session 时回退到最近一次 `initialize` 客户端
-        if let Some(ref last) = self.last_initialized {
+        // 优先级 3：请求自身携带的非通用 `User-Agent` 优先于其他会话遗留的 `last_initialized`，避免跨会话误归因
+        if let Some(ref ua_client) = ctx.user_agent_client {
+            return Some(ua_client.clone());
+        }
+        // 优先级 4：无 session 头或未登记 session 且无非通用 UA 时，回退到仍存活会话的最近一次 `initialize` 客户端
+        if let Some((_, ref last)) = self.last_initialized {
             return Some(last.clone());
         }
-        // 优先级 4：非通用 `User-Agent` 补充回退
-        ctx.user_agent_client.clone()
+        None
     }
 
     fn remove_session(&mut self, session_id: &str) {
@@ -2003,6 +2009,18 @@ impl ClientRegistry {
         }
         if self.sessions.remove(sid).is_some() {
             self.session_order.retain(|item| item != sid);
+        }
+        // 若被移除的会话恰好设置了 `last_initialized`，同步清理或回退到其他存活会话，避免已结束客户端污染后续审计日志。
+        if self
+            .last_initialized
+            .as_ref()
+            .is_some_and(|(owner, _)| owner.as_deref() == Some(sid))
+        {
+            self.last_initialized = self.session_order.iter().rev().find_map(|s| {
+                self.sessions
+                    .get(s)
+                    .and_then(|info| info.as_ref().map(|name| (Some(s.clone()), name.clone())))
+            });
         }
     }
 }
@@ -2091,7 +2109,7 @@ impl McpServer {
         self.clients
             .lock()
             .ok()
-            .and_then(|g| g.last_initialized.clone())
+            .and_then(|g| g.last_initialized.as_ref().map(|(_, name)| name.clone()))
     }
 
     fn resolve_client_for_context(&self, ctx: &McpRequestContext) -> Option<String> {
@@ -2335,13 +2353,26 @@ impl McpServer {
             "tracedesk_search_content" => {
                 let params: SearchContentInput = parse_input(arguments)?;
                 let case_dir = check_non_empty(&params.case_dir, "case_dir", None)?;
-                let query = check_non_empty(&params.query, "query", Some(4096))?;
                 let encoding = params.encoding.trim();
                 if !matches!(encoding, "UTF-8" | "UTF-16LE" | "GBK" | "HEX") {
                     return Err(McpError::ValueError(format!(
                         "不支持的内容搜索编码：{encoding}（支持 UTF-8 / UTF-16LE / GBK / HEX）"
                     )));
                 }
+                // 文本编码检索保留首尾空白字节以保证取证字节匹配精度；HEX 编码去除首尾空白并校验非空。
+                let query = if encoding == "HEX" {
+                    check_non_empty(&params.query, "query", Some(4096))?
+                } else {
+                    if params.query.is_empty() {
+                        return Err(McpError::ValueError("参数 query 不能为空。".to_string()));
+                    }
+                    if params.query.chars().count() > 4096 {
+                        return Err(McpError::ValueError(
+                            "参数 query 长度不能超过 4096 个字符。".to_string(),
+                        ));
+                    }
+                    params.query
+                };
                 let path = check_optional_str(&params.path, "path", None)?;
                 let inode = check_optional_str(&params.inode, "inode", Some(64))?;
                 let dir_inode = check_optional_str(&params.dir_inode, "dir_inode", Some(64))?;
@@ -2582,6 +2613,22 @@ impl McpServer {
             "tracedesk_build_review_bundle" => {
                 let params: ReviewBundleInput = parse_input(arguments)?;
                 let case_dir = check_non_empty(&params.case_dir, "case_dir", None)?;
+                if let Some(ref indices) = params.selected_export_indices
+                    && indices.contains(&0)
+                {
+                    return Err(McpError::ValueError(
+                        "参数 selected_export_indices 中的序号必须从 1 开始（不允许 0）。"
+                            .to_string(),
+                    ));
+                }
+                if let Some(ref indices) = params.selected_search_indices
+                    && indices.contains(&0)
+                {
+                    return Err(McpError::ValueError(
+                        "参数 selected_search_indices 中的序号必须从 1 开始（不允许 0）。"
+                            .to_string(),
+                    ));
+                }
                 let actor = check_optional_str(&params.actor, "actor", Some(80))?;
                 let data = self.service.build_review_bundle(
                     &case_dir,
@@ -2673,11 +2720,8 @@ impl McpServer {
             if obj.contains_key("result") || obj.contains_key("error") {
                 return None;
             }
-            return if has_id {
-                Some(jsonrpc_error(id, -32600, "Invalid Request: missing method"))
-            } else {
-                None
-            };
+            // 按 JSON-RPC 2.0 §4.1，缺少 method 的无效对象即使未带 id 也须返回 -32600（id 为 null）。
+            return Some(jsonrpc_error(id, -32600, "Invalid Request: missing method"));
         };
 
         let params = obj.get("params").cloned().unwrap_or_else(|| json!({}));

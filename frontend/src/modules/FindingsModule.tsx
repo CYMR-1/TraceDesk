@@ -4,7 +4,7 @@
  * - 表头下拉筛选（状态、分区偏移）与正倒序排序（序号、最近记录）
  * - 双击展开下方 DossierView 详情，支持一键导出当前可见分组
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { tauriApi } from '../api/tauri';
 import { DossierView, type DossierSection } from '../components/DossierView';
 import { UiIcon } from '../components/Icons';
@@ -34,13 +34,15 @@ const DETAIL_FIELD_LABELS: readonly [string, string][] = [
   ['error', '错误'],
 ];
 
-export const FindingsModule: React.FC<FindingsModuleProps> = ({
+const FindingsModuleInner: React.FC<FindingsModuleProps> = ({
   snapshot,
   busy,
   refreshToken,
   onExportFindings,
 }) => {
   const [keyword, setKeyword] = useState('');
+  // 对搜索关键词做防抖处理，避免逐字输入高频触发后端 IPC 查询与审计扫描
+  const [debouncedKeyword, setDebouncedKeyword] = useState('');
   const [activeFilters, setActiveFilters] = useState<Record<string, string[]>>({});
   const [filterOptions, setFilterOptions] = useState<Record<string, string[]>>({ status: [], offset: [] });
   const [sortColumn, setSortColumn] = useState<'seq' | 'latest'>('latest');
@@ -50,7 +52,38 @@ export const FindingsModule: React.FC<FindingsModuleProps> = ({
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
 
+  const reqSeqRef = useRef(0);
+  const prevCaseIdRef = useRef<string>(snapshot?.id ?? '');
+
+  // 案件切换或关闭时重置本地筛选、搜索词与详情展开态，避免旧案件条件残留
+  useEffect(() => {
+    const cid = snapshot?.id ?? '';
+    if (prevCaseIdRef.current !== cid) {
+      prevCaseIdRef.current = cid;
+      reqSeqRef.current += 1;
+      setKeyword('');
+      setDebouncedKeyword('');
+      setActiveFilters({});
+      setSelectedKey(null);
+      setDetailOpen(false);
+    }
+  }, [snapshot?.id]);
+
+  // 200ms 防抖同步搜索词；清空时立即生效
+  useEffect(() => {
+    const trimmed = keyword.trim();
+    if (!trimmed) {
+      setDebouncedKeyword('');
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      setDebouncedKeyword(trimmed);
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [keyword]);
+
   const loadFindings = useCallback(async () => {
+    const seq = ++reqSeqRef.current;
     if (!snapshot) {
       setStatusText('尚未打开案件');
       setGroups([]);
@@ -62,10 +95,11 @@ export const FindingsModule: React.FC<FindingsModuleProps> = ({
       const res = await tauriApi.listFindings({
         status: activeFilters.status?.[0] ?? null,
         offset: activeFilters.offset?.[0] ?? null,
-        keyword: keyword.trim(),
+        keyword: debouncedKeyword,
         sortColumn,
         descending: sortDescending,
       });
+      if (seq !== reqSeqRef.current) return;
       setStatusText(res.statusText);
       setFilterOptions({
         status: res.filterOptions.statuses,
@@ -73,10 +107,11 @@ export const FindingsModule: React.FC<FindingsModuleProps> = ({
       });
       setGroups(res.groups);
     } catch (err) {
+      if (seq !== reqSeqRef.current) return;
       setStatusText(`读取取证发现失败：${formatError(err)}`);
       setGroups([]);
     }
-  }, [snapshot, keyword, activeFilters, sortColumn, sortDescending]);
+  }, [snapshot, debouncedKeyword, activeFilters, sortColumn, sortDescending]);
 
   useEffect(() => {
     void loadFindings();
@@ -191,9 +226,21 @@ export const FindingsModule: React.FC<FindingsModuleProps> = ({
             placeholder="搜索文件、笔记、摘要、人员或比对结果"
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                setDebouncedKeyword(keyword.trim());
+              }
+            }}
           />
           {keyword && (
-            <button type="button" className="td-search-clear" onClick={() => setKeyword('')}>
+            <button
+              type="button"
+              className="td-search-clear"
+              onClick={() => {
+                setKeyword('');
+                setDebouncedKeyword('');
+              }}
+            >
               ×
             </button>
           )}
@@ -255,3 +302,5 @@ export const FindingsModule: React.FC<FindingsModuleProps> = ({
     </div>
   );
 };
+
+export const FindingsModule = React.memo(FindingsModuleInner);

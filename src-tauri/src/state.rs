@@ -1,10 +1,10 @@
 //! 线程安全的桌面端应用状态、IPC 数据传输对象（与 `ui-contract.md` §3 及
 //! `frontend/src/types/ipc.ts` 100% 对齐），以及后台任务、内容搜索与 MCP 协调。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -768,6 +768,15 @@ pub fn infer_entry_icon_kind(entry: &InventoryEntry) -> &'static str {
     }
 }
 
+/// 缓存用于解析 `fsstat` 分区偏移与文件系统类型的正则表达式，避免每次 `sync_from_case` 重复编译。
+fn fsstat_regexes() -> (&'static Regex, &'static Regex) {
+    static PART_RE: OnceLock<Regex> = OnceLock::new();
+    static FS_RE: OnceLock<Regex> = OnceLock::new();
+    let part_re = PART_RE.get_or_init(|| Regex::new(r"分区偏移 (\d+) 扇区").expect("valid part regex"));
+    let fs_re = FS_RE.get_or_init(|| Regex::new(r"File System Type:\s*(\S+)").expect("valid fs regex"));
+    (part_re, fs_re)
+}
+
 /// 从 `fsstat` 输出与 `coverage.volumes` 提取各分区的文件系统名称。
 pub fn build_filesystem_map(
     evidence: Option<&EvidenceInfo>,
@@ -784,8 +793,7 @@ pub fn build_filesystem_map(
         }
     }
     if let Some(raw) = fsstat {
-        let part_re = Regex::new(r"分区偏移 (\d+) 扇区").expect("valid part regex");
-        let fs_re = Regex::new(r"File System Type:\s*(\S+)").expect("valid fs regex");
+        let (part_re, fs_re) = fsstat_regexes();
         let mut current_offset = evidence
             .and_then(|e| e.partitions.first())
             .map(|p| p.offset)
@@ -1062,6 +1070,8 @@ pub struct StoredSearchHit {
 #[derive(Debug, Clone)]
 pub struct SearchSessionState {
     pub search_id: String,
+    /// 创建该搜索会话时绑定的案件目录，防止切换案件后误将旧案命中写入新案审计链。
+    pub case_folder: PathBuf,
     pub query: String,
     pub encoding: String,
     pub needle_hex: String,
@@ -1076,6 +1086,30 @@ pub struct SearchSessionState {
 /// 大镜像按需浏览时，左侧文件树保留的已读取目录分支缓存上限（防止多分区展开后无限占用内存）。
 const QUICK_TREE_BRANCH_CACHE_LIMIT: usize = 128;
 
+/// 用于 O(1) 判断当前展示清单是否实质变化的轻量指纹（条数 + 首尾条目定位键）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct EntriesSignature {
+    len: usize,
+    first: Option<(u64, String, String, bool)>,
+    last: Option<(u64, String, String, bool)>,
+}
+
+impl EntriesSignature {
+    fn from_slice(entries: &[InventoryEntry]) -> Self {
+        let first = entries
+            .first()
+            .map(|e| (e.offset, e.path.clone(), e.inode.clone(), e.deleted));
+        let last = entries
+            .last()
+            .map(|e| (e.offset, e.path.clone(), e.inode.clone(), e.deleted));
+        Self {
+            len: entries.len(),
+            first,
+            last,
+        }
+    }
+}
+
 /// 面向读多写少场景的快速视图缓存，确保目录树、分页、预览与时间线读取不会被耗时任务阻塞。
 #[derive(Default)]
 pub struct ViewCache {
@@ -1085,9 +1119,13 @@ pub struct ViewCache {
     pub is_large_image: bool,
     pub fs_map: HashMap<u64, String>,
     pub browser_index: BrowserIndex,
+    /// 已构建 `browser_index` 对应的展示清单签名，避免仅追加审计日志时无效重建 10 万条目录树与时间线。
+    entries_sig: EntriesSignature,
     /// 大镜像按需模式下按 `(分区偏移, 归一化目录路径)` 保留的目录树分支索引，
     /// 避免展开另一分区/目录时丢失已展开的树节点，并支持超过 2048 项时的 256 项分桶展开。
     pub quick_tree_branches: HashMap<(u64, String), BrowserIndex>,
+    /// 维护 `quick_tree_branches` 的 LRU 访问顺序，满容量时优先淘汰最久未访问分支。
+    quick_tree_order: VecDeque<(u64, String)>,
     pub timeline_index: Option<TimelineIndex>,
 }
 
@@ -1098,6 +1136,8 @@ impl ViewCache {
         let prev_image = self.image_path.clone();
         let prev_count = self.snapshot.as_ref().map(|s| s.inventory_count);
         let prev_quick = self.snapshot.as_ref().and_then(|s| s.quick_location.clone());
+        let prev_browsing = self.snapshot.as_ref().map(|s| s.browsing_directories);
+        let prev_scans = self.snapshot.as_ref().map(|s| s.partition_scans.clone());
 
         let snap = build_case_snapshot(case);
         let folder = case.folder().to_path_buf();
@@ -1112,14 +1152,21 @@ impl ViewCache {
             case.data().fsstat.as_deref(),
         );
 
+        let displayed = case.displayed_entries();
+        let next_sig = EntriesSignature::from_slice(displayed);
+
         let folder_changed = prev_folder.as_ref() != Some(&folder);
         let image_changed = prev_image != image_path;
         let entries_changed = prev_count != Some(snap.inventory_count)
             || prev_quick != snap.quick_location
+            || prev_browsing != Some(snap.browsing_directories)
+            || prev_scans.as_ref() != Some(&snap.partition_scans)
+            || self.entries_sig != next_sig
             || rebuild_browser_index;
 
-        if folder_changed || entries_changed {
-            self.browser_index = BrowserIndex::build(case.displayed_entries());
+        if folder_changed || image_changed || entries_changed {
+            self.browser_index = BrowserIndex::build(displayed);
+            self.entries_sig = next_sig;
             self.timeline_index = None;
         }
 
@@ -1127,6 +1174,7 @@ impl ViewCache {
         // 在同一大镜像按需浏览会话内切目录时则保留已展开分支，避免跨分区展开互相冲刷。
         if folder_changed || image_changed || !snap.browsing_directories {
             self.quick_tree_branches.clear();
+            self.quick_tree_order.clear();
         }
 
         self.snapshot = Some(snap);
@@ -1143,18 +1191,32 @@ impl ViewCache {
         scope_path: &str,
         entries: &[InventoryEntry],
     ) {
+        self.cache_quick_tree_branch_index(offset, scope_path, BrowserIndex::build(entries));
+    }
+
+    /// 直接接管已构建好的 [`BrowserIndex`] 存入按需目录树分支缓存（按 LRU 淘汰），避免重复建树。
+    pub fn cache_quick_tree_branch_index(
+        &mut self,
+        offset: u64,
+        scope_path: &str,
+        index: BrowserIndex,
+    ) {
         let key = (
             offset,
             tracedesk_core::browser_index::normalize_scope_path(scope_path),
         );
-        if !self.quick_tree_branches.contains_key(&key)
-            && self.quick_tree_branches.len() >= QUICK_TREE_BRANCH_CACHE_LIMIT
-            && let Some(evict_key) = self.quick_tree_branches.keys().next().cloned()
-        {
-            self.quick_tree_branches.remove(&evict_key);
+        if self.quick_tree_branches.contains_key(&key) {
+            self.quick_tree_order.retain(|k| k != &key);
+        } else {
+            while self.quick_tree_branches.len() >= QUICK_TREE_BRANCH_CACHE_LIMIT {
+                let Some(evict_key) = self.quick_tree_order.pop_front() else {
+                    break;
+                };
+                self.quick_tree_branches.remove(&evict_key);
+            }
         }
-        self.quick_tree_branches
-            .insert(key, BrowserIndex::build(entries));
+        self.quick_tree_order.push_back(key.clone());
+        self.quick_tree_branches.insert(key, index);
     }
 
     /// 在已缓存的按需目录树分支或当前 `browser_index` 中反查目标目录的 `inode`。
@@ -1194,7 +1256,9 @@ impl ViewCache {
         self.is_large_image = false;
         self.fs_map.clear();
         self.browser_index = BrowserIndex::default();
+        self.entries_sig = EntriesSignature::default();
         self.quick_tree_branches.clear();
+        self.quick_tree_order.clear();
         self.timeline_index = None;
     }
 
@@ -1242,6 +1306,8 @@ pub struct AppState {
     pub scanning_active: Arc<AtomicBool>,
     pub hashing_active: Arc<AtomicBool>,
     pub hash_worker: Mutex<Option<JoinHandle<()>>>,
+    /// 后台内容搜索工作线程句柄列表（退出时统一回收，避免遗留孤儿线程）。
+    pub search_workers: Mutex<Vec<JoinHandle<()>>>,
     pub searches: Mutex<HashMap<String, SearchSessionState>>,
     pub mcp_server: Mutex<LocalMcpHttpServer>,
     /// MCP 实时活动内存环形队列（按 `callId` 合并，上限 500 条）。
@@ -1278,6 +1344,7 @@ impl AppState {
             scanning_active: Arc::new(AtomicBool::new(false)),
             hashing_active: Arc::new(AtomicBool::new(false)),
             hash_worker: Mutex::new(None),
+            search_workers: Mutex::new(Vec::new()),
             searches: Mutex::new(HashMap::new()),
             mcp_server: Mutex::new(LocalMcpHttpServer::new()),
             mcp_activities: Mutex::new(activity_store),
@@ -1286,6 +1353,28 @@ impl AppState {
             mcp_tailer_worker: Mutex::new(None),
             app_handle: Mutex::new(None),
         })
+    }
+
+    /// 清理所有已缓存的搜索会话（在新建/打开/关闭案件时调用，释放命中内存并防止跨案误存书签）。
+    pub fn clear_search_sessions(&self) {
+        if let Ok(mut searches) = self.searches.lock() {
+            for session in searches.values_mut() {
+                session.cancel.store(true, Ordering::Relaxed);
+                session.running = false;
+            }
+            searches.clear();
+        }
+        if let Ok(mut workers) = self.search_workers.lock() {
+            workers.retain(|h| !h.is_finished());
+        }
+    }
+
+    /// 记录新的内容搜索工作线程句柄并顺带清理已完成线程，防止列表增长。
+    pub fn track_search_worker(&self, handle: JoinHandle<()>) {
+        if let Ok(mut workers) = self.search_workers.lock() {
+            workers.retain(|h| !h.is_finished());
+            workers.push(handle);
+        }
     }
 
     /// 返回当前应用对应的 MCP 遥测日志路径（`<logs_dir>/mcp-activity.jsonl`）。
@@ -1333,6 +1422,23 @@ impl AppState {
         accepted
     }
 
+    /// 在调用方已持有 `case_lock` 的前提下检测磁盘变化并按需热重载内存 `Case` 与 `ViewCache`。
+    /// 仅当清单或镜像等视图相关字段实质变化时才重建 `BrowserIndex` 并重置时间线索引，
+    /// 避免仅追加审计日志时无效重建 10 万条目录树与 40 万条时间线。
+    pub fn reload_case_and_sync_view(&self, case: &mut Case) -> Result<bool, String> {
+        let changed = case
+            .sync_from_disk_if_changed()
+            .map_err(|e| e.to_string())?;
+        if changed {
+            let mut view = self
+                .view
+                .write()
+                .map_err(|_| "视图缓存锁异常".to_string())?;
+            view.sync_from_case(case, false);
+        }
+        Ok(changed)
+    }
+
     /// 检测当前桌面端打开案件的磁盘文件（`case.json` 与 `audit.head`/`audit.jsonl`）是否已被外部进程更新；
     /// 若发生变化则热重载内存 `Case` 数据与清单，并同步刷新 `ViewCache`，返回 `Ok(true)`。
     pub fn reload_active_case_from_disk(&self) -> Result<bool, String> {
@@ -1343,17 +1449,21 @@ impl AppState {
         let Some(case) = case_guard.as_mut() else {
             return Ok(false);
         };
-        let changed = case
-            .sync_from_disk_if_changed()
-            .map_err(|e| e.to_string())?;
-        if changed {
-            let mut view = self
-                .view
-                .write()
-                .map_err(|_| "视图缓存锁异常".to_string())?;
-            view.sync_from_case(case, true);
-        }
-        Ok(changed)
+        self.reload_case_and_sync_view(case)
+    }
+
+    /// 非阻塞版磁盘热重载：若 `case_lock` 正被长耗时扫描或内容搜索占用则立即返回 `Ok(false)`，
+    /// 确保快照读取与后台 MCP 遥测尾随线程不会被耗时任务阻塞。
+    pub fn reload_active_case_from_disk_nonblocking(&self) -> Result<bool, String> {
+        let mut case_guard = match self.case_lock.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+            Err(std::sync::TryLockError::Poisoned(_)) => return Err("案件状态锁异常".to_string()),
+        };
+        let Some(case) = case_guard.as_mut() else {
+            return Ok(false);
+        };
+        self.reload_case_and_sync_view(case)
     }
 
     /// 当非只读写入工具成功完成且作用于当前打开案件时，先热重载磁盘变更并刷新 `ViewCache`，
@@ -1373,7 +1483,15 @@ impl AppState {
 
         let matched_open_case_dir = self.view.read().ok().and_then(|view| {
             let open_folder = view.case_folder.as_ref()?;
-            let resolved_rec = resolve_clean(Path::new(raw_case_dir));
+            let mut resolved_rec = resolve_clean(Path::new(raw_case_dir));
+            // 兼容遥测记录中携带 `.../case.json` 的路径形式。
+            if resolved_rec
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("case.json"))
+                && let Some(parent) = resolved_rec.parent()
+            {
+                resolved_rec = parent.to_path_buf();
+            }
             let resolved_open = resolve_clean(open_folder);
             if same_case_path(&resolved_rec, &resolved_open) {
                 let display_dir = view
@@ -1391,8 +1509,9 @@ impl AppState {
             return false;
         };
 
-        // 推送前端前先热重载最新磁盘状态与 ViewCache，确保前端立即拉取快照与审计日志时读到最新结果。
-        let _ = self.reload_active_case_from_disk();
+        // 推送前端前先非阻塞热重载最新磁盘状态与 ViewCache，确保前端立即拉取快照与审计日志时读到最新结果，
+        // 同时避免后台尾随线程在桌面端执行长耗时扫描/搜索期间被卡住。
+        let _ = self.reload_active_case_from_disk_nonblocking();
 
         if let Some(app) = self.current_app_handle() {
             let tool_name = record
@@ -1490,12 +1609,15 @@ impl AppState {
     }
 
     /// 清空内存活动队列并截断 `logs/mcp-activity.jsonl`，同时重置尾随偏移。
+    /// 按统一锁序（`mcp_tailer` -> `mcp_activities`）原子完成清空与偏移重置，防止与后台尾随线程竞态。
     pub fn clear_mcp_activities(&self) {
-        if let Ok(mut store) = self.mcp_activities.lock() {
+        let mut tailer_guard = self.mcp_tailer.lock().ok();
+        let mut store_guard = self.mcp_activities.lock().ok();
+        if let Some(ref mut store) = store_guard {
             store.clear();
         }
         let _ = truncate_activity_log(&self.activity_log_path());
-        if let Ok(mut tailer) = self.mcp_tailer.lock() {
+        if let Some(ref mut tailer) = tailer_guard {
             tailer.reset();
         }
     }
@@ -1539,6 +1661,12 @@ impl AppState {
             for session in searches.values_mut() {
                 session.cancel.store(true, Ordering::Relaxed);
                 session.running = false;
+            }
+            searches.clear();
+        }
+        if let Ok(mut workers) = self.search_workers.lock() {
+            for handle in workers.drain(..) {
+                let _ = handle.join();
             }
         }
         if let Ok(mut worker) = self.hash_worker.lock()
@@ -1622,7 +1750,8 @@ impl AppState {
             ),
         };
 
-        let url = format!("http://{host}:{active_port}{path}");
+        let url_host = if host == "::1" { "[::1]" } else { &host };
+        let url = format!("http://{url_host}:{active_port}{path}");
         let mcp_bin = discover_mcp_binary(&self.app_paths);
         let cases_dir = self.app_paths.cases_dir.to_string_lossy().into_owned();
 

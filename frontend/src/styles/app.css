@@ -797,6 +797,25 @@
   flex-shrink: 0;
 }
 
+/* 使用纯 CSS 处理表头筛选与排序图标悬停显隐，避免 mouseenter/mouseleave 触发 React 重渲染 */
+.td-header-indicator--filter {
+  color: var(--text-muted);
+}
+
+.td-header-cell--interactive:hover .td-header-indicator--filter,
+.td-header-cell--open .td-header-indicator--filter {
+  color: var(--accent);
+}
+
+.td-header-indicator--sort-idle {
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+
+.td-header-cell--interactive:hover .td-header-indicator--sort-idle {
+  opacity: 1;
+}
+
 .td-col-resizer {
   position: absolute;
   right: 0;

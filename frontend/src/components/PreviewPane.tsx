@@ -85,6 +85,29 @@ const HexCharsLine: React.FC<{ chars: string }> = React.memo(({ chars }) => {
   );
 });
 
+/** 单行十六进制记忆化组件：点击切换选中行时仅重渲染变更的 2 行而非全部 256 行 */
+const HexRowItem: React.FC<{
+  index: number;
+  row: HexRowDto;
+  selected: boolean;
+  onSelect: (idx: number) => void;
+  registerRef: (idx: number, el: HTMLDivElement | null) => void;
+}> = React.memo(({ index, row, selected, onSelect, registerRef }) => (
+  <div
+    ref={(el) => registerRef(index, el)}
+    className={`td-hex-row ${selected ? 'td-hex-row--selected' : ''}`}
+    onClick={() => onSelect(index)}
+  >
+    <div className="td-hex-offset">{row.offsetHex}</div>
+    <div className="td-hex-bytes">
+      <HexBytesLine bytesHex={row.bytesHex} />
+    </div>
+    <div className="td-hex-chars">
+      <HexCharsLine chars={row.chars} />
+    </div>
+  </div>
+));
+
 export const PreviewPane: React.FC<PreviewPaneProps> = ({
   entry,
   emptyMessage = '请选择文件',
@@ -107,21 +130,43 @@ export const PreviewPane: React.FC<PreviewPaneProps> = ({
   const reqSeqRef = useRef(0);
   const imageCheckedEntryRef = useRef<string | null>(null);
   const activeEntryIdRef = useRef<string | null>(null);
+  const lastInitialPageRef = useRef<number>(initialPage);
+  const lastLoadedKeyRef = useRef<string | null>(null);
   const hexRowRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
   const canPreview = Boolean(
     entry && !entry.directory && !entry.mode.startsWith('V/')
   );
 
+  const registerHexRowRef = useCallback((idx: number, el: HTMLDivElement | null) => {
+    if (el) {
+      hexRowRefs.current[idx] = el;
+    } else {
+      delete hexRowRefs.current[idx];
+    }
+  }, []);
+
+  const handleSelectHexRow = useCallback((idx: number) => {
+    setSelectedHexIdx(idx);
+  }, []);
+
   const loadPage = useCallback(
     async (targetEntry: EntryView, targetPage: number, targetEncoding: PreviewEncoding, checkImage: boolean) => {
+      // 无论是否 0 字节，始终递增序号以作废任何在途的旧文件请求
+      const seq = ++reqSeqRef.current;
       if (targetEntry.size === 0) {
         setPageData(null);
+        setImageData(null);
         setLoading(false);
+        setImageLoading(false);
+        setErrorMsg(null);
         setIsImageMode(false);
         return;
       }
-      const seq = ++reqSeqRef.current;
+      if (checkImage) {
+        // 提前登记已触发图片检测，防止并发渲染重复发起 previewFileImage
+        imageCheckedEntryRef.current = targetEntry.entryId;
+      }
       setLoading(true);
       setErrorMsg(null);
       try {
@@ -132,11 +177,11 @@ export const PreviewPane: React.FC<PreviewPaneProps> = ({
           encoding: targetEncoding,
         });
         if (seq !== reqSeqRef.current) return;
+        hexRowRefs.current = {};
         setPageData(res);
         setLoading(false);
 
         if (checkImage) {
-          imageCheckedEntryRef.current = targetEntry.entryId;
           const candidate = res.isImageCandidate || isLikelyImagePath(targetEntry.path);
           setIsImageMode(candidate);
           if (candidate) {
@@ -160,17 +205,23 @@ export const PreviewPane: React.FC<PreviewPaneProps> = ({
       } catch (err) {
         if (seq !== reqSeqRef.current) return;
         setLoading(false);
+        setImageLoading(false);
         setErrorMsg(`读取失败：${formatError(err)}`);
       }
     },
     []
   );
 
-  // 统一响应文件切换、翻页与编码切换，避免切文件时发送旧页号或漏检图片
+  // 统一响应文件切换、外部定位页号变化、翻页与编码切换，消除切文件时的双发 IPC 请求
   useEffect(() => {
     if (!entry || !canPreview) {
+      reqSeqRef.current += 1;
       activeEntryIdRef.current = null;
       imageCheckedEntryRef.current = null;
+      lastLoadedKeyRef.current = null;
+      hexRowRefs.current = {};
+      setLoading(false);
+      setImageLoading(false);
       setPageData(null);
       setImageData(null);
       setErrorMsg(null);
@@ -180,10 +231,12 @@ export const PreviewPane: React.FC<PreviewPaneProps> = ({
     }
 
     const entryChanged = activeEntryIdRef.current !== entry.entryId;
+    const initialPageChanged = lastInitialPageRef.current !== initialPage;
     if (entryChanged) {
       activeEntryIdRef.current = entry.entryId;
+      lastInitialPageRef.current = initialPage;
       imageCheckedEntryRef.current = null;
-      setPage(initialPage);
+      hexRowRefs.current = {};
       setPageData(null);
       setErrorMsg(null);
       setImageData(null);
@@ -191,11 +244,37 @@ export const PreviewPane: React.FC<PreviewPaneProps> = ({
       setActiveTab(initialTab);
       const likelyImg = entry.size > 0 && initialTab !== 'hex' && isLikelyImagePath(entry.path);
       setIsImageMode(likelyImg);
+
+      const loadKey = `${entry.entryId}|${initialPage}|${encoding}|${initialTab}`;
+      lastLoadedKeyRef.current = loadKey;
+      if (page !== initialPage) {
+        setPage(initialPage);
+      }
       const shouldCheckImage = initialTab !== 'hex';
       void loadPage(entry, initialPage, encoding, shouldCheckImage);
       return;
     }
 
+    // 同一文件在外部切换目标定位页（如内容搜索命中弹窗切换同文件不同偏移）时同步页号
+    if (initialPageChanged) {
+      lastInitialPageRef.current = initialPage;
+      setSelectedHexIdx(highlightHexRow);
+      const loadKey = `${entry.entryId}|${initialPage}|${encoding}|${initialTab}`;
+      lastLoadedKeyRef.current = loadKey;
+      if (page !== initialPage) {
+        setPage(initialPage);
+      }
+      const shouldCheckImage = initialTab !== 'hex' && imageCheckedEntryRef.current !== entry.entryId;
+      void loadPage(entry, initialPage, encoding, shouldCheckImage);
+      return;
+    }
+
+    // 若上一次刚因切换文件已用相同参数发起加载，则跳过本次因 setPage 同步触发的冗余重入
+    const loadKey = `${entry.entryId}|${page}|${encoding}|${initialTab}`;
+    if (lastLoadedKeyRef.current === loadKey) {
+      return;
+    }
+    lastLoadedKeyRef.current = loadKey;
     const shouldCheckImage = initialTab !== 'hex' && imageCheckedEntryRef.current !== entry.entryId;
     void loadPage(entry, page, encoding, shouldCheckImage);
   }, [entry?.entryId, canPreview, page, encoding, initialPage, initialTab, highlightHexRow, loadPage]);
@@ -353,27 +432,16 @@ export const PreviewPane: React.FC<PreviewPaneProps> = ({
               <div>字符</div>
             </div>
             <div>
-              {hexRows.map((row, idx) => {
-                const selected = selectedHexIdx === idx;
-                return (
-                  <div
-                    key={row.offsetHex}
-                    ref={(el) => {
-                      hexRowRefs.current[idx] = el;
-                    }}
-                    className={`td-hex-row ${selected ? 'td-hex-row--selected' : ''}`}
-                    onClick={() => setSelectedHexIdx(idx)}
-                  >
-                    <div className="td-hex-offset">{row.offsetHex}</div>
-                    <div className="td-hex-bytes">
-                      <HexBytesLine bytesHex={row.bytesHex} />
-                    </div>
-                    <div className="td-hex-chars">
-                      <HexCharsLine chars={row.chars} />
-                    </div>
-                  </div>
-                );
-              })}
+              {hexRows.map((row, idx) => (
+                <HexRowItem
+                  key={row.offsetHex}
+                  index={idx}
+                  row={row}
+                  selected={selectedHexIdx === idx}
+                  onSelect={handleSelectHexRow}
+                  registerRef={registerHexRowRef}
+                />
+              ))}
             </div>
           </div>
         )}

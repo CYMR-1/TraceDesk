@@ -374,17 +374,9 @@ pub fn page_characters(
     out
 }
 
-/// 将 [`PageWindow`] 格式化为预览文本（保留 `\r`、`\n`、`\t`，其余不可打印字符替换为 `·`）。
-pub fn preview_text(
-    window: &PageWindow,
-    start: u64,
-    size: u64,
-    encoding: PreviewEncoding,
-    page_bytes: usize,
-) -> String {
-    let chars = page_characters(window, start, size, encoding, page_bytes);
+fn render_text_from_chars(chars: &[(usize, char)]) -> String {
     let mut out = String::with_capacity(chars.len());
-    for (_, ch) in chars {
+    for &(_, ch) in chars {
         if is_preview_printable(ch) || matches!(ch, '\r' | '\n' | '\t') {
             out.push(ch);
         } else {
@@ -394,13 +386,24 @@ pub fn preview_text(
     out
 }
 
-/// 将 [`PageWindow`] 格式化为 16 字节 HEX 预览行（`offsetHex`、`bytesHex`、`chars`）。
-pub fn preview_rows(
+/// 将 [`PageWindow`] 格式化为预览文本（保留 `\r`、`\n`、`\t`，其余不可打印字符替换为 `·`）。
+pub fn preview_text(
     window: &PageWindow,
     start: u64,
     size: u64,
     encoding: PreviewEncoding,
     page_bytes: usize,
+) -> String {
+    let chars = page_characters(window, start, size, encoding, page_bytes);
+    render_text_from_chars(&chars)
+}
+
+fn render_rows_from_chars(
+    window: &PageWindow,
+    start: u64,
+    size: u64,
+    page_bytes: usize,
+    chars: &[(usize, char)],
 ) -> Vec<HexRow> {
     let prefix = start.min(3) as usize;
     let avail = size.saturating_sub(start).min(page_bytes as u64) as usize;
@@ -412,7 +415,7 @@ pub fn preview_rows(
     let row_count = data.len().div_ceil(ROW_BYTES);
     let mut char_rows: Vec<String> = vec![String::new(); row_count];
 
-    for (offset, ch) in page_characters(window, start, size, encoding, page_bytes) {
+    for &(offset, ch) in chars {
         let row_idx = offset / ROW_BYTES;
         if row_idx < char_rows.len() {
             char_rows[row_idx].push(if is_preview_printable(ch) { ch } else { '·' });
@@ -420,7 +423,7 @@ pub fn preview_rows(
     }
 
     let mut rows = Vec::with_capacity(row_count);
-    for (row_idx, chars) in char_rows.into_iter().enumerate() {
+    for (row_idx, chars_row) in char_rows.into_iter().enumerate() {
         let i = row_idx * ROW_BYTES;
         let slice = &data[i..(i + ROW_BYTES).min(data.len())];
         let mut bytes_hex = String::with_capacity(slice.len().saturating_mul(3));
@@ -435,10 +438,22 @@ pub fn preview_rows(
         rows.push(HexRow {
             offset_hex: format!("{:08X}", start + i as u64),
             bytes_hex,
-            chars,
+            chars: chars_row,
         });
     }
     rows
+}
+
+/// 将 [`PageWindow`] 格式化为 16 字节 HEX 预览行（`offsetHex`、`bytesHex`、`chars`）。
+pub fn preview_rows(
+    window: &PageWindow,
+    start: u64,
+    size: u64,
+    encoding: PreviewEncoding,
+    page_bytes: usize,
+) -> Vec<HexRow> {
+    let chars = page_characters(window, start, size, encoding, page_bytes);
+    render_rows_from_chars(window, start, size, page_bytes, &chars)
 }
 
 /// 使用 `0x00..=0x2F` 安全锚点重同步，计算字节偏移 `start` 紧邻之前的传统多字节编码
@@ -823,18 +838,20 @@ impl PreviewSession {
                 let mut idx = cum_offsets
                     .partition_point(|&off| off <= cur)
                     .saturating_sub(1);
-                let mut out = Vec::with_capacity(want);
+                let mut out = vec![0u8; want];
+                let mut out_pos = 0usize;
                 while cur < end {
                     let seg_end = cum_offsets[idx + 1];
                     let take = (end.min(seg_end) - cur) as usize;
-                    let phys = extents[idx].0 + (cur - cum_offsets[idx]);
-                    file.seek(SeekFrom::Start(phys))?;
-                    let mut buf = vec![0u8; take];
-                    file.read_exact(&mut buf).map_err(|_| {
-                        CoreError::Preview("空间区域超出当前镜像，请重新读取文件树".to_string())
-                    })?;
-                    out.extend_from_slice(&buf);
-                    cur += take as u64;
+                    if take > 0 {
+                        let phys = extents[idx].0 + (cur - cum_offsets[idx]);
+                        file.seek(SeekFrom::Start(phys))?;
+                        file.read_exact(&mut out[out_pos..out_pos + take]).map_err(|_| {
+                            CoreError::Preview("空间区域超出当前镜像，请重新读取文件树".to_string())
+                        })?;
+                        out_pos += take;
+                        cur += take as u64;
+                    }
                     idx += 1;
                 }
                 Ok(out)
@@ -874,9 +891,9 @@ impl PreviewSession {
             size.div_ceil(pb as u64) as usize
         };
         let clamped_page = page.min(total_pages - 1);
-        let start = (clamped_page as u64) * (pb as u64);
+        let start = (clamped_page as u64).saturating_mul(pb as u64);
         let left = start.saturating_sub(3);
-        let right = (start + pb as u64 + 3).min(size);
+        let right = start.saturating_add(pb as u64).saturating_add(3).min(size);
         let bytes = self.read_at(left, (right - left) as usize)?;
 
         let carry = if start > 0 && encoding.is_legacy_multibyte() {
@@ -900,8 +917,10 @@ impl PreviewSession {
             &[]
         };
         let is_image = is_image_candidate(&self.entry.path, head_slice);
-        let text = preview_text(&window, start, size, encoding, pb);
-        let hex_rows = preview_rows(&window, start, size, encoding, pb);
+        // 仅解码一次字符流并同时用于正文与 HEX 行渲染，避免多字节编码重复解码。
+        let chars = page_characters(&window, start, size, encoding, pb);
+        let text = render_text_from_chars(&chars);
+        let hex_rows = render_rows_from_chars(&window, start, size, pb, &chars);
 
         Ok(PreviewPageResult {
             page: clamped_page,

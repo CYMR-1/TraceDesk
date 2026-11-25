@@ -382,7 +382,8 @@ pub fn paginate<T: Serialize>(items: &[T], limit: usize, offset: usize) -> Value
     let end = start.saturating_add(limit).min(total);
     let sliced = &items[start..end];
     let count = sliced.len();
-    let has_more = offset.saturating_add(count) < total;
+    // 当 limit == 0 时避免产生 `has_more=true, next_offset=Some(offset)` 的死循环分页响应。
+    let has_more = limit > 0 && offset.saturating_add(count) < total;
     let next_offset = if has_more {
         Some(offset.saturating_add(count))
     } else {
@@ -396,6 +397,26 @@ pub fn paginate<T: Serialize>(items: &[T], limit: usize, offset: usize) -> Value
         "has_more": has_more,
         "next_offset": next_offset,
         "items": sliced,
+    })
+}
+
+/// 在已确定总数与当前页切片时构建标准分页结果，避免对未落入当前页的条目执行冗余 JSON 序列化。
+fn paginate_page<T: Serialize>(total: usize, page_items: &[T], limit: usize, offset: usize) -> Value {
+    let count = page_items.len();
+    let has_more = limit > 0 && offset.saturating_add(count) < total;
+    let next_offset = if has_more {
+        Some(offset.saturating_add(count))
+    } else {
+        None
+    };
+    json!({
+        "total": total,
+        "count": count,
+        "offset": offset,
+        "limit": limit,
+        "has_more": has_more,
+        "next_offset": next_offset,
+        "items": page_items,
     })
 }
 
@@ -601,7 +622,8 @@ impl CaseService {
         arc_records
     }
 
-    /// 在短锁排队获取 `case.lock` 的前提下获取只读 [`CachedCaseView`]（命中缓存时免除 gunzip 开销）。
+    /// 在短锁排队获取 `case.lock` 的前提下获取只读 [`CachedCaseView`] 与已核验的审计记录
+    /// （命中缓存时免除 gunzip 开销，且避免单次请求重复读取和哈希 `audit.jsonl`）。
     fn with_read_case_view<F, R>(
         &self,
         case_dir: &str,
@@ -609,7 +631,7 @@ impl CaseService {
         f: F,
     ) -> McpResult<R>
     where
-        F: FnOnce(&Path, &Arc<CachedCaseView>) -> McpResult<R>,
+        F: FnOnce(&Path, &Arc<CachedCaseView>, &Arc<Vec<AuditRecord>>) -> McpResult<R>,
     {
         let folder = self.resolve_case_dir(case_dir)?;
         let lease = CaseFileLock::acquire_with_timeout(&folder.join("case.lock"), self.lock_timeout)
@@ -625,7 +647,7 @@ impl CaseService {
             if let Some(view) = cached {
                 let res = self
                     .verified_audit_records(&folder)
-                    .and_then(|_| f(&folder, &view));
+                    .and_then(|records| f(&folder, &view, &records));
                 lease.unlock();
                 return res;
             }
@@ -637,7 +659,7 @@ impl CaseService {
         let mut case = self.open_case(case_dir, actor)?;
         let records = case.check_audit()?;
         self.update_case_cache_from_open(&case);
-        self.update_audit_cache(&folder, records);
+        let arc_records = self.update_audit_cache(&folder, records);
 
         let fallback_key = compute_case_cache_key(&folder).unwrap_or_else(|| CaseDataCacheKey {
             case_dir: folder.clone(),
@@ -663,7 +685,7 @@ impl CaseService {
                     timeline: OnceLock::new(),
                 })
             });
-        let res = f(&folder, &view);
+        let res = f(&folder, &view, &arc_records);
         case.close();
         res
     }
@@ -1011,10 +1033,9 @@ impl CaseService {
 
     /// 3. `tracedesk_get_case_summary`：读取案件总览并核验审计哈希链。
     pub fn get_case_summary(&self, case_dir: &str, actor: Option<&str>) -> McpResult<Value> {
-        self.with_read_case_view(case_dir, actor, |folder, view| {
-            let records = self.verified_audit_records(folder)?;
+        self.with_read_case_view(case_dir, actor, |folder, view, records| {
             let data = &view.data;
-            let findings_groups = group_findings(&records);
+            let findings_groups = group_findings(records);
             let findings_file_count = findings_groups.len();
             let findings_record_count: usize =
                 findings_groups.iter().map(|g| g.records.len()).sum();
@@ -1265,13 +1286,21 @@ impl CaseService {
             let norm_prefix = normalize_entry_path(path_prefix)
                 .trim_end_matches('/')
                 .to_lowercase();
+            let prefix_with_slash = if norm_prefix.is_empty() {
+                String::new()
+            } else {
+                format!("{norm_prefix}/")
+            };
             let mut norm_suffix = suffix.trim().to_lowercase();
             if !norm_suffix.is_empty() && !norm_suffix.starts_with('.') {
                 norm_suffix.insert(0, '.');
             }
             let norm_keyword = keyword.trim().to_lowercase();
+            let need_path_cf =
+                !norm_prefix.is_empty() || !norm_suffix.is_empty() || !norm_keyword.is_empty();
 
-            let mut matched: Vec<Value> = Vec::new();
+            // 仅收集命中条目的切片引用，分页后再仅对当前页（<= 200 条）执行 `format_entry` JSON 序列化。
+            let mut matched_refs: Vec<&InventoryEntry> = Vec::new();
             for entry in entries {
                 if let Some(off) = partition_offset
                     && entry.offset != off
@@ -1292,26 +1321,35 @@ impl CaseService {
                 {
                     continue;
                 }
-                let entry_path_cf = normalize_entry_path(&entry.path).to_lowercase();
-                if !norm_prefix.is_empty()
-                    && entry_path_cf != norm_prefix
-                    && !entry_path_cf.starts_with(&format!("{norm_prefix}/"))
-                {
-                    continue;
+                if need_path_cf {
+                    let entry_path_cf = normalize_entry_path(&entry.path).to_lowercase();
+                    if !norm_prefix.is_empty()
+                        && entry_path_cf != norm_prefix
+                        && !entry_path_cf.starts_with(&prefix_with_slash)
+                    {
+                        continue;
+                    }
+                    if !norm_suffix.is_empty() && !entry_path_cf.ends_with(&norm_suffix) {
+                        continue;
+                    }
+                    if !norm_keyword.is_empty()
+                        && !entry_path_cf.contains(&norm_keyword)
+                        && !entry_name(entry).to_lowercase().contains(&norm_keyword)
+                    {
+                        continue;
+                    }
                 }
-                if !norm_suffix.is_empty() && !entry.path.to_lowercase().ends_with(&norm_suffix) {
-                    continue;
-                }
-                if !norm_keyword.is_empty()
-                    && !entry_path_cf.contains(&norm_keyword)
-                    && !entry_name(entry).to_lowercase().contains(&norm_keyword)
-                {
-                    continue;
-                }
-                matched.push(format_entry(entry));
+                matched_refs.push(entry);
             }
 
-            let page = paginate(&matched, limit, offset);
+            let total = matched_refs.len();
+            let start = offset.min(total);
+            let end = start.saturating_add(limit).min(total);
+            let page_items: Vec<Value> = matched_refs[start..end]
+                .iter()
+                .map(|e| format_entry(e))
+                .collect();
+            let page = paginate_page(total, &page_items, limit, offset);
             let mut out = serde_json::Map::new();
             out.insert("case_dir".to_string(), Value::String(folder_str));
             out.insert("browse_mode".to_string(), Value::String(mode.to_string()));
@@ -1324,23 +1362,24 @@ impl CaseService {
         };
 
         // 快速路径：优先检查只读缓存视图；若不处于 `browsing_directories` 模式则直接筛选返回。
-        let quick_browse_needed = self.with_read_case_view(case_dir, actor, |folder, view| {
-            let Some(ref _ev) = view.data.evidence else {
-                return Err(McpError::ValueError(
-                    "当前案件尚未加载镜像，请先调用 tracedesk_load_image。".to_string(),
-                ));
-            };
-            if view.browsing_directories {
-                Ok(None)
-            } else {
-                let folder_str = folder.to_string_lossy().into_owned();
-                Ok(Some(filter_entries(
-                    folder_str,
-                    "full_inventory",
-                    &view.data.inventory,
-                )))
-            }
-        })?;
+        let quick_browse_needed =
+            self.with_read_case_view(case_dir, actor, |folder, view, _records| {
+                let Some(ref _ev) = view.data.evidence else {
+                    return Err(McpError::ValueError(
+                        "当前案件尚未加载镜像，请先调用 tracedesk_load_image。".to_string(),
+                    ));
+                };
+                if view.browsing_directories {
+                    Ok(None)
+                } else {
+                    let folder_str = folder.to_string_lossy().into_owned();
+                    Ok(Some(filter_entries(
+                        folder_str,
+                        "full_inventory",
+                        &view.data.inventory,
+                    )))
+                }
+            })?;
 
         if let Some(result) = quick_browse_needed {
             return Ok(result);
@@ -1375,7 +1414,7 @@ impl CaseService {
         Ok(out)
     }
 
-    /// 9. `tracedesk_preview_file`：按页读取文件文本解码和/或十六进制转储。
+    /// 9. `tracedesk_preview_file`：按页读取文件文本解码和/或十六进制转储（非大镜像模式复用只读缓存，避免翻页重复解压清单）。
     #[allow(clippy::too_many_arguments)]
     pub fn preview_file(
         &self,
@@ -1406,38 +1445,82 @@ impl CaseService {
             page_bytes
         };
 
-        let mut case = self.open_case(case_dir, actor)?;
-        let entry = Self::find_entry(
-            &mut case,
-            path,
-            partition_offset,
-            inode,
-            deleted,
-            dir_inode,
-            dir_path,
-        )?;
-        if entry.directory || entry.mode.starts_with("V/") {
-            return Err(McpError::ValueError(format!(
-                "{} 是目录，无法按文件内容预览。",
-                entry.path
-            )));
-        }
-        let is_large = case
-            .data()
-            .evidence
-            .as_ref()
-            .is_some_and(|e| e.is_large_image());
-        if is_large {
-            case.check_source()?;
-        }
-        let image_path = case.image_path()?;
+        // 快速路径：常规（非大镜像且非按目录浏览）案件直接复用 `with_read_case_view` 缓存，避免每次翻页重新解压 `inventory.jsonl.gz`。
+        let cached_target =
+            self.with_read_case_view(case_dir, actor, |folder, view, _records| {
+                let Some(ref ev) = view.data.evidence else {
+                    return Err(McpError::ValueError("请先加载镜像".to_string()));
+                };
+                if view.browsing_directories || ev.is_large_image() {
+                    return Ok(None);
+                }
+                let entry = Self::find_entry_in_slice(
+                    &view.data.inventory,
+                    path,
+                    partition_offset,
+                    inode,
+                    deleted,
+                )?;
+                if entry.directory || entry.mode.starts_with("V/") {
+                    return Err(McpError::ValueError(format!(
+                        "{} 是目录，无法按文件内容预览。",
+                        entry.path
+                    )));
+                }
+                let image_path = PathBuf::from(&ev.path);
+                if !image_path.is_file() {
+                    return Err(McpError::FileNotFoundError(format!(
+                        "镜像文件不存在：{}",
+                        image_path.display()
+                    )));
+                }
+                Ok(Some((
+                    folder.to_string_lossy().into_owned(),
+                    image_path,
+                    entry,
+                )))
+            })?;
+
+        let (folder_str, image_path, entry, opened_case) = match cached_target {
+            Some((f_str, img_p, ent)) => (f_str, img_p, ent, None),
+            None => {
+                let mut case = self.open_case(case_dir, actor)?;
+                let entry = Self::find_entry(
+                    &mut case,
+                    path,
+                    partition_offset,
+                    inode,
+                    deleted,
+                    dir_inode,
+                    dir_path,
+                )?;
+                if entry.directory || entry.mode.starts_with("V/") {
+                    return Err(McpError::ValueError(format!(
+                        "{} 是目录，无法按文件内容预览。",
+                        entry.path
+                    )));
+                }
+                let is_large = case
+                    .data()
+                    .evidence
+                    .as_ref()
+                    .is_some_and(|e| e.is_large_image());
+                if is_large {
+                    case.check_source()?;
+                }
+                let image_path = case.image_path()?;
+                let f_str = case.folder().to_string_lossy().into_owned();
+                (f_str, image_path, entry, Some(case))
+            }
+        };
+
         let page_res = preview_entry_page(&image_path, &entry, page, pb, preview_enc, None)?;
+        if let Some(mut case) = opened_case {
+            case.close();
+        }
 
         let mut out = serde_json::Map::new();
-        out.insert(
-            "case_dir".to_string(),
-            Value::String(case.folder().to_string_lossy().into_owned()),
-        );
+        out.insert("case_dir".to_string(), Value::String(folder_str));
         out.insert("entry".to_string(), format_entry(&entry));
         out.insert(
             "encoding".to_string(),
@@ -1471,9 +1554,11 @@ impl CaseService {
                 .iter()
                 .map(|r| format!("{}  {:<47}  {}", r.offset_hex, r.bytes_hex, r.chars))
                 .collect();
-            out.insert("hex_lines".to_string(), serde_json::to_value(hex_lines).unwrap());
+            out.insert(
+                "hex_lines".to_string(),
+                serde_json::to_value(hex_lines).unwrap(),
+            );
         }
-        case.close();
         Ok(Value::Object(out))
     }
 
@@ -1720,11 +1805,13 @@ impl CaseService {
         offset: usize,
         actor: Option<&str>,
     ) -> McpResult<Value> {
-        self.with_read_case_view(case_dir, actor, |folder, _view| {
-            let records = self.verified_audit_records(folder)?;
-            let groups = Self::filter_finding_groups(&records, status, partition_offset, keyword);
-            let mut formatted = Vec::with_capacity(groups.len());
-            for g in groups {
+        self.with_read_case_view(case_dir, actor, |folder, _view, records| {
+            let groups = Self::filter_finding_groups(records, status, partition_offset, keyword);
+            let total = groups.len();
+            let start = offset.min(total);
+            let end = start.saturating_add(limit).min(total);
+            let mut page_items = Vec::with_capacity(end.saturating_sub(start));
+            for g in &groups[start..end] {
                 let recs: Vec<Value> = g
                     .records
                     .iter()
@@ -1743,18 +1830,18 @@ impl CaseService {
                         })
                     })
                     .collect();
-                formatted.push(json!({
+                page_items.push(json!({
                     "path": g.key.subject,
                     "partition_offset": g.key.offset,
                     "inode": g.key.inode,
                     "deleted": g.key.deleted,
                     "status": if g.key.deleted { "已删除" } else { "现存" },
-                    "image_sha256": g.key.image_sha256.unwrap_or_default(),
+                    "image_sha256": g.key.image_sha256.as_deref().unwrap_or(""),
                     "records": recs,
                 }));
             }
 
-            let page = paginate(&formatted, limit, offset);
+            let page = paginate_page(total, &page_items, limit, offset);
             let mut out = serde_json::Map::new();
             out.insert(
                 "case_dir".to_string(),
@@ -1787,7 +1874,7 @@ impl CaseService {
             Some(ev) => Some(normalize_event_filter(ev)?.to_string()),
             None => None,
         };
-        self.with_read_case_view(case_dir, actor, |folder, view| {
+        self.with_read_case_view(case_dir, actor, |folder, view, _records| {
             if view.data.evidence.is_none() {
                 return Err(McpError::ValueError("当前案件尚未加载镜像。".to_string()));
             }
@@ -1845,7 +1932,7 @@ impl CaseService {
             }
 
             let count = items.len();
-            let has_more = offset.saturating_add(count) < total;
+            let has_more = limit > 0 && offset.saturating_add(count) < total;
             let next_offset = if has_more {
                 Some(offset.saturating_add(count))
             } else {
@@ -1887,8 +1974,7 @@ impl CaseService {
         offset: usize,
         actor: Option<&str>,
     ) -> McpResult<Value> {
-        self.with_read_case_view(case_dir, actor, |folder, _view| {
-            let records = self.verified_audit_records(folder)?;
+        self.with_read_case_view(case_dir, actor, |folder, _view, records| {
             let audit_head = records
                 .last()
                 .map(|r| r.hash.clone())
@@ -1914,11 +2000,10 @@ impl CaseService {
                 .map(str::to_lowercase);
             let query_cf = query.trim().to_lowercase();
 
-            let mut matched: Vec<Value> = Vec::new();
-            for r in records.iter() {
+            // 仅收集命中记录索引，按排序方向切片后再仅对当前页执行 JSON 构造。
+            let mut matched_indices: Vec<usize> = Vec::new();
+            for (idx, r) in records.iter().enumerate() {
                 let rec_origin = audit_origin(r).as_str();
-                let rec_mcp_client = audit_mcp_user(r);
-                let rec_origin_label = audit_origin_label(r);
                 if matches!(origin_filter.as_str(), "manual" | "mcp")
                     && rec_origin != origin_filter
                 {
@@ -1931,6 +2016,7 @@ impl CaseService {
                 {
                     continue;
                 }
+                let rec_mcp_client = audit_mcp_user(r);
                 if let Some(ref af) = actor_cf {
                     let actor_matched = r.actor.to_lowercase().contains(af)
                         || rec_mcp_client
@@ -1945,36 +2031,53 @@ impl CaseService {
                 {
                     continue;
                 }
-                let formatted_time = display_iso_time(&r.timestamp, false);
                 if !query_cf.is_empty() {
-                    let blob = serde_json::to_string(&json!([
-                        r.seq,
-                        formatted_time,
-                        rec_origin,
-                        rec_origin_label,
-                        rec_mcp_client,
-                        r.actor,
-                        r.action,
-                        title,
-                        r.subject,
-                        r.result,
-                        r.details,
-                    ]))
-                    .unwrap_or_default()
-                    .to_lowercase();
-                    if !blob.contains(&query_cf) {
-                        continue;
+                    let formatted_time = display_iso_time(&r.timestamp, false);
+                    let rec_origin_label = audit_origin_label(r);
+                    let cheap_hit = r.subject.to_lowercase().contains(&query_cf)
+                        || r.actor.to_lowercase().contains(&query_cf)
+                        || r.action.to_lowercase().contains(&query_cf)
+                        || title.to_lowercase().contains(&query_cf)
+                        || r.result.to_lowercase().contains(&query_cf)
+                        || formatted_time.to_lowercase().contains(&query_cf)
+                        || rec_origin.contains(&query_cf)
+                        || rec_origin_label.to_lowercase().contains(&query_cf)
+                        || rec_mcp_client
+                            .as_deref()
+                            .is_some_and(|c| c.to_lowercase().contains(&query_cf))
+                        || r.seq.to_string().contains(&query_cf)
+                        || r.hash.to_lowercase().contains(&query_cf);
+                    if !cheap_hit {
+                        let details_blob = serde_json::to_string(&r.details)
+                            .unwrap_or_default()
+                            .to_lowercase();
+                        if !details_blob.contains(&query_cf) {
+                            continue;
+                        }
                     }
                 }
-                matched.push(json!({
+                matched_indices.push(idx);
+            }
+
+            if sort_order == "desc" {
+                matched_indices.reverse();
+            }
+
+            let total = matched_indices.len();
+            let start = offset.min(total);
+            let end = start.saturating_add(limit).min(total);
+            let mut page_items = Vec::with_capacity(end.saturating_sub(start));
+            for &idx in &matched_indices[start..end] {
+                let r = &records[idx];
+                page_items.push(json!({
                     "seq": r.seq,
-                    "timestamp": formatted_time,
-                    "origin": rec_origin,
-                    "origin_label": rec_origin_label,
-                    "mcp_client": rec_mcp_client,
+                    "timestamp": display_iso_time(&r.timestamp, false),
+                    "origin": audit_origin(r).as_str(),
+                    "origin_label": audit_origin_label(r),
+                    "mcp_client": audit_mcp_user(r),
                     "actor": r.actor,
                     "action": r.action,
-                    "action_title": title,
+                    "action_title": action_title(&r.action),
                     "subject": r.subject,
                     "result": r.result,
                     "details": r.details,
@@ -1983,11 +2086,7 @@ impl CaseService {
                 }));
             }
 
-            if sort_order == "desc" {
-                matched.reverse();
-            }
-
-            let page = paginate(&matched, limit, offset);
+            let page = paginate_page(total, &page_items, limit, offset);
             let mut out = serde_json::Map::new();
             out.insert(
                 "case_dir".to_string(),
@@ -2104,7 +2203,9 @@ impl CaseService {
         self.update_case_cache_from_open(&case);
         self.update_audit_cache(case.folder(), records.clone());
         let sha256 = records
-            .last()
+            .iter()
+            .rev()
+            .find(|r| r.action == "REPORT_GENERATE")
             .and_then(|r| r.details.get("sha256"))
             .and_then(Value::as_str)
             .unwrap_or("")

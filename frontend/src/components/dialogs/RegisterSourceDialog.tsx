@@ -57,29 +57,39 @@ export const RegisterSourceDialog: React.FC<RegisterSourceDialogProps> = ({
     }
   };
 
+  const handleSafeClose = () => {
+    if (!submitting) {
+      onClose();
+    }
+  };
+
   return (
     <Modal
       title="登记证据来源"
       width={600}
-      onClose={onClose}
+      onClose={handleSafeClose}
       footer={
         <>
-          <button type="button" className="td-btn" disabled={submitting} onClick={onClose}>
+          <button type="button" className="td-btn" disabled={submitting} onClick={handleSafeClose}>
             取消
           </button>
           <div className="td-modal-footer-spacer" />
           <button
-            type="button"
+            type="submit"
+            form="td-register-source-form"
             className="td-btn td-btn--accent"
             disabled={submitting || shaInvalid}
-            onClick={() => void handleSave()}
           >
             {submitting ? '正在保存…' : '保存'}
           </button>
         </>
       }
     >
-      <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <form
+        id="td-register-source-form"
+        onSubmit={handleSave}
+        style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
+      >
         <div className="td-form-grid">
           {SOURCE_FIELD_LABELS.map((field, idx) => (
             <React.Fragment key={field.key}>

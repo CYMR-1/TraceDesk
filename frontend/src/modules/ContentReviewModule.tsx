@@ -33,8 +33,10 @@ interface ContentReviewModuleProps {
 }
 
 const DEFAULT_HINT = '搜索当前清单中的普通文件及删除记录，不含未分配空间。双击命中定位原始字节。';
+/** 高频流式命中时的批量合入节流窗口（毫秒），减少十万级命中下的数组反复拷贝 */
+const HIT_FLUSH_INTERVAL_MS = 80;
 
-export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
+const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
   snapshot,
   selectedBrowserEntry,
   singleFileRequestToken,
@@ -47,6 +49,7 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
   const [encoding, setEncoding] = useState<SearchEncoding>('UTF-8');
   const [scope, setScope] = useState<'all' | 'selected'>('all');
 
+  const [starting, setStarting] = useState(false);
   const [searching, setSearching] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [searchId, setSearchId] = useState<string | null>(null);
@@ -57,6 +60,7 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
   const [notice, setNotice] = useState<string | null>(null);
 
   const [hits, setHits] = useState<SearchHitDto[]>([]);
+  const [offsetOptions, setOffsetOptions] = useState<string[]>([]);
   const [excludedSet, setExcludedSet] = useState<Set<number>>(() => new Set());
   const [checkedSet, setCheckedSet] = useState<Set<number>>(() => new Set());
   const [selectedHitIndex, setSelectedHitIndex] = useState<number | null>(null);
@@ -68,6 +72,8 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
   const activeSearchIdRef = useRef<string | null>(null);
   /** 防止 Rust 极速扫描在 startContentSearch invoke 返回前就发出 hits/progress/finished 事件造成丢失 */
   const startingSearchRef = useRef(false);
+  /** 案件切换或新搜索启动时递增代次，用于隔离已过期/已取消的 startContentSearch 异步返回 */
+  const searchGenRef = useRef(0);
   const earlyBufferRef = useRef<
     Map<
       string,
@@ -79,8 +85,22 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
     >
   >(new Map());
   const pendingHitsRef = useRef<SearchHitDto[]>([]);
+  const flushTimerRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
+  /** 增量维护已出现的分区偏移集合，避免十万级命中每帧 O(N) 重扫全部命中提取筛选项 */
+  const seenOffsetsRef = useRef<Set<number>>(new Set());
   const prevCaseIdRef = useRef<string>('');
+
+  const cancelScheduledFlush = useCallback(() => {
+    if (flushTimerRef.current !== null) {
+      window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+    if (rafRef.current !== null) {
+      window.cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+  }, []);
 
   // 从文件浏览右键触发单文件搜索
   useEffect(() => {
@@ -90,11 +110,13 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
     }
   }, [singleFileRequestToken]);
 
-  // 案件切换时重置
+  // 案件切换时彻底重置搜索态、定时器和打开中的十六进制定位弹窗
   useEffect(() => {
     const cid = snapshot?.id ?? '';
     if (prevCaseIdRef.current !== cid) {
       prevCaseIdRef.current = cid;
+      searchGenRef.current += 1;
+      cancelScheduledFlush();
       if (activeSearchIdRef.current) {
         void tauriApi.cancelContentSearch({ searchId: activeSearchIdRef.current }).catch(() => {});
       }
@@ -102,36 +124,67 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
       startingSearchRef.current = false;
       earlyBufferRef.current.clear();
       pendingHitsRef.current = [];
+      seenOffsetsRef.current.clear();
+      setStarting(false);
       setSearching(false);
       setCancelling(false);
       onSearchingChange(false);
       setSearchId(null);
+      setScope('all');
       setHits([]);
+      setOffsetOptions([]);
       setExcludedSet(new Set());
       setCheckedSet(new Set());
       setSelectedHitIndex(null);
       setActiveFilters({});
+      setPreviewHit(null);
       setProgress(null);
       setFinishedInfo(null);
       setNotice(null);
     }
-  }, [snapshot?.id, onSearchingChange]);
+  }, [snapshot?.id, onSearchingChange, cancelScheduledFlush]);
 
   const flushPendingHits = useCallback(() => {
+    flushTimerRef.current = null;
     rafRef.current = null;
     if (pendingHitsRef.current.length === 0) return;
     const chunk = pendingHitsRef.current;
     pendingHitsRef.current = [];
+
+    // 增量检测新增的分区偏移，仅在出现新分区时更新表头筛选项
+    let hasNewOffset = false;
+    for (let i = 0; i < chunk.length; i += 1) {
+      const off = chunk[i].offset;
+      if (!seenOffsetsRef.current.has(off)) {
+        seenOffsetsRef.current.add(off);
+        hasNewOffset = true;
+      }
+    }
+    if (hasNewOffset) {
+      setOffsetOptions(
+        Array.from(seenOffsetsRef.current)
+          .sort((a, b) => a - b)
+          .map(String)
+      );
+    }
+
     setHits((prev) => (prev.length === 0 ? chunk : prev.concat(chunk)));
   }, []);
 
+  const scheduleHitFlush = useCallback(() => {
+    if (flushTimerRef.current !== null || rafRef.current !== null) return;
+    // 首屏低延迟尽快呈现，已有大量命中时按 80ms 合并批次，显著降低数组拼接次数
+    flushTimerRef.current = window.setTimeout(() => {
+      flushTimerRef.current = null;
+      rafRef.current = window.requestAnimationFrame(flushPendingHits);
+    }, HIT_FLUSH_INTERVAL_MS);
+  }, [flushPendingHits]);
+
   const applyFinishedEvent = useCallback(
     (ev: SearchFinishedEvent) => {
-      if (rafRef.current !== null) {
-        window.cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
+      cancelScheduledFlush();
       flushPendingHits();
+      setStarting(false);
       setSearching(false);
       setCancelling(false);
       onSearchingChange(false);
@@ -140,10 +193,10 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
         onSnapshotUpdated(ev.snapshot);
       }
     },
-    [flushPendingHits, onSearchingChange, onSnapshotUpdated]
+    [cancelScheduledFlush, flushPendingHits, onSearchingChange, onSnapshotUpdated]
   );
 
-  // 订阅 Rust 流式推送事件（支持早到事件缓冲回放，杜绝小镜像 invoke/emit 竞态）
+  // 订阅 Rust 流式推送事件（支持早到事件缓冲回放，并在 StrictMode/卸载时立即释放晚到 unlistener）
   useEffect(() => {
     let mounted = true;
     const unlisteners: (() => void)[] = [];
@@ -157,47 +210,60 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
       return bucket;
     };
 
-    const setup = async () => {
-      const u1 = await tauriEvents.onSearchHits((ev) => {
-        if (!mounted || ev.hits.length === 0) return;
-        if (ev.searchId === activeSearchIdRef.current) {
-          pendingHitsRef.current.push(...ev.hits);
-          if (rafRef.current === null) {
-            rafRef.current = window.requestAnimationFrame(flushPendingHits);
-          }
-        } else if (startingSearchRef.current) {
-          ensureEarlyBucket(ev.searchId).hits.push(...ev.hits);
+    const registerSafe = async (promise: Promise<() => void>) => {
+      try {
+        const unlisten = await promise;
+        if (!mounted) {
+          unlisten();
+        } else {
+          unlisteners.push(unlisten);
         }
-      });
-      const u2 = await tauriEvents.onSearchProgress((ev) => {
-        if (!mounted) return;
-        if (ev.searchId === activeSearchIdRef.current) {
-          setProgress(ev);
-        } else if (startingSearchRef.current) {
-          ensureEarlyBucket(ev.searchId).progress = ev;
-        }
-      });
-      const u3 = await tauriEvents.onSearchFinished((ev) => {
-        if (!mounted) return;
-        if (ev.searchId === activeSearchIdRef.current) {
-          applyFinishedEvent(ev);
-        } else if (startingSearchRef.current) {
-          ensureEarlyBucket(ev.searchId).finished = ev;
-        }
-      });
-      unlisteners.push(u1, u2, u3);
+      } catch {
+        // 忽略单通道订阅异常，防止阻断其余事件注册
+      }
     };
 
-    void setup();
+    void Promise.all([
+      registerSafe(
+        tauriEvents.onSearchHits((ev) => {
+          if (!mounted || ev.hits.length === 0) return;
+          if (ev.searchId === activeSearchIdRef.current) {
+            pendingHitsRef.current.push(...ev.hits);
+            scheduleHitFlush();
+          } else if (startingSearchRef.current) {
+            ensureEarlyBucket(ev.searchId).hits.push(...ev.hits);
+          }
+        })
+      ),
+      registerSafe(
+        tauriEvents.onSearchProgress((ev) => {
+          if (!mounted) return;
+          if (ev.searchId === activeSearchIdRef.current) {
+            setProgress(ev);
+          } else if (startingSearchRef.current) {
+            ensureEarlyBucket(ev.searchId).progress = ev;
+          }
+        })
+      ),
+      registerSafe(
+        tauriEvents.onSearchFinished((ev) => {
+          if (!mounted) return;
+          if (ev.searchId === activeSearchIdRef.current) {
+            applyFinishedEvent(ev);
+          } else if (startingSearchRef.current) {
+            ensureEarlyBucket(ev.searchId).finished = ev;
+          }
+        })
+      ),
+    ]);
+
     return () => {
       mounted = false;
-      if (rafRef.current !== null) {
-        window.cancelAnimationFrame(rafRef.current);
-        rafRef.current = null;
-      }
+      cancelScheduledFlush();
       for (const u of unlisteners) u();
+      unlisteners.length = 0;
     };
-  }, [flushPendingHits, applyFinishedEvent]);
+  }, [scheduleHitFlush, cancelScheduledFlush, applyFinishedEvent]);
 
   // 未排除的命中
   const retainedHits = useMemo(() => {
@@ -205,8 +271,9 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
     return hits.filter((h) => !excludedSet.has(h.hitIndex));
   }, [hits, excludedSet]);
 
-  // 分区偏移筛选选项
-  const offsetOptions = useMemo(() => {
+  // 当存在排除项时，按需根据保留命中收缩分区偏移选项；无排除项时直接复用增量维护的 offsetOptions
+  const effectiveOffsetOptions = useMemo(() => {
+    if (excludedSet.size === 0) return offsetOptions;
     const set = new Set<number>();
     for (const h of retainedHits) {
       set.add(h.offset);
@@ -214,7 +281,7 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
     return Array.from(set)
       .sort((a, b) => a - b)
       .map(String);
-  }, [retainedHits]);
+  }, [excludedSet.size, offsetOptions, retainedHits]);
 
   // 当前可见命中（已应用分区偏移表头筛选）
   const visibleHits = useMemo(() => {
@@ -225,6 +292,8 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
   }, [retainedHits, activeFilters.offset]);
 
   const visibleCheckedCount = useMemo(() => {
+    // 未勾选任何命中时 O(1) 短路返回，避免流式增长期间每批全表遍历
+    if (checkedSet.size === 0) return 0;
     let count = 0;
     for (const h of visibleHits) {
       if (checkedSet.has(h.hitIndex)) count += 1;
@@ -254,6 +323,7 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
   );
 
   const handleStartOrCancel = async () => {
+    if (starting) return;
     if (searching) {
       if (activeSearchIdRef.current) {
         setCancelling(true);
@@ -283,11 +353,16 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
       return;
     }
 
+    const gen = ++searchGenRef.current;
+    cancelScheduledFlush();
     activeSearchIdRef.current = null;
     earlyBufferRef.current.clear();
     startingSearchRef.current = true;
     pendingHitsRef.current = [];
+    seenOffsetsRef.current.clear();
+    setStarting(true);
     setHits([]);
+    setOffsetOptions([]);
     setExcludedSet(new Set());
     setCheckedSet(new Set());
     setSelectedHitIndex(null);
@@ -302,8 +377,14 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
         encoding,
         selectedEntryId: scope === 'selected' ? selectedBrowserEntry?.entryId ?? null : null,
       });
+      // 若在启动等待期间发生了案件切换或重置，立即取消该过期后端搜索并放弃回写
+      if (gen !== searchGenRef.current) {
+        void tauriApi.cancelContentSearch({ searchId: res.searchId }).catch(() => {});
+        return;
+      }
       activeSearchIdRef.current = res.searchId;
       startingSearchRef.current = false;
+      setStarting(false);
       setSearchId(res.searchId);
       setNeedleHex(res.needleHex);
       setActiveEncoding(encoding);
@@ -326,7 +407,9 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
         onSearchingChange(true);
       }
     } catch (err) {
+      if (gen !== searchGenRef.current) return;
       startingSearchRef.current = false;
+      setStarting(false);
       earlyBufferRef.current.clear();
       onAlert('搜索条件无效', formatError(err), 'warning');
     }
@@ -484,6 +567,34 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
       ? Math.min(100, Math.round((100 * progress.done) / progress.total))
       : null;
 
+  const tableFilterOptions = useMemo(
+    () => ({ offset: effectiveOffsetOptions }),
+    [effectiveOffsetOptions]
+  );
+
+  const hitRowKey = useCallback((r: SearchHitDto) => r.hitIndex, []);
+  const isHitRowChecked = useCallback((r: SearchHitDto) => checkedSet.has(r.hitIndex), [checkedSet]);
+  const handleToggleHitCheck = useCallback((row: SearchHitDto, checked: boolean) => {
+    setCheckedSet((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(row.hitIndex);
+      else next.delete(row.hitIndex);
+      return next;
+    });
+  }, []);
+  const handleFilterChange = useCallback((colKey: string, vals: string[]) => {
+    setActiveFilters((prev) => ({ ...prev, [colKey]: vals }));
+  }, []);
+  const handleSelectHitRow = useCallback((r: SearchHitDto) => {
+    setSelectedHitIndex(r.hitIndex);
+  }, []);
+  const handleDoubleClickHitRow = useCallback((r: SearchHitDto, _idx: number, colKey: string) => {
+    if (colKey === 'check') return;
+    setPreviewHit(r);
+  }, []);
+
+  const isBusySearching = starting || searching;
+
   return (
     <div className="td-panel">
       <div className="td-panel-top-bar">
@@ -497,15 +608,15 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
             className="td-input"
             placeholder="输入文字或十六进制字节；搜索文件内容（如演示镜像 HEX: 6E 6F 74 65）"
             value={query}
-            disabled={searching}
+            disabled={isBusySearching}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !searching) {
+              if (e.key === 'Enter' && !isBusySearching) {
                 void handleStartOrCancel();
               }
             }}
           />
-          {query && !searching && (
+          {query && !isBusySearching && (
             <button type="button" className="td-search-clear" onClick={() => setQuery('')}>
               ×
             </button>
@@ -517,7 +628,7 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
           style={{ minWidth: 96 }}
           aria-label="搜索编码"
           value={encoding}
-          disabled={searching}
+          disabled={isBusySearching}
           onChange={(e) => setEncoding(e.target.value as SearchEncoding)}
         >
           {SEARCH_ENCODINGS.map((enc) => (
@@ -532,7 +643,7 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
           style={{ minWidth: 158 }}
           aria-label="搜索范围"
           value={scope}
-          disabled={searching}
+          disabled={isBusySearching}
           onChange={(e) => setScope(e.target.value as 'all' | 'selected')}
         >
           <option value="all">全部文件</option>
@@ -546,10 +657,10 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
         <button
           type="button"
           className={`td-btn ${searching ? 'td-btn--warning' : 'td-btn--accent'}`}
-          disabled={cancelling || (!searching && busy)}
+          disabled={starting || cancelling || (!searching && busy)}
           onClick={() => void handleStartOrCancel()}
         >
-          {cancelling ? '正在取消…' : searching ? '取消搜索' : '搜索'}
+          {starting ? '正在启动…' : cancelling ? '正在取消…' : searching ? '取消搜索' : '搜索'}
         </button>
 
         <div className="td-toolbar-divider" />
@@ -596,29 +707,17 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
       <VirtualTable
         rows={visibleHits}
         columns={columns}
-        rowKey={(r) => r.hitIndex}
+        rowKey={hitRowKey}
         selectedKey={selectedHitIndex}
         checkState={checkState}
         onToggleCheckAll={handleToggleCheckAll}
-        isRowChecked={(r) => checkedSet.has(r.hitIndex)}
-        onToggleRowCheck={(row, checked) => {
-          setCheckedSet((prev) => {
-            const next = new Set(prev);
-            if (checked) next.add(row.hitIndex);
-            else next.delete(row.hitIndex);
-            return next;
-          });
-        }}
-        filterOptions={{ offset: offsetOptions }}
+        isRowChecked={isHitRowChecked}
+        onToggleRowCheck={handleToggleHitCheck}
+        filterOptions={tableFilterOptions}
         activeFilters={activeFilters}
-        onFilterChange={(colKey, vals) =>
-          setActiveFilters((prev) => ({ ...prev, [colKey]: vals }))
-        }
-        onSelectRow={(r) => setSelectedHitIndex(r.hitIndex)}
-        onDoubleClickRow={(r, _idx, colKey) => {
-          if (colKey === 'check') return;
-          setPreviewHit(r);
-        }}
+        onFilterChange={handleFilterChange}
+        onSelectRow={handleSelectHitRow}
+        onDoubleClickRow={handleDoubleClickHitRow}
         emptyText={
           searching
             ? '正在扫描文件内容，命中将实时流式呈现…'
@@ -639,3 +738,5 @@ export const ContentReviewModule: React.FC<ContentReviewModuleProps> = ({
     </div>
   );
 };
+
+export const ContentReviewModule = React.memo(ContentReviewModuleInner);

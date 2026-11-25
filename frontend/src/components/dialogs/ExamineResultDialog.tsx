@@ -1,7 +1,7 @@
 /**
  * 文件哈希计算 / 副本一致性比对结果弹窗
  */
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { ExamineFileResponse } from '../../types/ipc';
 import { copyToClipboard, formatBytes } from '../../utils/assets';
 import { UiIcon } from '../Icons';
@@ -15,12 +15,28 @@ interface ExamineResultDialogProps {
 
 export const ExamineResultDialog: React.FC<ExamineResultDialogProps> = ({ data, onClose }) => {
   const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<number | null>(null);
+
+  // 组件卸载时清理未触发的复制反馈定时器
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+    };
+  }, []);
 
   const handleCopyHash = async () => {
     const ok = await copyToClipboard(data.sha256);
     if (ok) {
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      copyTimerRef.current = window.setTimeout(() => {
+        setCopied(false);
+        copyTimerRef.current = null;
+      }, 2000);
     }
   };
 

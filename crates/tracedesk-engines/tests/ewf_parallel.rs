@@ -431,3 +431,26 @@ fn test_ewf_hash_logical_stream_auto_fallback_to_img_cat() {
     let fallback_sha = hash_logical_stream(&tsk, e01, raw.len() as u64, None, None).unwrap();
     assert_eq!(fallback_sha, expected_sha);
 }
+
+#[test]
+fn test_ewf1_rejects_trailing_segment_after_done() {
+    let raw: Vec<u8> = (0usize..(64 * 1024))
+        .map(|i| (i.wrapping_mul(17) & 0xff) as u8)
+        .collect();
+    let tmp = tempfile::tempdir().unwrap();
+
+    // 构造合法单段 .E01（末尾已含 `done` 节），再人为拷贝出多余的 `.E02` 续段（修改段号为 2）。
+    let segs = build_ewf1_segments(tmp.path(), "extra_done", &raw, 16, false);
+    assert_eq!(segs.len(), 1);
+    let mut dup_seg = fs::read(&segs[0]).unwrap();
+    dup_seg[9] = 2;
+    dup_seg[10] = 0;
+    let e02 = tmp.path().join("extra_done.E02");
+    fs::write(&e02, &dup_seg).unwrap();
+
+    let err = EwfIndex::open(&segs[0]).unwrap_err();
+    assert!(
+        matches!(err, EngineError::Ewf(_)),
+        "done 节之后若仍存在多余分段，必须拒绝解析：{err:?}"
+    );
+}

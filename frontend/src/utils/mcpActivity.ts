@@ -95,8 +95,33 @@ export const MCP_PHASE_LABELS: Record<McpActivityPhase, string> = {
   failed: '失败',
 };
 
+/** 合并同 callId 的旧记录与新记录，优先保留首次启动时的非空上下文字段 */
+function mergeSingleActivity(
+  existing: McpActivityRecord,
+  incoming: McpActivityRecord
+): McpActivityRecord {
+  return {
+    ...existing,
+    ...incoming,
+    // 保留首次启动时已携带而完成事件可能省略的上下文字段
+    sessionId: incoming.sessionId ?? existing.sessionId ?? null,
+    toolName: incoming.toolName ?? existing.toolName ?? null,
+    toolTitle: incoming.toolTitle || existing.toolTitle,
+    category: incoming.category || existing.category,
+    caseDir: incoming.caseDir ?? existing.caseDir ?? null,
+    caseNumber: incoming.caseNumber ?? existing.caseNumber ?? null,
+    paramsSummary: incoming.paramsSummary || existing.paramsSummary,
+    paramsJson: incoming.paramsJson || existing.paramsJson,
+    resultSummary: incoming.resultSummary || existing.resultSummary,
+    responsePreview: incoming.responsePreview ?? existing.responsePreview ?? null,
+    error:
+      incoming.error ??
+      (incoming.phase === 'completed' ? null : existing.error ?? null),
+  };
+}
+
 /**
- * 将实时推送的 MCP 活动事件按 callId 合并到现有列表：
+ * 将实时推送的单条 MCP 活动事件按 callId 合并到现有列表：
  * - 若已存在同 callId 条目，则原位更新（优先保留已有非空参数与上下文）；
  * - 若不存在，则插入列表顶部并限制最大缓存条数。
  */
@@ -105,33 +130,65 @@ export function mergeMcpActivityRecord(
   incoming: McpActivityRecord,
   maxItems = 500
 ): McpActivityRecord[] {
-  const normalizedIncoming = normalizeMcpActivityRecord(incoming);
-  const index = prev.findIndex((item) => item.callId === normalizedIncoming.callId);
-  if (index >= 0) {
-    const existing = prev[index];
-    const merged: McpActivityRecord = {
-      ...existing,
-      ...normalizedIncoming,
-      // 保留首次启动时已携带而完成事件可能省略的上下文字段
-      sessionId: normalizedIncoming.sessionId ?? existing.sessionId ?? null,
-      toolName: normalizedIncoming.toolName ?? existing.toolName ?? null,
-      toolTitle: normalizedIncoming.toolTitle || existing.toolTitle,
-      category: normalizedIncoming.category || existing.category,
-      caseDir: normalizedIncoming.caseDir ?? existing.caseDir ?? null,
-      caseNumber: normalizedIncoming.caseNumber ?? existing.caseNumber ?? null,
-      paramsSummary: normalizedIncoming.paramsSummary || existing.paramsSummary,
-      paramsJson: normalizedIncoming.paramsJson || existing.paramsJson,
-      resultSummary: normalizedIncoming.resultSummary || existing.resultSummary,
-      responsePreview: normalizedIncoming.responsePreview ?? existing.responsePreview ?? null,
-      error:
-        normalizedIncoming.error ??
-        (normalizedIncoming.phase === 'completed' ? null : existing.error ?? null),
-    };
-    const next = [...prev];
-    next[index] = merged;
-    return next;
+  return mergeMcpActivityBatch(prev, [incoming], maxItems);
+}
+
+/**
+ * 批量合并多条实时推送的 MCP 活动事件（O(N + K) 单趟索引合并，避免高频突发事件下的 O(N * K) 复制）：
+ * - 已存在的 callId 原位更新；
+ * - 新增的 callId 按到达顺序前置到列表顶部（最新在前），超出 maxItems 时截断尾部。
+ */
+export function mergeMcpActivityBatch(
+  prev: readonly McpActivityRecord[],
+  incomingList: readonly McpActivityRecord[],
+  maxItems = 500
+): McpActivityRecord[] {
+  if (incomingList.length === 0) {
+    return prev as McpActivityRecord[];
   }
-  return [normalizedIncoming, ...prev].slice(0, maxItems);
+
+  // 建立已有条目的 callId -> 数组下标映射，避免每条事件线性扫描
+  const existingIndexByCallId = new Map<string, number>();
+  for (let i = 0; i < prev.length; i += 1) {
+    existingIndexByCallId.set(prev[i].callId, i);
+  }
+
+  let updatedExisting: McpActivityRecord[] | null = null;
+  // 新到达且不在 prev 中的条目，按到达顺序合并去重后再倒序前置到顶部
+  const addedOrder: McpActivityRecord[] = [];
+  const addedIndexByCallId = new Map<string, number>();
+
+  for (const raw of incomingList) {
+    const normalized = normalizeMcpActivityRecord(raw);
+    const existingIdx = existingIndexByCallId.get(normalized.callId);
+    if (existingIdx !== undefined) {
+      if (!updatedExisting) {
+        updatedExisting = [...prev];
+      }
+      updatedExisting[existingIdx] = mergeSingleActivity(updatedExisting[existingIdx], normalized);
+      continue;
+    }
+
+    const addedIdx = addedIndexByCallId.get(normalized.callId);
+    if (addedIdx !== undefined) {
+      addedOrder[addedIdx] = mergeSingleActivity(addedOrder[addedIdx], normalized);
+    } else {
+      addedIndexByCallId.set(normalized.callId, addedOrder.length);
+      addedOrder.push(normalized);
+    }
+  }
+
+  const baseList = updatedExisting ?? prev;
+  if (addedOrder.length === 0) {
+    return updatedExisting ?? (prev as McpActivityRecord[]);
+  }
+
+  // 后到达的新记录位于最顶部（最新在前）
+  const prepended: McpActivityRecord[] = [];
+  for (let i = addedOrder.length - 1; i >= 0; i -= 1) {
+    prepended.push(addedOrder[i]);
+  }
+  return prepended.concat(baseList).slice(0, maxItems);
 }
 
 /**
@@ -169,7 +226,8 @@ export function computeMcpActivityStats(
       writeCalls += 1;
     }
 
-    const client = stripTrailingVersion(item.client);
+    // 入队时已对 client 完成去尾版本规范化，此处直接复用清洗后字段避免重复正则匹配
+    const client = item.client.trim();
     if (client) {
       clientSet.add(client);
     }

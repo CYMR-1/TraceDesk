@@ -1,7 +1,7 @@
 /**
  * TraceDesk 桌面端主工作台骨架 (5 层纵向架构 + 11 个可装配功能模块)
  */
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { isTauriRuntime, tauriApi, tauriEvents } from './api/tauri';
 import { BrandLogo, UiIcon } from './components/Icons';
 import { AlertDialog, type AlertDialogState } from './components/dialogs/AlertDialog';
@@ -19,7 +19,6 @@ import { ContentReviewModule } from './modules/ContentReviewModule';
 import { EvidenceInfoModule } from './modules/EvidenceInfoModule';
 import { FileBrowserModule } from './modules/FileBrowserModule';
 import { FindingsModule } from './modules/FindingsModule';
-import { HelpGuideDialog } from './modules/HelpGuideDialog';
 import { McpMonitorModule } from './modules/McpMonitorModule';
 import { TimelineModule } from './modules/TimelineModule';
 import type {
@@ -29,18 +28,21 @@ import type {
   EntryView,
   ExamineFileResponse,
   McpActivityRecord,
-  McpActivityStats,
   McpStatus,
 } from './types/ipc';
 import { formatError } from './utils/assets';
 import {
   computeMcpActivityStats,
-  EMPTY_MCP_ACTIVITY_STATS,
-  mergeMcpActivityRecord,
+  mergeMcpActivityBatch,
   normalizeCaseDirForCompare,
   normalizeMcpActivitySnapshot,
   stripTrailingVersion,
 } from './utils/mcpActivity';
+
+// 仅在点击“操作说明”时按需懒加载图文引导模块，缩减桌面端首屏主包体积
+const HelpGuideDialog = React.lazy(() =>
+  import('./modules/HelpGuideDialog').then((mod) => ({ default: mod.HelpGuideDialog }))
+);
 
 const DEFAULT_STATUS = '就绪 · 应用层只读 · 本地处理 · UTC+8';
 const DEFAULT_DETAIL = '选择目录定位文件；拖动分隔条调整树、列表和内容区域。';
@@ -71,10 +73,10 @@ export const App: React.FC = () => {
   const [refreshToken, setRefreshToken] = useState(0);
   const [singleFileSearchToken, setSingleFileSearchToken] = useState(0);
 
-  // 全局 MCP 服务状态与实时监控流
+  // 全局 MCP 服务状态与实时监控流（汇总指标从活动列表纯派生，消除状态更新器内嵌套 setState）
   const [mcpStatus, setMcpStatus] = useState<McpStatus | null>(null);
   const [mcpActivities, setMcpActivities] = useState<McpActivityRecord[]>([]);
-  const [mcpStats, setMcpStats] = useState<McpActivityStats>(EMPTY_MCP_ACTIVITY_STATS);
+  const mcpStats = useMemo(() => computeMcpActivityStats(mcpActivities), [mcpActivities]);
 
   // 弹窗状态
   const [newCaseOpen, setNewCaseOpen] = useState(false);
@@ -92,6 +94,8 @@ export const App: React.FC = () => {
   const hashingImageRef = useRef(false);
   const contentSearchingRef = useRef(false);
   const backgroundBusyRef = useRef(false);
+  const inspectingBundleRef = useRef(false);
+  const clearPendingProgressRef = useRef<() => void>(() => {});
   const snapshotRef = useRef<CaseSnapshot | null>(null);
   const mcpStatusRef = useRef<McpStatus | null>(null);
   mcpStatusRef.current = mcpStatus;
@@ -143,23 +147,21 @@ export const App: React.FC = () => {
     [setSnapshotState]
   );
 
-  /** 拉取最新 MCP 服务状态与实时监控流快照 */
+  /** 拉取最新 MCP 服务状态与实时监控流快照（与后端 500 条环形队列容量对齐，避免统计跳变） */
   const refreshMcpTelemetry = useCallback(async () => {
     const [statusRes, actRes] = await Promise.all([
       tauriApi.getMcpStatus(),
-      tauriApi.listMcpActivities({ limit: 300 }),
+      tauriApi.listMcpActivities({ limit: 500 }),
     ]);
     const normalized = normalizeMcpActivitySnapshot(actRes);
     setMcpStatus(statusRes);
     setMcpActivities(normalized.activities);
-    setMcpStats(normalized.stats);
   }, []);
 
   /** 清空 MCP 实时操作流 */
   const handleClearMcpActivities = useCallback(async () => {
     await tauriApi.clearMcpActivities();
     setMcpActivities([]);
-    setMcpStats(EMPTY_MCP_ACTIVITY_STATS);
   }, []);
 
   /** 温和刷新当前打开的案件快照与审计日志（不折叠文件树、不丢失当前选中文件） */
@@ -202,13 +204,12 @@ export const App: React.FC = () => {
       try {
         const [statusRes, actRes] = await Promise.all([
           tauriApi.getMcpStatus(),
-          tauriApi.listMcpActivities({ limit: 300 }),
+          tauriApi.listMcpActivities({ limit: 500 }),
         ]);
         if (!active) return;
         const normalized = normalizeMcpActivitySnapshot(actRes);
         setMcpStatus(statusRes);
         setMcpActivities(normalized.activities);
-        setMcpStats(normalized.stats);
       } catch {
         // 忽略初始化 MCP 监控读取失败
       }
@@ -218,99 +219,171 @@ export const App: React.FC = () => {
     };
   }, [setSnapshotState]);
 
-  // 订阅后台任务、大镜像哈希进度与 MCP 实时遥测事件
+  // 订阅后台任务、大镜像哈希进度与 MCP 实时遥测事件（含 StrictMode/卸载防泄漏与 rAF 合批节流）
   useEffect(() => {
     let mounted = true;
     const unlisteners: (() => void)[] = [];
 
-    void (async () => {
-      const u1 = await tauriEvents.onTaskProgress((ev) => {
-        if (!mounted) return;
-        if (ev.total > 0) {
-          const pct = Math.min(100, Math.floor((100 * ev.done) / ev.total));
-          const text = `${ev.stage} · ${pct}%`;
-          setProgressPercent(pct);
-          setStatusText(text);
-          setTaskStageText(text);
+    // 高频进度事件合批缓存，每帧最多提交一次状态更新并去重相同文案/百分比
+    let progressRafId: number | null = null;
+    let pendingProgress: { pct: number | null; text: string } | null = null;
+    let lastProgressPct: number | null | undefined = undefined;
+    let lastProgressText = '';
+
+    const scheduleProgressUpdate = (pct: number | null, text: string) => {
+      pendingProgress = { pct, text };
+      if (progressRafId !== null) return;
+      progressRafId = window.requestAnimationFrame(() => {
+        progressRafId = null;
+        if (!mounted || !pendingProgress) return;
+        const { pct: nextPct, text: nextText } = pendingProgress;
+        pendingProgress = null;
+        if (nextPct !== lastProgressPct) {
+          lastProgressPct = nextPct;
+          setProgressPercent(nextPct);
+        }
+        if (nextText !== lastProgressText) {
+          lastProgressText = nextText;
+          setStatusText(nextText);
+          setTaskStageText(nextText);
+        }
+      });
+    };
+
+    const clearPendingProgress = () => {
+      if (progressRafId !== null) {
+        window.cancelAnimationFrame(progressRafId);
+        progressRafId = null;
+      }
+      pendingProgress = null;
+      lastProgressPct = undefined;
+      lastProgressText = '';
+    };
+    // 暴露给 runTask 与大镜像校验启停边界，防止已排队的进度 rAF 覆盖任务结束状态或误吞重复任务进度
+    clearPendingProgressRef.current = clearPendingProgress;
+
+    // MCP 实时活动事件按帧合批合并，避免跨进程尾随突发数十条事件触发连续全树重绘
+    let mcpRafId: number | null = null;
+    let pendingMcpRecords: McpActivityRecord[] = [];
+    const scheduleMcpFlush = () => {
+      if (mcpRafId !== null) return;
+      mcpRafId = window.requestAnimationFrame(() => {
+        mcpRafId = null;
+        if (!mounted || pendingMcpRecords.length === 0) return;
+        const batch = pendingMcpRecords;
+        pendingMcpRecords = [];
+        setMcpActivities((prev) => mergeMcpActivityBatch(prev, batch, 500));
+      });
+    };
+
+    const registerSafe = async (promise: Promise<() => void>) => {
+      try {
+        const unlisten = await promise;
+        if (!mounted) {
+          // 若组件在 listen() Promise 解析前已卸载，立即释放底层监听防泄漏
+          unlisten();
         } else {
-          const text = `${ev.stage}…`;
+          unlisteners.push(unlisten);
+        }
+      } catch {
+        // 忽略单通道订阅异常
+      }
+    };
+
+    void Promise.all([
+      registerSafe(
+        tauriEvents.onTaskProgress((ev) => {
+          if (!mounted) return;
+          if (ev.total > 0) {
+            const pct = Math.min(100, Math.floor((100 * ev.done) / ev.total));
+            scheduleProgressUpdate(pct, `${ev.stage} · ${pct}%`);
+          } else {
+            scheduleProgressUpdate(null, `${ev.stage}…`);
+          }
+        })
+      ),
+      registerSafe(
+        tauriEvents.onHashProgress((ev) => {
+          if (!mounted) return;
+          const pct = ev.total > 0 ? Math.min(100, Math.floor((100 * ev.done) / ev.total)) : 0;
+          scheduleProgressUpdate(
+            pct,
+            `后台读取整镜像 · ${pct}% · ${Math.round(ev.rateMiBs)} MiB/s`
+          );
+        })
+      ),
+      registerSafe(
+        tauriEvents.onHashFinished((ev) => {
+          if (!mounted) return;
+          clearPendingProgress();
+          setHashingImageState(false);
           setProgressPercent(null);
-          setStatusText(text);
-          setTaskStageText(text);
-        }
-      });
-
-      const u2 = await tauriEvents.onHashProgress((ev) => {
-        if (!mounted) return;
-        const pct = ev.total > 0 ? Math.min(100, Math.floor((100 * ev.done) / ev.total)) : 0;
-        const text = `后台读取整镜像 · ${pct}% · ${Math.round(ev.rateMiBs)} MiB/s`;
-        setProgressPercent(pct);
-        setStatusText(text);
-        setTaskStageText(text);
-      });
-
-      const u3 = await tauriEvents.onHashFinished((ev) => {
-        if (!mounted) return;
-        setHashingImageState(false);
-        setProgressPercent(null);
-        setTaskStageText('');
-        if (ev.snapshot) {
-          applySnapshot(ev.snapshot);
-        }
-        if (ev.cancelled) {
-          setStatusText('已取消校验');
-        } else if (ev.error) {
-          setStatusText('校验失败');
-          showAlert('校验失败', ev.error, 'error');
-        } else if (ev.ok) {
-          setStatusText(ev.initialFixed ? '已完成整镜像 SHA-256 固定' : '完整性校验通过');
-        } else {
-          setStatusText('完整性校验不匹配');
-          showAlert('完整性校验', '本次读取与案件固定值不一致，请核查原始镜像！', 'error');
-        }
-      });
-
-      // 实时合并 MCP 单步操作事件并重算统计指标
-      const u4 = await tauriEvents.onMcpActivity((record) => {
-        if (!mounted) return;
-        setMcpActivities((prev) => {
-          const next = mergeMcpActivityRecord(prev, record, 500);
-          setMcpStats(computeMcpActivityStats(next));
-          return next;
-        });
-      });
-
+          setTaskStageText('');
+          if (ev.snapshot) {
+            applySnapshot(ev.snapshot);
+          }
+          if (ev.cancelled) {
+            setStatusText('已取消校验');
+          } else if (ev.error) {
+            setStatusText('校验失败');
+            showAlert('校验失败', ev.error, 'error');
+          } else if (ev.ok) {
+            setStatusText(ev.initialFixed ? '已完成整镜像 SHA-256 固定' : '完整性校验通过');
+          } else {
+            setStatusText('完整性校验不匹配');
+            showAlert('完整性校验', '本次读取与案件固定值不一致，请核查原始镜像！', 'error');
+          }
+        })
+      ),
+      // 实时批量合并 MCP 单步操作事件（汇总指标通过 useMemo 自动重算）
+      registerSafe(
+        tauriEvents.onMcpActivity((record) => {
+          if (!mounted) return;
+          pendingMcpRecords.push(record);
+          scheduleMcpFlush();
+        })
+      ),
       // 当 MCP 对当前打开的案件执行受控写入后，温和刷新快照与审计日志（不折叠文件树）
-      const u5 = await tauriEvents.onMcpCaseUpdated((ev) => {
-        if (!mounted) return;
-        const currentDir = normalizeCaseDirForCompare(snapshotRef.current?.caseDir);
-        const updatedDir = normalizeCaseDirForCompare(ev.caseDir);
-        if (currentDir && updatedDir && currentDir === updatedDir) {
-          const matchedTool = mcpStatusRef.current?.tools?.find((t) => t.name === ev.toolName);
-          const displayTool = matchedTool?.title || ev.toolName;
-          const cleanClient = stripTrailingVersion(ev.client);
-          const clientLabel = cleanClient ? `MCP（${cleanClient}）` : 'MCP';
-          void refreshCurrentCaseGently(`${clientLabel}完成「${displayTool}」，已自动刷新案件与审计日志`);
-        }
-      });
-
-      unlisteners.push(u1, u2, u3, u4, u5);
-    })();
+      registerSafe(
+        tauriEvents.onMcpCaseUpdated((ev) => {
+          if (!mounted) return;
+          const currentDir = normalizeCaseDirForCompare(snapshotRef.current?.caseDir);
+          const updatedDir = normalizeCaseDirForCompare(ev.caseDir);
+          if (currentDir && updatedDir && currentDir === updatedDir) {
+            const matchedTool = mcpStatusRef.current?.tools?.find((t) => t.name === ev.toolName);
+            const displayTool = matchedTool?.title || ev.toolName;
+            const cleanClient = stripTrailingVersion(ev.client);
+            const clientLabel = cleanClient ? `MCP（${cleanClient}）` : 'MCP';
+            void refreshCurrentCaseGently(`${clientLabel}完成「${displayTool}」，已自动刷新案件与审计日志`);
+          }
+        })
+      ),
+    ]);
 
     return () => {
       mounted = false;
+      clearPendingProgress();
+      clearPendingProgressRef.current = () => {};
+      if (mcpRafId !== null) {
+        window.cancelAnimationFrame(mcpRafId);
+        mcpRafId = null;
+      }
+      pendingMcpRecords = [];
       for (const u of unlisteners) u();
+      unlisteners.length = 0;
     };
   }, [applySnapshot, refreshCurrentCaseGently, setHashingImageState, showAlert]);
 
-  // 主窗口关闭守卫（仅 Tauri 桌面端）
+  // 主窗口关闭守卫（仅 Tauri 桌面端；增加 mounted 守卫防止 StrictMode 双挂载残留重复关闭监听）
   useEffect(() => {
     if (!inTauri) return;
+    let mounted = true;
     let unlisten: (() => void) | undefined;
     void (async () => {
       try {
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
-        unlisten = await getCurrentWindow().onCloseRequested(async (event) => {
+        const fn = await getCurrentWindow().onCloseRequested(async (event) => {
+          if (!mounted) return;
           if (busyRef.current || backgroundBusyRef.current) {
             event.preventDefault();
             openBusyDialog('存在正在运行的后台任务或内容搜索，请先取消或等待完成后再关闭窗口。');
@@ -326,11 +399,17 @@ export const App: React.FC = () => {
             // 忽略守卫查询异常
           }
         });
+        if (!mounted) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
       } catch {
         // 忽略非窗口环境
       }
     })();
     return () => {
+      mounted = false;
       unlisten?.();
     };
   }, [inTauri, openBusyDialog, showAlert]);
@@ -361,6 +440,7 @@ export const App: React.FC = () => {
         return null;
       }
 
+      clearPendingProgressRef.current();
       setBusyState(true);
       setActiveTaskLabel(label);
       setTaskStageText(`${label}…`);
@@ -370,6 +450,7 @@ export const App: React.FC = () => {
       try {
         result = await work();
       } catch (err) {
+        clearPendingProgressRef.current();
         setBusyState(false);
         setActiveTaskLabel(null);
         setTaskStageText('');
@@ -379,7 +460,8 @@ export const App: React.FC = () => {
         return null;
       }
 
-      // work() 完成后先同步释放并发锁，再执行 onSuccess 或返回给链式后续任务
+      // work() 完成后先清理在途进度帧并同步释放并发锁，再执行 onSuccess 或返回给链式后续任务
+      clearPendingProgressRef.current();
       setBusyState(false);
       setActiveTaskLabel(null);
       setTaskStageText('');
@@ -498,6 +580,10 @@ export const App: React.FC = () => {
       showAlert('提示', '请先新建或打开案件。', 'info');
       return;
     }
+    if (backgroundBusyRef.current) {
+      openBusyDialog('加载新镜像前请先取消后台完整性校验或内容搜索，或等待完成。');
+      return;
+    }
     if (busyRef.current) {
       openBusyDialog('请等待当前任务完成后再加载镜像。');
       return;
@@ -514,8 +600,10 @@ export const App: React.FC = () => {
       imagePath = 'C:\\TraceDesk\\evidence\\demo.dd';
     }
     // 先完成镜像识别并同步释放并发锁，再在顶层链式调用分区自动扫描/根目录读取
-    const snap = await runTask('打开镜像并识别分区', () =>
-      tauriApi.loadImage({ imagePath: imagePath! })
+    const snap = await runTask(
+      '打开镜像并识别分区',
+      () => tauriApi.loadImage({ imagePath: imagePath! }),
+      { requiresCase: true, blocksBackground: true }
     );
     if (snap) {
       setSelectedEntry(null);
@@ -549,12 +637,14 @@ export const App: React.FC = () => {
         openBusyDialog('请等待当前任务完成后再启动完整性校验。');
         return;
       }
+      clearPendingProgressRef.current();
       setHashingImageState(true);
       setStatusText('后台读取整镜像 · 可继续浏览');
       setTaskStageText('后台读取整镜像 · 可继续浏览');
       try {
         await tauriApi.verifyIntegrity();
       } catch (err) {
+        clearPendingProgressRef.current();
         setHashingImageState(false);
         setProgressPercent(null);
         setTaskStageText('');
@@ -568,13 +658,17 @@ export const App: React.FC = () => {
       applySnapshot(res.snapshot);
       showAlert(
         '完整性校验',
-        res.ok ? '通过：与初始固定值一致。' : '失败：原始镜像已发生变化！',
+        res.ok
+          ? res.initialFixed
+            ? '已完成整镜像 SHA-256 首次固定。'
+            : '通过：与初始固定值一致。'
+          : '失败：原始镜像已发生变化！',
         res.ok ? 'ok' : 'error'
       );
     }
   };
 
-  const handleScanAllPartitions = async () => {
+  const handleScanAllPartitions = useCallback(async () => {
     if (!snapshotRef.current?.evidence) return;
     if (busyRef.current) {
       openBusyDialog('请等待当前任务完成后再扫描分区。');
@@ -593,16 +687,16 @@ export const App: React.FC = () => {
     } finally {
       setScanningPartitions(false);
     }
-  };
+  }, [applySnapshot, openBusyDialog, runTask]);
 
-  const handleCancelScan = async () => {
+  const handleCancelScan = useCallback(async () => {
     try {
       await tauriApi.cancelScanPartitions();
       setStatusText('正在取消建立索引…');
     } catch {
       // 忽略
     }
-  };
+  }, []);
 
   const handleBrowseDirectory = useCallback(
     async (offset: number, inode: string | null, path: string): Promise<EntryView[] | null> => {
@@ -619,89 +713,104 @@ export const App: React.FC = () => {
     [runTask, applySnapshot]
   );
 
-  const handleExportEntry = async (entry: EntryView) => {
-    await runTask('校验并导出证据副本', () => tauriApi.exportFile({ entryId: entry.entryId }), {
-      onSuccess: (res) => {
-        applySnapshot(res.snapshot);
-        setExportResult({
-          title: res.title || '导出成功',
-          path: res.path,
-          note: res.note,
-        });
-      },
-    });
-  };
-
-  const handleHashEntry = async (entry: EntryView) => {
-    await runTask('计算文件 SHA-256', () => tauriApi.examineFile({ entryId: entry.entryId }), {
-      onSuccess: (res) => {
-        applySnapshot(res.snapshot);
-        setExamineResult(res);
-      },
-    });
-  };
-
-  const handleCompareEntry = async (entry: EntryView) => {
-    if (busyRef.current) {
-      openBusyDialog('请等待当前任务完成后再校验文件一致性。');
-      return;
-    }
-    const currentSnap = snapshotRef.current;
-    let comparisonPath: string | null = null;
-    if (inTauri) {
-      comparisonPath = await tauriApi.pickFile({
-        title: '选择与镜像内文件比较的本地副本',
-        defaultPath: currentSnap ? `${currentSnap.caseDir}\\exports` : undefined,
+  const handleExportEntry = useCallback(
+    async (entry: EntryView) => {
+      await runTask('校验并导出证据副本', () => tauriApi.exportFile({ entryId: entry.entryId }), {
+        onSuccess: (res) => {
+          applySnapshot(res.snapshot);
+          setExportResult({
+            title: res.title || '导出成功',
+            path: res.path,
+            note: res.note,
+          });
+        },
       });
-      if (!comparisonPath) return;
-    } else {
-      comparisonPath = `${currentSnap?.caseDir ?? 'C:\\TraceDesk\\cases\\DEMO-01'}\\exports\\${entry.name}`;
-    }
-    await runTask(
-      '校验文件一致性',
-      () => tauriApi.examineFile({ entryId: entry.entryId, comparisonPath: comparisonPath! }),
-      {
+    },
+    [applySnapshot, runTask]
+  );
+
+  const handleHashEntry = useCallback(
+    async (entry: EntryView) => {
+      await runTask('计算文件 SHA-256', () => tauriApi.examineFile({ entryId: entry.entryId }), {
         onSuccess: (res) => {
           applySnapshot(res.snapshot);
           setExamineResult(res);
         },
-      }
-    );
-  };
+      });
+    },
+    [applySnapshot, runTask]
+  );
 
-  const handleSearchInFile = (entry: EntryView) => {
+  const handleCompareEntry = useCallback(
+    async (entry: EntryView) => {
+      if (busyRef.current) {
+        openBusyDialog('请等待当前任务完成后再校验文件一致性。');
+        return;
+      }
+      const currentSnap = snapshotRef.current;
+      let comparisonPath: string | null = null;
+      if (inTauri) {
+        comparisonPath = await tauriApi.pickFile({
+          title: '选择与镜像内文件比较的本地副本',
+          defaultPath: currentSnap ? `${currentSnap.caseDir}\\exports` : undefined,
+        });
+        if (!comparisonPath) return;
+      } else {
+        comparisonPath = `${currentSnap?.caseDir ?? 'C:\\TraceDesk\\cases\\DEMO-01'}\\exports\\${entry.name}`;
+      }
+      await runTask(
+        '校验文件一致性',
+        () => tauriApi.examineFile({ entryId: entry.entryId, comparisonPath: comparisonPath! }),
+        {
+          onSuccess: (res) => {
+            applySnapshot(res.snapshot);
+            setExamineResult(res);
+          },
+        }
+      );
+    },
+    [applySnapshot, inTauri, openBusyDialog, runTask]
+  );
+
+  const handleSearchInFile = useCallback((entry: EntryView) => {
     setSelectedEntry(entry);
     setActiveTab('review');
     setSingleFileSearchToken((n) => n + 1);
-  };
+  }, []);
 
-  const handleExportFsstat = async (offset: number) => {
-    await runTask('读取完整文件系统详情', () => tauriApi.exportFsstat({ offset }), {
-      onSuccess: (res) => {
-        setExportResult({
-          title: '文件系统详情已导出',
-          path: res.path,
-        });
-      },
-    });
-  };
+  const handleExportFsstat = useCallback(
+    async (offset: number) => {
+      await runTask('读取完整文件系统详情', () => tauriApi.exportFsstat({ offset }), {
+        onSuccess: (res) => {
+          setExportResult({
+            title: '文件系统详情已导出',
+            path: res.path,
+          });
+        },
+      });
+    },
+    [runTask]
+  );
 
-  const handleExportFindings = async (groupKeys: string[]) => {
-    if (groupKeys.length === 0) {
-      showAlert('提示', '当前没有可导出的取证发现。', 'info');
-      return;
-    }
-    await runTask('一键导出取证发现', () => tauriApi.exportFindings({ groupKeys }), {
-      onSuccess: (res) => {
-        applySnapshot(res.snapshot);
-        setExportResult({
-          title: '取证发现已导出',
-          path: res.summaryPath,
-          note: res.note,
-        });
-      },
-    });
-  };
+  const handleExportFindings = useCallback(
+    async (groupKeys: string[]) => {
+      if (groupKeys.length === 0) {
+        showAlert('提示', '当前没有可导出的取证发现。', 'info');
+        return;
+      }
+      await runTask('一键导出取证发现', () => tauriApi.exportFindings({ groupKeys }), {
+        onSuccess: (res) => {
+          applySnapshot(res.snapshot);
+          setExportResult({
+            title: '取证发现已导出',
+            path: res.summaryPath,
+            note: res.note,
+          });
+        },
+      });
+    },
+    [applySnapshot, runTask, showAlert]
+  );
 
   const handleGenerateReport = async () => {
     await runTask('校验并生成 Markdown 报告', () => tauriApi.generateReport(), {
@@ -725,10 +834,11 @@ export const App: React.FC = () => {
       showAlert('提示', '请先加载镜像。', 'info');
       return;
     }
-    if (busyRef.current) {
+    if (busyRef.current || inspectingBundleRef.current) {
       openBusyDialog('请等待当前任务完成后再生成复核包。');
       return;
     }
+    inspectingBundleRef.current = true;
     try {
       const mat = await tauriApi.inspectBundleMaterials();
       if (mat.exports.length > 0 || mat.searches.length > 0) {
@@ -738,8 +848,72 @@ export const App: React.FC = () => {
       }
     } catch (err) {
       showAlert('检查复核包材料失败', formatError(err), 'error');
+    } finally {
+      inspectingBundleRef.current = false;
     }
   };
+
+  // 为记忆化子模块提供稳定的回调引用，防止进度或遥测更新破坏 React.memo
+  const handleScanPartitionsClick = useCallback(() => {
+    void handleScanAllPartitions();
+  }, [handleScanAllPartitions]);
+
+  const handleCancelScanClick = useCallback(() => {
+    void handleCancelScan();
+  }, [handleCancelScan]);
+
+  const handleExportEntryClick = useCallback(
+    (entry: EntryView) => {
+      void handleExportEntry(entry);
+    },
+    [handleExportEntry]
+  );
+
+  const handleRecordNoteClick = useCallback((entry: EntryView) => {
+    setNoteTarget(entry);
+  }, []);
+
+  const handleHashEntryClick = useCallback(
+    (entry: EntryView) => {
+      void handleHashEntry(entry);
+    },
+    [handleHashEntry]
+  );
+
+  const handleCompareEntryClick = useCallback(
+    (entry: EntryView) => {
+      void handleCompareEntry(entry);
+    },
+    [handleCompareEntry]
+  );
+
+  const handleOpenRegisterSource = useCallback(() => {
+    setRegisterSourceOpen(true);
+  }, []);
+
+  const handleExportFsstatClick = useCallback(
+    (offset: number) => {
+      void handleExportFsstat(offset);
+    },
+    [handleExportFsstat]
+  );
+
+  const handleExportFindingsClick = useCallback(
+    (groupKeys: string[]) => {
+      void handleExportFindings(groupKeys);
+    },
+    [handleExportFindings]
+  );
+
+  const handleJumpToAudit = useCallback(() => {
+    setActiveTab('audit');
+    bumpRefresh();
+  }, [bumpRefresh]);
+
+  const handleRefreshCurrentCaseManual = useCallback(
+    () => refreshCurrentCaseGently('已手动刷新当前案件快照与审计日志'),
+    [refreshCurrentCaseGently]
+  );
 
   const runBuildBundle = async (selectedExportIndices?: number[], selectedSearchIndices?: number[]) => {
     await runTask(
@@ -1060,13 +1234,13 @@ export const App: React.FC = () => {
             selectedEntry={selectedEntry}
             onSelectEntry={setSelectedEntry}
             onDetailChange={setDetailText}
-            onScanPartitions={() => void handleScanAllPartitions()}
-            onCancelScan={() => void handleCancelScan()}
+            onScanPartitions={handleScanPartitionsClick}
+            onCancelScan={handleCancelScanClick}
             onBrowseDirectory={handleBrowseDirectory}
-            onExportEntry={(entry) => void handleExportEntry(entry)}
-            onRecordNote={(entry) => setNoteTarget(entry)}
-            onHashEntry={(entry) => void handleHashEntry(entry)}
-            onCompareEntry={(entry) => void handleCompareEntry(entry)}
+            onExportEntry={handleExportEntryClick}
+            onRecordNote={handleRecordNoteClick}
+            onHashEntry={handleHashEntryClick}
+            onCompareEntry={handleCompareEntryClick}
             onSearchInFile={handleSearchInFile}
           />
         </div>
@@ -1075,8 +1249,8 @@ export const App: React.FC = () => {
           <EvidenceInfoModule
             snapshot={snapshot}
             busy={busy}
-            onRegisterSource={() => setRegisterSourceOpen(true)}
-            onExportFsstat={(offset) => void handleExportFsstat(offset)}
+            onRegisterSource={handleOpenRegisterSource}
+            onExportFsstat={handleExportFsstatClick}
           />
         )}
 
@@ -1085,7 +1259,7 @@ export const App: React.FC = () => {
             snapshot={snapshot}
             busy={busy}
             refreshToken={refreshToken}
-            onExportFindings={(groupKeys) => void handleExportFindings(groupKeys)}
+            onExportFindings={handleExportFindingsClick}
           />
         )}
 
@@ -1135,6 +1309,7 @@ export const App: React.FC = () => {
             }}
           >
             <McpMonitorModule
+              isActive={activeTab === 'mcp'}
               snapshot={snapshot}
               mcpStatus={mcpStatus}
               activities={mcpActivities}
@@ -1142,11 +1317,8 @@ export const App: React.FC = () => {
               onStatusChange={setMcpStatus}
               onRefreshAll={refreshMcpTelemetry}
               onClearActivities={handleClearMcpActivities}
-              onJumpToAudit={() => {
-                setActiveTab('audit');
-                bumpRefresh();
-              }}
-              onRefreshCurrentCase={() => refreshCurrentCaseGently('已手动刷新当前案件快照与审计日志')}
+              onJumpToAudit={handleJumpToAudit}
+              onRefreshCurrentCase={handleRefreshCurrentCaseManual}
             />
           </div>
         )}
@@ -1240,7 +1412,11 @@ export const App: React.FC = () => {
         />
       )}
 
-      {helpOpen && <HelpGuideDialog onClose={() => setHelpOpen(false)} />}
+      {helpOpen && (
+        <Suspense fallback={null}>
+          <HelpGuideDialog onClose={() => setHelpOpen(false)} />
+        </Suspense>
+      )}
 
       {busyDialogReason && (
         <BusyTaskDialog

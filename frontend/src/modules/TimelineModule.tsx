@@ -22,7 +22,7 @@ interface TimelineModuleProps {
   busy: boolean;
 }
 
-export const TimelineModule: React.FC<TimelineModuleProps> = ({ snapshot, busy }) => {
+const TimelineModuleInner: React.FC<TimelineModuleProps> = ({ snapshot, busy }) => {
   const [built, setBuilt] = useState(false);
   const [building, setBuilding] = useState(false);
   const [hint, setHint] = useState('尚未打开案件');
@@ -45,6 +45,9 @@ export const TimelineModule: React.FC<TimelineModuleProps> = ({ snapshot, busy }
   const [detailOpen, setDetailOpen] = useState(false);
 
   const lastCaseKeyRef = useRef('');
+  // 使用代次与请求序号隔离旧案件或过期分页响应，避免竞态覆盖当前视图
+  const buildGenRef = useRef(0);
+  const pageReqSeqRef = useRef(0);
   const caseKey = `${snapshot?.id ?? ''}|${snapshot?.evidence?.path ?? ''}|${snapshot?.inventoryCount ?? 0}|${snapshot?.browsingDirectories ? 'q' : 'f'}`;
 
   const needsManualBuild = Boolean(
@@ -56,9 +59,11 @@ export const TimelineModule: React.FC<TimelineModuleProps> = ({ snapshot, busy }
 
   const handleBuildTimeline = useCallback(async () => {
     if (!snapshot) return;
+    const gen = ++buildGenRef.current;
     setBuilding(true);
     try {
       const res = await tauriApi.buildTimeline();
+      if (gen !== buildGenRef.current) return;
       setHint(res.hint);
       setTotalEvents(res.total);
       setFilterOptions({
@@ -69,9 +74,12 @@ export const TimelineModule: React.FC<TimelineModuleProps> = ({ snapshot, busy }
       setBuilt(true);
       setPage(0);
     } catch (err) {
+      if (gen !== buildGenRef.current) return;
       setHint(`生成时间线失败：${formatError(err)}`);
     } finally {
-      setBuilding(false);
+      if (gen === buildGenRef.current) {
+        setBuilding(false);
+      }
     }
   }, [snapshot]);
 
@@ -79,15 +87,20 @@ export const TimelineModule: React.FC<TimelineModuleProps> = ({ snapshot, busy }
   useEffect(() => {
     if (lastCaseKeyRef.current === caseKey) return;
     lastCaseKeyRef.current = caseKey;
+    buildGenRef.current += 1;
+    pageReqSeqRef.current += 1;
 
+    setBuilding(false);
     setSearchInput('');
     setAppliedQuery('');
     setActiveFilters({});
     setPage(0);
+    setTotalPages(1);
     setRows([]);
     setSelectedNum(null);
     setDetailOpen(false);
     setBuilt(false);
+    setFilterOptions({ event: [], status: [], offset: [] });
 
     if (!snapshot) {
       setHint('尚未打开案件');
@@ -115,6 +128,7 @@ export const TimelineModule: React.FC<TimelineModuleProps> = ({ snapshot, busy }
   // 查询时间线分页（单值筛选与后端分页总数 100% 一致）
   const fetchPage = useCallback(async () => {
     if (!snapshot || !built) return;
+    const seq = ++pageReqSeqRef.current;
     try {
       const res = await tauriApi.queryTimelinePage({
         query: appliedQuery,
@@ -126,10 +140,12 @@ export const TimelineModule: React.FC<TimelineModuleProps> = ({ snapshot, busy }
         page,
         pageSize: PAGE_SIZE,
       });
+      if (seq !== pageReqSeqRef.current) return;
       setRows(res.items);
       setTotalEvents(res.totalEvents);
       setTotalPages(Math.max(1, res.totalPages));
     } catch (err) {
+      if (seq !== pageReqSeqRef.current) return;
       setHint(`查询时间线失败：${formatError(err)}`);
     }
   }, [snapshot, built, appliedQuery, activeFilters, sortColumn, sortDescending, page]);
@@ -291,3 +307,5 @@ export const TimelineModule: React.FC<TimelineModuleProps> = ({ snapshot, busy }
     </div>
   );
 };
+
+export const TimelineModule = React.memo(TimelineModuleInner);

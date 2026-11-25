@@ -495,3 +495,68 @@ fn cli_argument_parsing_and_help_version_commands() {
     assert!(String::from_utf8_lossy(&missing_arg_out.stderr).contains("缺少复核包"));
 }
 
+#[test]
+fn cli_split_flag_preserves_equals_in_positional_and_run_demo_isolation() {
+    use tracedesk_cli::{CliCommand, parse_cli_args};
+
+    // 1. 位置路径参数包含 `=` 时不得被 `split_flag` 误拆分截断。
+    let parsed = parse_cli_args(&[
+        "verify-bundle".to_string(),
+        r"C:\cases\tag=2026\review_bundle.zip".to_string(),
+        "--sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+    ])
+    .expect("parse verify-bundle with '=' in path");
+    assert_eq!(
+        parsed,
+        CliCommand::VerifyBundle {
+            zip_path: PathBuf::from(r"C:\cases\tag=2026\review_bundle.zip"),
+            sha256: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()
+            ),
+        }
+    );
+
+    // 2. 显式传入不存在的 `--evidence` 路径时应报错而不是静默生成假镜像。
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let missing_ev = tmp.path().join("does_not_exist.dd");
+    let custom_cases = tmp.path().join("custom_cases");
+    let bad_out = Command::new(cli_bin())
+        .arg("run-demo")
+        .arg("--cases-dir")
+        .arg(&custom_cases)
+        .arg("--evidence")
+        .arg(&missing_ev)
+        .output()
+        .expect("run run-demo with missing evidence");
+    assert!(
+        !bad_out.status.success(),
+        "显式不存在的 --evidence 必须返回失败退出码"
+    );
+    assert!(
+        !missing_ev.exists(),
+        "不得在显式不存在的 --evidence 路径自动生成合成镜像"
+    );
+
+    // 3. 传入 `--cases-dir <custom>` 且未设置 `TRACEDESK_LOGS_DIR` 时，标记写入自定义目录而不污染仓库全局 logs/latest-demo.txt。
+    let demo_dd = tmp.path().join("demo.dd");
+    tracedesk_cli::create_demo_image(&demo_dd, true).expect("create demo.dd");
+    let ok_out = Command::new(cli_bin())
+        .arg("run-demo")
+        .arg("--cases-dir")
+        .arg(&custom_cases)
+        .arg("--evidence")
+        .arg(&demo_dd)
+        .env_remove("TRACEDESK_LOGS_DIR")
+        .output()
+        .expect("run run-demo with custom cases-dir");
+    assert!(
+        ok_out.status.success(),
+        "run-demo failed: {}",
+        String::from_utf8_lossy(&ok_out.stderr)
+    );
+    assert!(
+        custom_cases.join("latest-demo.txt").is_file(),
+        "自定义 --cases-dir 模式下 latest-demo.txt 应写入该自定义目录内"
+    );
+}
+

@@ -5,8 +5,45 @@ use std::io::{self, BufRead, BufReader, Write};
 
 use uuid::Uuid;
 
+use crate::http::MAX_HTTP_BODY_BYTES;
 use crate::service::McpResult;
 use crate::tools::{McpRequestContext, McpServer};
+
+/// 限制单行 JSON-RPC 消息最大读取字节数，防止异常无换行超长输入导致 OOM。
+const MAX_STDIO_LINE_BYTES: usize = MAX_HTTP_BODY_BYTES;
+
+fn read_bounded_line<R: BufRead>(reader: &mut R, out: &mut Vec<u8>) -> io::Result<bool> {
+    out.clear();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(!out.is_empty());
+        }
+        if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+            let chunk = &available[..=pos];
+            if out.len().saturating_add(chunk.len()) > MAX_STDIO_LINE_BYTES {
+                reader.consume(pos + 1);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "stdio JSON-RPC 单行消息超过最大字节限制",
+                ));
+            }
+            out.extend_from_slice(chunk);
+            reader.consume(pos + 1);
+            return Ok(true);
+        }
+        let len = available.len();
+        if out.len().saturating_add(len) > MAX_STDIO_LINE_BYTES {
+            reader.consume(len);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "stdio JSON-RPC 单行消息超过最大字节限制",
+            ));
+        }
+        out.extend_from_slice(available);
+        reader.consume(len);
+    }
+}
 
 /// 退出 stdio 消息循环时自动清理该会话对应的 `clientInfo` 缓存。
 struct StdioSessionGuard<'a> {
@@ -37,13 +74,9 @@ pub fn run_stdio_loop<R: BufRead, W: Write>(
         ..Default::default()
     };
 
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            break;
-        }
+    let mut raw_line = Vec::new();
+    while read_bounded_line(&mut reader, &mut raw_line)? {
+        let line = String::from_utf8_lossy(&raw_line);
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;

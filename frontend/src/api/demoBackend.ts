@@ -354,7 +354,7 @@ let searchCounter = 0;
 const activeSearchTimers = new Map<string, number>();
 const searchHitsStore = new Map<string, SearchHitDto[]>();
 
-const demoFindings: FindingGroupDto[] = [
+const INITIAL_DEMO_FINDINGS: FindingGroupDto[] = [
   {
     groupKey: 'DOCS/CASE.TXT|2048|5|false',
     seq: 1,
@@ -410,7 +410,7 @@ const demoFindings: FindingGroupDto[] = [
   },
 ];
 
-const demoAuditRecords: AuditRecordDto[] = [
+const INITIAL_DEMO_AUDIT_RECORDS: AuditRecordDto[] = [
   {
     seq: 1,
     timestamp: '2026-03-10 09:00:00',
@@ -511,6 +511,20 @@ const demoAuditRecords: AuditRecordDto[] = [
     hash: '7708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6',
   },
 ];
+
+function cloneInitialFindings(): FindingGroupDto[] {
+  return INITIAL_DEMO_FINDINGS.map((g) => ({
+    ...g,
+    records: g.records.map((r) => ({ ...r, details: { ...r.details } })),
+  }));
+}
+
+function cloneInitialAuditRecords(): AuditRecordDto[] {
+  return INITIAL_DEMO_AUDIT_RECORDS.map((r) => ({ ...r, details: { ...r.details } }));
+}
+
+let demoFindings: FindingGroupDto[] = cloneInitialFindings();
+let demoAuditRecords: AuditRecordDto[] = cloneInitialAuditRecords();
 
 const demoTimelineRows: TimelineRowDto[] = [
   { number: 1, time: '2026-03-10 09:12:00', event: 'B 创建', status: '现存', offset: 2048, inode: '3', path: 'DOCS' },
@@ -904,16 +918,37 @@ export const demoBackend = {
       quickLocation: null,
     };
     currentCase = snap;
+    demoFindings = [];
+    demoAuditRecords = [
+      {
+        seq: 1,
+        timestamp: snap.created,
+        origin: 'manual',
+        originLabel: '人工',
+        actor: snap.examiner,
+        action: 'CASE_CREATE',
+        actionTitle: '新建案件',
+        result: '成功',
+        subject: snap.number,
+        details: { target: snap.target },
+        previous: '0'.repeat(64),
+        hash: '11a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f80',
+      },
+    ];
     return snap;
   },
 
   async open_case(): Promise<CaseSnapshot> {
     currentCase = buildInitialCase();
+    demoFindings = cloneInitialFindings();
+    demoAuditRecords = cloneInitialAuditRecords();
     return currentCase;
   },
 
   async close_case(): Promise<{ closed: boolean }> {
     currentCase = null;
+    demoFindings = [];
+    demoAuditRecords = [];
     return { closed: true };
   },
 
@@ -1077,11 +1112,20 @@ export const demoBackend = {
     const cleanPath = entry.path.replace(/^\/+|\/+$/g, '');
     const lastSlash = cleanPath.lastIndexOf('/');
     const scopePath = lastSlash >= 0 ? cleanPath.slice(0, lastSlash) : '';
+    // 计算目标文件在同目录分页中的准确索引
+    const siblings = DEMO_ENTRIES.filter((item) => {
+      if (item.offset !== entry.offset) return false;
+      const p = item.path.replace(/^\/+|\/+$/g, '');
+      const idx = p.lastIndexOf('/');
+      const parent = idx >= 0 ? p.slice(0, idx) : '';
+      return parent === scopePath;
+    });
+    const siblingIdx = Math.max(0, siblings.findIndex((item) => item.entryId === entry.entryId));
     return {
       scopeOffset: entry.offset,
       scopePath,
-      page: 0,
-      indexInPage: 0,
+      page: Math.floor(siblingIdx / 100),
+      indexInPage: siblingIdx % 100,
     };
   },
 
@@ -1398,44 +1442,65 @@ export const demoBackend = {
     if (!query) throw new Error('请输入搜索内容');
     searchCounter += 1;
     const searchId = `demo-search-${searchCounter}`;
-    let needleHex = '';
+    let needleBytes: Uint8Array;
     if (args.encoding === 'HEX') {
       const clean = query.replace(/\s+/g, '');
       if (clean.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(clean)) {
         throw new Error('HEX 搜索条件必须为偶数位十六进制字节');
       }
-      needleHex = clean.toUpperCase();
+      const pairs = clean.match(/.{2}/g) || [];
+      needleBytes = new Uint8Array(pairs.map((h) => parseInt(h, 16)));
+    } else if (args.encoding === 'UTF-16LE') {
+      needleBytes = new Uint8Array(query.length * 2);
+      for (let i = 0; i < query.length; i += 1) {
+        const code = query.charCodeAt(i);
+        needleBytes[i * 2] = code & 0xff;
+        needleBytes[i * 2 + 1] = (code >> 8) & 0xff;
+      }
     } else {
-      needleHex = Array.from(new TextEncoder().encode(query))
-        .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
-        .join('');
+      needleBytes = new TextEncoder().encode(query);
     }
+    const needleHex = Array.from(needleBytes)
+      .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
+      .join('');
 
     const targets = args.selectedEntryId
       ? DEMO_ENTRIES.filter((e) => e.entryId === args.selectedEntryId)
       : DEMO_ENTRIES.filter((e) => !e.directory && !e.mode.toLowerCase().startsWith('v/'));
 
+    // 在原始字节数组上执行精确字节匹配，保证中文/二进制文件的偏移与 HEX 上下文严格准确
+    const findBytes = (haystack: Uint8Array, needle: Uint8Array, fromIndex: number): number => {
+      if (needle.length === 0 || needle.length > haystack.length) return -1;
+      const limit = haystack.length - needle.length;
+      outer: for (let i = fromIndex; i <= limit; i += 1) {
+        for (let j = 0; j < needle.length; j += 1) {
+          if (haystack[i + j] !== needle[j]) continue outer;
+        }
+        return i;
+      }
+      return -1;
+    };
+    const toHex = (arr: Uint8Array) =>
+      Array.from(arr)
+        .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
+        .join(' ');
+    const encoder = new TextEncoder();
     const matched: SearchHitDto[] = [];
-    const lowerQuery = args.encoding === 'HEX'
-      ? new TextDecoder().decode(new Uint8Array((needleHex.match(/.{2}/g) || []).map((h) => parseInt(h, 16)))).toLowerCase()
-      : query.toLowerCase();
 
     for (const entry of targets) {
       const content = DEMO_FILE_TEXTS[entry.entryId] || '';
-      const lower = content.toLowerCase();
-      let idx = lower.indexOf(lowerQuery);
-      while (idx !== -1 && lowerQuery.length > 0) {
-        const bytes = new TextEncoder().encode(content);
-        const beforeSlice = bytes.slice(Math.max(0, idx - 8), idx);
-        const afterSlice = bytes.slice(idx + lowerQuery.length, idx + lowerQuery.length + 12);
-        const toHex = (arr: Uint8Array) =>
-          Array.from(arr)
-            .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
-            .join(' ');
+      const bytes =
+        entry.entryId === '2048:9:0'
+          ? Uint8Array.from(content, (ch) => ch.charCodeAt(0) & 0xff)
+          : encoder.encode(content);
+      let pos = findBytes(bytes, needleBytes, 0);
+      while (pos !== -1) {
+        const beforeSlice = bytes.slice(Math.max(0, pos - 8), pos);
+        const afterSlice = bytes.slice(pos + needleBytes.length, pos + needleBytes.length + 12);
         matched.push({
           hitIndex: matched.length,
           entryId: entry.entryId,
-          pos: idx,
+          pos,
           offset: entry.offset,
           inode: entry.inode,
           path: entry.path,
@@ -1443,7 +1508,7 @@ export const demoBackend = {
           beforeHex: toHex(beforeSlice) || '—',
           afterHex: toHex(afterSlice) || '—',
         });
-        idx = lower.indexOf(lowerQuery, idx + Math.max(1, lowerQuery.length));
+        pos = findBytes(bytes, needleBytes, pos + Math.max(1, needleBytes.length));
       }
     }
 

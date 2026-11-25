@@ -84,13 +84,23 @@ pub fn run_demo_command(
         None => paths.cases_dir.clone(),
     };
     let target_evidence = match evidence {
-        Some(e) => e.to_path_buf(),
-        None => paths.evidence_dir.join("demo.dd"),
+        Some(e) => {
+            if !e.is_file() {
+                return Err(CoreError::NotFound(format!(
+                    "指定的证据镜像文件不存在：{}",
+                    e.display()
+                )));
+            }
+            e.to_path_buf()
+        }
+        None => {
+            let default_ev = paths.evidence_dir.join("demo.dd");
+            if !default_ev.exists() {
+                create_demo_image(&default_ev, true)?;
+            }
+            default_ev
+        }
     };
-
-    if !target_evidence.exists() {
-        create_demo_image(&target_evidence, true)?;
-    }
 
     let tsk = TskCli::discover(paths.find_tsk_bin().as_deref())?;
     let cancel = AtomicBool::new(false);
@@ -242,9 +252,17 @@ pub fn run_demo_command(
     let verify_bundle_ms = round_ms(t);
     let total_ms = round_ms(t_total);
 
-    // 12. 更新 logs/latest-demo.txt
-    fs::create_dir_all(&paths.logs_dir)?;
-    let latest_demo_marker = paths.logs_dir.join("latest-demo.txt");
+    // 12. 更新 latest-demo.txt：若显式指定了自定义 `--cases-dir` 且未设置 `TRACEDESK_LOGS_DIR`，
+    //     将标记写入自定义案件目录内，避免污染仓库全局 `logs/latest-demo.txt`。
+    let has_explicit_logs_env = std::env::var_os("TRACEDESK_LOGS_DIR")
+        .is_some_and(|v| !v.is_empty());
+    let marker_dir = if cases_dir.is_some() && !has_explicit_logs_env {
+        target_cases_dir.clone()
+    } else {
+        paths.logs_dir.clone()
+    };
+    fs::create_dir_all(&marker_dir)?;
+    let latest_demo_marker = marker_dir.join("latest-demo.txt");
     fs::write(&latest_demo_marker, case_folder.to_string_lossy().as_bytes())?;
 
     let timings = DemoTimings {

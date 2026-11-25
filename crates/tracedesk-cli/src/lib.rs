@@ -78,7 +78,10 @@ fn next_flag_value(
 }
 
 fn split_flag(arg: &str) -> (&str, Option<&str>) {
-    if let Some((k, v)) = arg.split_once('=') {
+    // 仅对以 `-` 开头的选项参数拆分 `key=val`，避免破坏包含 `=` 的位置路径参数。
+    if let Some((k, v)) = arg.split_once('=')
+        && k.starts_with('-')
+    {
         (k, Some(v))
     } else {
         (arg, None)

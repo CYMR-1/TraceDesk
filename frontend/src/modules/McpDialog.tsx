@@ -4,7 +4,7 @@
  * - 桌面与 MCP 仅写入瞬间短锁实时协同状态提示条
  * - 三标签页：stdio 接入配置（推荐）/ Streamable HTTP 配置 / 可用工具清单（19）
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { tauriApi } from '../api/tauri';
 import { UiIcon } from '../components/Icons';
 import { VirtualTable, type VirtualColumn } from '../components/VirtualTable';
@@ -22,22 +22,24 @@ export const McpDialog: React.FC<McpDialogProps> = ({
   onClose,
 }) => {
   const [status, setStatus] = useState<McpStatus | null>(null);
-  const [port, setPort] = useState(8765);
   const [portInput, setPortInput] = useState('8765');
   const [tab, setTab] = useState<'stdio' | 'http' | 'tools'>('stdio');
   const [loading, setLoading] = useState(false);
   const [feedback, setFeedback] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const statusReqSeqRef = useRef(0);
 
   const loadStatus = useCallback(async (targetPort?: number) => {
+    const seq = ++statusReqSeqRef.current;
     try {
       const res = await tauriApi.getMcpStatus(targetPort ? { port: targetPort } : undefined);
+      if (seq !== statusReqSeqRef.current) return;
       setStatus(res);
       if (res.running) {
-        setPort(res.port);
         setPortInput(String(res.port));
       }
     } catch (err) {
+      if (seq !== statusReqSeqRef.current) return;
       setError(`读取 MCP 状态失败：${formatError(err)}`);
     }
   }, []);
@@ -50,7 +52,6 @@ export const McpDialog: React.FC<McpDialogProps> = ({
     setPortInput(raw);
     const parsed = Number.parseInt(raw, 10);
     if (!Number.isNaN(parsed) && parsed >= 1024 && parsed <= 65535) {
-      setPort(parsed);
       if (!status?.running) {
         void loadStatus(parsed);
       }
@@ -60,7 +61,6 @@ export const McpDialog: React.FC<McpDialogProps> = ({
   const handlePortBlur = () => {
     const parsed = Number.parseInt(portInput, 10);
     const clamped = Number.isNaN(parsed) ? 8765 : Math.max(1024, Math.min(65535, parsed));
-    setPort(clamped);
     setPortInput(String(clamped));
     if (!status?.running) {
       void loadStatus(clamped);
@@ -77,7 +77,13 @@ export const McpDialog: React.FC<McpDialogProps> = ({
         setStatus(next);
         setFeedback('本地 HTTP MCP 服务已停止');
       } else {
-        const next = await tauriApi.startMcpHttp({ port });
+        // 启动前即时校验并规范化端口输入，避免未失焦直接点击启动时沿用旧端口
+        const parsed = Number.parseInt(portInput, 10);
+        const targetPort = Number.isNaN(parsed)
+          ? 8765
+          : Math.max(1024, Math.min(65535, parsed));
+        setPortInput(String(targetPort));
+        const next = await tauriApi.startMcpHttp({ port: targetPort });
         setStatus(next);
         setFeedback(`本地 HTTP MCP 服务已启动：${next.url}`);
       }

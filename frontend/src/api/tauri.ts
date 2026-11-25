@@ -40,7 +40,17 @@ import type {
   TaskProgressEvent,
   TreeChildrenResponse,
 } from '../types/ipc';
-import { demoBackend, demoListen } from './demoBackend';
+
+type DemoBackendModule = typeof import('./demoBackend');
+
+/** 仅在纯浏览器演示环境按需懒加载 demoBackend，避免桌面端启动时解析与执行演示代码 */
+let demoModulePromise: Promise<DemoBackendModule> | null = null;
+function loadDemoModule(): Promise<DemoBackendModule> {
+  if (!demoModulePromise) {
+    demoModulePromise = import('./demoBackend');
+  }
+  return demoModulePromise;
+}
 
 export function isTauriRuntime(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -50,6 +60,7 @@ async function callCommand<T>(cmd: string, args?: Record<string, unknown>): Prom
   if (isTauriRuntime()) {
     return invoke<T>(cmd, args);
   }
+  const { demoBackend } = await loadDemoModule();
   const backend = demoBackend as unknown as Record<
     string,
     (a?: Record<string, unknown>) => Promise<unknown>
@@ -351,42 +362,42 @@ export const tauriEvents = {
     if (isTauriRuntime()) {
       return listen<TaskProgressEvent>('task:progress', (e) => handler(e.payload));
     }
-    return Promise.resolve(demoListen('task:progress', handler));
+    return loadDemoModule().then(({ demoListen }) => demoListen('task:progress', handler));
   },
 
   onHashProgress(handler: (payload: HashProgressEvent) => void): Promise<UnlistenFn> {
     if (isTauriRuntime()) {
       return listen<HashProgressEvent>('hash:progress', (e) => handler(e.payload));
     }
-    return Promise.resolve(demoListen('hash:progress', handler));
+    return loadDemoModule().then(({ demoListen }) => demoListen('hash:progress', handler));
   },
 
   onHashFinished(handler: (payload: HashFinishedEvent) => void): Promise<UnlistenFn> {
     if (isTauriRuntime()) {
       return listen<HashFinishedEvent>('hash:finished', (e) => handler(e.payload));
     }
-    return Promise.resolve(demoListen('hash:finished', handler));
+    return loadDemoModule().then(({ demoListen }) => demoListen('hash:finished', handler));
   },
 
   onSearchHits(handler: (payload: SearchHitsEvent) => void): Promise<UnlistenFn> {
     if (isTauriRuntime()) {
       return listen<SearchHitsEvent>('search:hits', (e) => handler(e.payload));
     }
-    return Promise.resolve(demoListen('search:hits', handler));
+    return loadDemoModule().then(({ demoListen }) => demoListen('search:hits', handler));
   },
 
   onSearchProgress(handler: (payload: SearchProgressEvent) => void): Promise<UnlistenFn> {
     if (isTauriRuntime()) {
       return listen<SearchProgressEvent>('search:progress', (e) => handler(e.payload));
     }
-    return Promise.resolve(demoListen('search:progress', handler));
+    return loadDemoModule().then(({ demoListen }) => demoListen('search:progress', handler));
   },
 
   onSearchFinished(handler: (payload: SearchFinishedEvent) => void): Promise<UnlistenFn> {
     if (isTauriRuntime()) {
       return listen<SearchFinishedEvent>('search:finished', (e) => handler(e.payload));
     }
-    return Promise.resolve(demoListen('search:finished', handler));
+    return loadDemoModule().then(({ demoListen }) => demoListen('search:finished', handler));
   },
 
   /** 订阅 MCP 单步工具调用实时事件（started / completed / failed） */
@@ -394,7 +405,7 @@ export const tauriEvents = {
     if (isTauriRuntime()) {
       return listen<McpActivityRecord>('mcp:activity', (e) => handler(e.payload));
     }
-    return Promise.resolve(demoListen('mcp:activity', handler));
+    return loadDemoModule().then(({ demoListen }) => demoListen('mcp:activity', handler));
   },
 
   /** 订阅 MCP 修改案件后的变更通知事件 */
@@ -402,6 +413,6 @@ export const tauriEvents = {
     if (isTauriRuntime()) {
       return listen<McpCaseUpdatedEvent>('mcp:case-updated', (e) => handler(e.payload));
     }
-    return Promise.resolve(demoListen('mcp:case-updated', handler));
+    return loadDemoModule().then(({ demoListen }) => demoListen('mcp:case-updated', handler));
   },
 };

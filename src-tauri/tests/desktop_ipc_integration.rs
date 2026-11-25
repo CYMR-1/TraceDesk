@@ -36,6 +36,10 @@ fn repo_root() -> PathBuf {
 fn make_test_state(cases_dir: PathBuf) -> Arc<AppState> {
     let root = repo_root();
     let mut paths = AppPaths::from_root(root);
+    // 将测试态的遥测与运行日志隔离到临时目录，避免污染仓库 `logs/mcp-activity.jsonl`。
+    if let Some(parent) = cases_dir.parent() {
+        paths.logs_dir = parent.join("logs");
+    }
     paths.cases_dir = cases_dir;
     AppState::with_paths(paths)
 }
@@ -1670,5 +1674,99 @@ fn load_and_scan_real_drf2024_image_end_to_end_readonly() {
         tree_ntfs.nodes.len(),
     );
 
+    state.shutdown_all();
+}
+
+#[test]
+fn mcp_hot_refresh_case_json_preserves_timeline_and_blocks_cross_case_bookmark() {
+    let tmp = tempdir().expect("create tempdir");
+    let cases_dir = tmp.path().join("cases");
+    std::fs::create_dir_all(&cases_dir).expect("mkdir cases");
+    let img_path = tmp.path().join("demo_hot.dd");
+    std::fs::copy(demo_image_path(), &img_path).expect("copy demo.dd");
+    let state = make_test_state(cases_dir.clone());
+
+    // 1. 新建案件 A、加载演示镜像、全盘扫描并构建时间线索引与内容搜索会话。
+    let snap_a = cmd_create_case(
+        &state,
+        &cases_dir.to_string_lossy(),
+        "HOT-CASE-A",
+        "测试员",
+        "热重载与跨案保护测试",
+        None,
+    )
+    .expect("create case A");
+    cmd_load_image(&state, &img_path.to_string_lossy(), None).expect("load_image");
+    cmd_scan_all_partitions(&state, None).expect("scan_all_partitions");
+    let tl = cmd_build_timeline(&state).expect("build_timeline");
+    assert!(tl.total > 0);
+    assert!(
+        state.view.read().expect("view read").timeline_index.is_some(),
+        "构建时间线后 timeline_index 应已缓存"
+    );
+
+    let search_resp =
+        cmd_start_content_search(&state, "TraceDesk", "UTF-8", None, None).expect("search");
+    let old_search_id = search_resp.search_id;
+
+    // 2. 启动内嵌 HTTP MCP，并以 `.../case.json` 路径调用仅写审计的 `tracedesk_record_finding`，
+    //    验证桌面端可正常热重载且不销毁已缓存的 `timeline_index`。
+    let port = {
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
+        l.local_addr().expect("local_addr").port()
+    };
+    cmd_start_mcp_http(&state, port).expect("start_mcp_http");
+    let case_json_path = PathBuf::from(&snap_a.case_dir).join("case.json");
+    let body_str = serde_json::to_string(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedesk_record_finding",
+            "arguments": {
+                "case_dir": case_json_path.to_string_lossy(),
+                "path": "DOCS/CASE.TXT",
+                "note": "通过 case.json 路径触发的审计热重载测试",
+                "response_format": "json"
+            }
+        }
+    }))
+    .expect("serialize");
+    let (status, _) = send_http_request(port, &format!("127.0.0.1:{port}"), &body_str);
+    assert_eq!(status, 200);
+
+    // 仅追加审计记录时，热重载应保留已构建的 `timeline_index`，同时在取证发现页立即可见新笔记。
+    assert!(
+        state.view.read().expect("view read").timeline_index.is_some(),
+        "仅追加审计日志的热重载不应销毁已缓存的时间线索引"
+    );
+    let findings = cmd_list_findings(&state, None, None, None, "seq", false).expect("list_findings");
+    assert!(
+        findings
+            .groups
+            .iter()
+            .any(|g| g.subject == "DOCS/CASE.TXT"),
+        "桌面端应同步看到通过 case.json 路径写入的 MCP 取证发现"
+    );
+
+    // 3. 切换到新建案件 B，确认旧案件搜索会话已被清理，且无法将旧案命中误存到新案审计链。
+    let _snap_b = cmd_create_case(
+        &state,
+        &cases_dir.to_string_lossy(),
+        "HOT-CASE-B",
+        "测试员",
+        "切换目标案件",
+        None,
+    )
+    .expect("create case B");
+    assert!(
+        state.searches.lock().expect("searches").is_empty(),
+        "切换案件后应自动清理旧案件搜索会话"
+    );
+    let bookmark_err = cmd_bookmark_search_hits(&state, &old_search_id, &[0])
+        .expect_err("跨案件保存旧搜索会话命中必须被拒绝");
+    assert!(bookmark_err.contains("未找到"));
+
+    cmd_stop_mcp_http(&state).expect("stop_mcp_http");
     state.shutdown_all();
 }

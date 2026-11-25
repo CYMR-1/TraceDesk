@@ -357,11 +357,32 @@ pub fn read_inventory_gz(path: &Path) -> CoreResult<Vec<InventoryEntry>> {
     Ok(entries)
 }
 
-/// 通过 `.tmp` 临时文件 + 重命名原子持久化带 2 空格缩进的 UTF-8 美化 JSON。
+/// 通过 `.tmp` 临时文件 + `sync_all()` 刷盘 + 重命名原子持久化带 2 空格缩进的 UTF-8 美化 JSON。
 pub fn save_json_atomic<T: Serialize>(path: &Path, value: &T) -> CoreResult<()> {
     let tmp = path.with_extension("tmp");
     let raw = serde_json::to_string_pretty(value)?;
-    fs::write(&tmp, raw.as_bytes())?;
+    {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        f.write_all(raw.as_bytes())?;
+        f.flush()?;
+        f.sync_all()?;
+    }
+    if let Err(err) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(CoreError::Io(err));
+    }
+    Ok(())
+}
+
+/// 通过相邻临时文件 + 原子重命名写入短小文本文件（如 `audit.head`），
+/// 避免直接截断原文件在进程崩溃时留下 0 字节残损文件。
+fn write_bytes_atomic_no_fsync(path: &Path, bytes: &[u8]) -> CoreResult<()> {
+    let tmp = path.with_extension("head.tmp");
+    fs::write(&tmp, bytes)?;
     if let Err(err) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(CoreError::Io(err));
@@ -607,12 +628,22 @@ fn system_time_to_ns(t: SystemTime) -> Option<i128> {
         .map(|d| d.as_nanos() as i128)
 }
 
-/// 从磁盘独立校验 `<case_dir>/audit.jsonl` 与 `<case_dir>/audit.head`，
-/// 不修改任何状态（对应 `core-contract.md` §1.2）。
-pub fn verify_audit_chain_at(folder: &Path) -> CoreResult<Vec<AuditRecord>> {
+/// 从磁盘单次读取并校验 `<case_dir>/audit.jsonl` 与 `<case_dir>/audit.head`，
+/// 返回 `(解析后的记录列表, audit.jsonl 原始字节, audit.jsonl 元数据)`，消除重复读盘与 TOCTOU。
+fn verify_audit_chain_with_raw_and_meta(
+    folder: &Path,
+) -> CoreResult<(Vec<AuditRecord>, Vec<u8>, fs::Metadata)> {
     let audit_path = folder.join("audit.jsonl");
-    let content = fs::read_to_string(&audit_path)
+    let mut file = File::open(&audit_path)
         .map_err(|e| CoreError::CorruptCase(format!("无法读取 audit.jsonl：{e}")))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| CoreError::CorruptCase(format!("无法读取 audit.jsonl 元数据：{e}")))?;
+    let mut raw_bytes = Vec::with_capacity(meta.len() as usize);
+    std::io::Read::read_to_end(&mut file, &mut raw_bytes)
+        .map_err(|e| CoreError::CorruptCase(format!("无法读取 audit.jsonl：{e}")))?;
+    let content = std::str::from_utf8(&raw_bytes)
+        .map_err(|_| CoreError::AuditTampered("audit.jsonl 含非法 UTF-8 字节".to_string()))?;
 
     let mut previous = GENESIS_HASH.to_string();
     let mut records = Vec::new();
@@ -649,7 +680,8 @@ pub fn verify_audit_chain_at(folder: &Path) -> CoreResult<Vec<AuditRecord>> {
     if anchor.exists() {
         let head_text = fs::read_to_string(&anchor)
             .map_err(|e| CoreError::AuditTampered(format!("无法读取审计尾部锚点：{e}")))?;
-        if head_text.trim() != previous {
+        // 严格比对原始字节（与 audit_fast_check、review::verify_bundle 及 verify_bundle.py 一致）。
+        if head_text != previous {
             return Err(CoreError::AuditTampered(
                 "审计日志尾部锚点不匹配，可能被截断".to_string(),
             ));
@@ -658,7 +690,13 @@ pub fn verify_audit_chain_at(folder: &Path) -> CoreResult<Vec<AuditRecord>> {
         return Err(CoreError::AuditTampered("审计尾部锚点缺失".to_string()));
     }
 
-    Ok(records)
+    Ok((records, raw_bytes, meta))
+}
+
+/// 从磁盘独立校验 `<case_dir>/audit.jsonl` 与 `<case_dir>/audit.head`，
+/// 不修改任何状态（对应 `core-contract.md` §1.2）。
+pub fn verify_audit_chain_at(folder: &Path) -> CoreResult<Vec<AuditRecord>> {
+    Ok(verify_audit_chain_with_raw_and_meta(folder)?.0)
 }
 
 /// 活跃的 TraceDesk 取证案件对象，持有可选 `case.lock`、可选 `SourceGuard`、
@@ -685,6 +723,58 @@ pub struct Case {
     audit_cache: Option<AuditCache>,
     /// 最近一次读取或写入时的磁盘指纹，用于检测外部进程（如 MCP）写入并自动热重载。
     disk_fingerprint: Option<DiskFingerprint>,
+}
+
+/// 按镜像格式（RAW 或 EWF）评估分区/卷声明覆盖范围，确保 EWF 始终基于逻辑大小与逻辑扇区读取。
+fn assess_image_coverage(
+    image: &Path,
+    is_ewf: bool,
+    logical_size: u64,
+    partitions: &[PartitionInfo],
+    layout: &str,
+    tsk: Option<&TskCli>,
+) -> CoreResult<CoverageReport> {
+    if is_ewf {
+        let native_ewf = ewf::EwfMediaReader::open(image).ok();
+        let discovered;
+        let tool = match tsk {
+            Some(t) => Some(t),
+            None => match TskCli::discover(None) {
+                Ok(t) => {
+                    discovered = t;
+                    Some(&discovered)
+                }
+                Err(_) => None,
+            },
+        };
+        let mut boot_reader = |offset: u64| -> Option<Vec<u8>> {
+            if let Some(ref reader) = native_ewf {
+                let mut buf = vec![0u8; 512];
+                if reader
+                    .read_exact_at(offset.saturating_mul(512), &mut buf)
+                    .is_ok()
+                {
+                    return Some(buf);
+                }
+            }
+            tool.and_then(|t| t.read_ewf_sector(image, offset).ok())
+        };
+        assess_coverage(
+            image,
+            partitions,
+            layout,
+            Some(logical_size),
+            Some(&mut boot_reader),
+        )
+    } else {
+        assess_coverage::<fn(u64) -> Option<Vec<u8>>>(
+            image,
+            partitions,
+            layout,
+            Some(logical_size),
+            None,
+        )
+    }
 }
 
 /// 规范化可选 MCP 使用者/客户端标识（仅在来源为 MCP 且去空白后非空时保留）。
@@ -1121,12 +1211,10 @@ impl Case {
         Ok(())
     }
 
-    /// 从磁盘对 `audit.jsonl` 与 `audit.head` 执行全量校验，并刷新内部 O(1) 追加缓存。
-    pub fn check_audit(&mut self) -> CoreResult<Vec<AuditRecord>> {
-        let records = verify_audit_chain_at(&self.folder)?;
-        let audit_path = self.folder.join("audit.jsonl");
-        let raw_bytes = fs::read(&audit_path)?;
-        let meta = fs::metadata(&audit_path)?;
+    /// 从磁盘单次读取并全量校验 `audit.jsonl` 与 `audit.head`，刷新内部 O(1) 追加缓存，
+    /// 并同步返回已验链的原始 `audit.jsonl` 字节（供复核包原子快照使用）。
+    pub(crate) fn check_audit_with_raw(&mut self) -> CoreResult<(Vec<AuditRecord>, Vec<u8>)> {
+        let (records, raw_bytes, meta) = verify_audit_chain_with_raw_and_meta(&self.folder)?;
         let mut file_hasher = Sha256::new();
         file_hasher.update(&raw_bytes);
         let file_sha256 = hex_lower(&file_hasher.clone().finalize());
@@ -1142,7 +1230,12 @@ impl Case {
             count: records.len() as u64,
             head,
         });
-        Ok(records)
+        Ok((records, raw_bytes))
+    }
+
+    /// 从磁盘对 `audit.jsonl` 与 `audit.head` 执行全量校验，并刷新内部 O(1) 追加缓存。
+    pub fn check_audit(&mut self) -> CoreResult<Vec<AuditRecord>> {
+        Ok(self.check_audit_with_raw()?.0)
     }
 
     /// 检查磁盘上的 `audit.jsonl`（`len`、`mtime`、原始 SHA-256）与 `audit.head` 是否仍与
@@ -1266,14 +1359,17 @@ impl Case {
         file.sync_all()?;
         drop(file);
 
-        // 关键约定：精确写入 64 字节 ASCII 十六进制摘要，禁止附加换行符（对齐 `verify_bundle.py`）。
-        fs::write(self.folder.join("audit.head"), hash.as_bytes())?;
+        // 关键约定：精确写入 64 字节 ASCII 十六进制摘要（禁止附加换行符，对齐 `verify_bundle.py`），
+        // 并经由相邻临时文件原子重命名，防止写入中途崩溃导致 `audit.head` 截断为 0 字节。
+        let head_path = self.folder.join("audit.head");
+        write_bytes_atomic_no_fsync(&head_path, hash.as_bytes())?;
 
         next_hasher.update(signed_line.as_bytes());
         next_hasher.update(b"\n");
         let file_sha256 = hex_lower(&next_hasher.clone().finalize());
 
-        if let Ok(meta) = fs::metadata(&audit_path) {
+        let audit_meta = fs::metadata(&audit_path).ok();
+        if let Some(ref meta) = audit_meta {
             self.audit_cache = Some(AuditCache {
                 file_len: meta.len(),
                 mtime_ns: meta.modified().ok().and_then(system_time_to_ns),
@@ -1283,7 +1379,22 @@ impl Case {
                 head: hash.clone(),
             });
         }
-        self.disk_fingerprint = read_disk_fingerprint(&self.folder).ok();
+        // `log()` 不会修改 `case.json`，若内存已有磁盘指纹则仅增量刷新审计文件字段，
+        // 避免每次追加审计记录都重读并计算整份 `case.json` 的 SHA-256。
+        if let Some(ref mut fp) = self.disk_fingerprint {
+            let head_meta = fs::metadata(&head_path).ok();
+            fp.audit_head_len = head_meta.as_ref().map(fs::Metadata::len);
+            fp.audit_head_mtime_ns = head_meta
+                .and_then(|m| m.modified().ok())
+                .and_then(system_time_to_ns);
+            fp.audit_head_content = Some(hash.clone());
+            if let Some(ref meta) = audit_meta {
+                fp.audit_jsonl_len = meta.len();
+                fp.audit_jsonl_mtime_ns = meta.modified().ok().and_then(system_time_to_ns);
+            }
+        } else {
+            self.disk_fingerprint = read_disk_fingerprint(&self.folder).ok();
+        }
 
         Ok(AuditRecord {
             seq,
@@ -1453,8 +1564,28 @@ impl Case {
                 }
             } else {
                 let digest = if is_ewf {
-                    let logical = ewf::hash_logical_stream(tool, &image, size, cancel, progress)?;
-                    let segs = ewf::hash_physical_segments(&ewf_parts, cancel, progress)?;
+                    let mut phys_total: u64 = 0;
+                    for p in &ewf_parts {
+                        phys_total = phys_total.saturating_add(fs::metadata(p)?.len());
+                    }
+                    let combined_total = size.saturating_add(phys_total);
+                    let logical_cb = |done: u64, _t: u64| {
+                        if let Some(p) = progress {
+                            p(done, combined_total);
+                        }
+                    };
+                    let logical_ref: Option<&(dyn Fn(u64, u64) + Sync)> =
+                        progress.map(|_| &logical_cb as _);
+                    let logical =
+                        ewf::hash_logical_stream(tool, &image, size, cancel, logical_ref)?;
+                    let phys_cb = |done: u64, _t: u64| {
+                        if let Some(p) = progress {
+                            p(size.saturating_add(done), combined_total);
+                        }
+                    };
+                    let phys_ref: Option<&(dyn Fn(u64, u64) + Sync)> =
+                        progress.map(|_| &phys_cb as _);
+                    let segs = ewf::hash_physical_segments(&ewf_parts, cancel, phys_ref)?;
                     segments = Some(segs);
                     logical
                 } else {
@@ -1467,27 +1598,14 @@ impl Case {
             }
 
             let (layout, partitions) = tool.inspect(&image)?;
-            let coverage = if is_ewf {
-                let native_ewf = ewf::EwfMediaReader::open(&image).ok();
-                let mut boot_reader = |offset: u64| -> Option<Vec<u8>> {
-                    if let Some(ref reader) = native_ewf {
-                        let mut buf = vec![0u8; 512];
-                        if reader.read_exact_at(offset.saturating_mul(512), &mut buf).is_ok() {
-                            return Some(buf);
-                        }
-                    }
-                    tool.read_ewf_sector(&image, offset).ok()
-                };
-                assess_coverage(&image, &partitions, &layout, Some(size), Some(&mut boot_reader))?
-            } else {
-                assess_coverage::<fn(u64) -> Option<Vec<u8>>>(
-                    &image,
-                    &partitions,
-                    &layout,
-                    Some(size),
-                    None,
-                )?
-            };
+            let coverage = assess_image_coverage(
+                &image,
+                is_ewf,
+                size,
+                &partitions,
+                &layout,
+                Some(tool),
+            )?;
 
             if is_ewf {
                 let latest_parts = ewf::discover_segments(&image)?;
@@ -1728,12 +1846,13 @@ impl Case {
             None
         };
         if ok && ev.coverage.is_none() {
-            coverage_update = Some(assess_coverage::<fn(u64) -> Option<Vec<u8>>>(
+            coverage_update = Some(assess_image_coverage(
                 &image,
+                ev.is_ewf(),
+                ev.size,
                 &ev.partitions,
                 &ev.layout,
-                None,
-                None,
+                tsk,
             )?);
         }
 
@@ -1955,14 +2074,37 @@ impl Case {
             .as_ref()
             .ok_or_else(|| CoreError::InvalidInput("请先加载镜像".to_string()))?;
         let image = PathBuf::from(&ev.path);
-        let mut info = if ev.is_large_image() {
-            let kind = tool.fsstat(&image, offset, true)?.trim().to_ascii_uppercase();
-            format!("File System Type: {kind}\n完整索引采用文件系统类型探测。")
-        } else {
-            tool.fsstat(&image, offset, false)?
-        };
+        let is_large = ev.is_large_image();
 
-        let mut entries = tool.list_entries(&image, offset, true, None, "", cancel)?;
+        // 并行执行独立的只读 `fsstat` 与 `fls` 子进程，消除串行进程创建与镜像打开的等待开销。
+        let (info_res, entries_res) = std::thread::scope(|s| {
+            let fsstat_handle = s.spawn(|| -> CoreResult<String> {
+                if is_large {
+                    let kind = tool
+                        .fsstat_cancellable(&image, offset, true, cancel)?
+                        .trim()
+                        .to_ascii_uppercase();
+                    Ok(format!(
+                        "File System Type: {kind}\n完整索引采用文件系统类型探测。"
+                    ))
+                } else {
+                    Ok(tool.fsstat_cancellable(&image, offset, false, cancel)?)
+                }
+            });
+            let entries = tool
+                .list_entries(&image, offset, true, None, "", cancel)
+                .map_err(CoreError::Engine);
+            let info = fsstat_handle.join().unwrap_or_else(|_| {
+                Err(CoreError::Other("fsstat 工作线程异常退出".to_string()))
+            });
+            (info, entries)
+        });
+
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return Err(CoreError::Cancelled("已取消建立索引".to_string()));
+        }
+        let mut info = info_res?;
+        let mut entries = entries_res?;
         let fs_name = FS_TYPE_RE
             .captures(&info)
             .map(|c| c[1].to_string())
@@ -2021,16 +2163,23 @@ impl Case {
                 ));
             }
             let count = entries.len();
-            self.data.inventory = entries.clone();
-            self.data.fsstat = Some(info);
-            self.data.offset = Some(Some(offset));
-            self.data.partition_scans = Some(vec![PartitionScan {
+            // 持久化前暂存旧状态，若保存失败或被取消则完整回滚内存，防止内存与磁盘脱节。
+            let prev_inventory = std::mem::replace(&mut self.data.inventory, entries.clone());
+            let prev_fsstat = self.data.fsstat.replace(info);
+            let prev_offset = self.data.offset.replace(Some(offset));
+            let prev_scans = self.data.partition_scans.replace(vec![PartitionScan {
                 offset,
                 status: "ready".to_string(),
                 count,
                 error: None,
             }]);
-            self.save_internal(true, cancel)?;
+            if let Err(err) = self.save_internal(true, cancel) {
+                self.data.inventory = prev_inventory;
+                self.data.fsstat = prev_fsstat;
+                self.data.offset = prev_offset;
+                self.data.partition_scans = prev_scans;
+                return Err(err);
+            }
 
             let mut details = Map::new();
             details.insert("count".to_string(), Value::from(count as u64));
@@ -2155,12 +2304,20 @@ impl Case {
             let failed = scans.iter().filter(|s| s.status == "error").count();
             let total_count = inventory.len();
 
-            self.data.inventory = inventory.clone();
-            self.data.partition_scans = Some(scans.clone());
-            self.data.offset = Some(None);
-            self.data.index_verification = Some(index_note);
-            self.data.fsstat = Some(sections.join("\n\n"));
-            self.save_internal(true, cancel)?;
+            // 持久化前暂存旧状态，若保存失败或被取消则完整回滚内存。
+            let prev_inventory = std::mem::replace(&mut self.data.inventory, inventory.clone());
+            let prev_scans = self.data.partition_scans.replace(scans.clone());
+            let prev_offset = self.data.offset.replace(None);
+            let prev_index_ver = self.data.index_verification.replace(index_note);
+            let prev_fsstat = self.data.fsstat.replace(sections.join("\n\n"));
+            if let Err(err) = self.save_internal(true, cancel) {
+                self.data.inventory = prev_inventory;
+                self.data.partition_scans = prev_scans;
+                self.data.offset = prev_offset;
+                self.data.index_verification = prev_index_ver;
+                self.data.fsstat = prev_fsstat;
+                return Err(err);
+            }
 
             self.directory_cache.clear();
             self.directory_cache_total = 0;
@@ -2404,7 +2561,11 @@ impl Case {
             };
 
             self.data.exports.push(record.clone());
-            self.save_internal(false, None)?;
+            if let Err(err) = self.save_internal(false, None) {
+                // 落盘失败时回滚内存中的导出记录，避免后续保存将孤立记录写入 case.json。
+                self.data.exports.pop();
+                return Err(err);
+            }
             committed = true;
 
             let details_val = serde_json::to_value(&record)?;
@@ -2507,7 +2668,7 @@ impl Case {
             .join("reports")
             .join(format!("report_{}.md", &uuid_hex[..12]));
         fs::write(&destination, content.as_bytes())?;
-        let digest = sha256_file(&destination, None, None)?;
+        let digest = sha256_hex(content.as_bytes());
 
         let dest_clean = strip_verbatim_prefix(&destination);
         let mut details = Map::new();

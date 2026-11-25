@@ -897,3 +897,75 @@ fn strip_trailing_version_and_legacy_audit_chain_compat() {
     assert_eq!(audit_mcp_user(&verified[2]).as_deref(), Some("workbuddy"));
     assert_eq!(audit_origin_label(&verified[2]), "MCP · workbuddy");
 }
+
+#[test]
+fn stream_matcher_small_initial_chunks_find_match_at_offset_zero() {
+    let payload = b"NEEDLE_AT_ZERO_followed_by_more_bytes_1234567890_end";
+    let needle = b"NEEDLE";
+    let finder = memchr::memmem::Finder::new(needle);
+
+    // 逐 1 字节投喂：首块长度远小于 needle_len + CONTEXT_BYTES，不得跳过偏移 0。
+    let mut m1 = tracedesk_core::StreamMatcher::new(
+        &finder,
+        needle.len(),
+        payload.len() as u64,
+        0,
+        0,
+        payload.len() as u64,
+        None,
+    );
+    for chunk in payload.chunks(1) {
+        m1.push_chunk(chunk, None).expect("1-byte chunk");
+    }
+    let hits1 = m1.into_hits();
+    assert_eq!(hits1.len(), 1);
+    assert_eq!(hits1[0].file_byte, 0);
+    assert_eq!(hits1[0].before, "");
+    assert_eq!(
+        hits1[0].after,
+        tracedesk_core::hex_spaced_lower(&payload[needle.len()..needle.len() + 12])
+    );
+
+    // 投喂恰好等于 CONTEXT_BYTES（12 字节）的首块：search_end == 0 < needle_len，不得跳过偏移 0。
+    let mut m12 = tracedesk_core::StreamMatcher::new(
+        &finder,
+        needle.len(),
+        payload.len() as u64,
+        0,
+        0,
+        payload.len() as u64,
+        None,
+    );
+    m12.push_chunk(&payload[..12], None).expect("12-byte head");
+    m12.push_chunk(&payload[12..], None).expect("tail");
+    let hits12 = m12.into_hits();
+    assert_eq!(hits12.len(), 1);
+    assert_eq!(hits12[0].file_byte, 0);
+}
+
+#[test]
+fn windows_filename_rechecks_reserved_name_after_truncation_and_report_handles_none_evidence() {
+    // "CONSOLE" 截断为 3 个 UTF-16 单元后会变成保留设备名 "CON"，必须二次净化。
+    let sanitized = windows_filename("CONSOLE", 3);
+    assert_ne!(sanitized.to_ascii_uppercase(), "CON");
+    assert!(sanitized.starts_with('_'));
+
+    // render_report 在未加载镜像（evidence: None）时不应 panic。
+    let data = tracedesk_core::CaseData {
+        id: "id-none".to_string(),
+        number: "NO-EV-001".to_string(),
+        examiner: "测试员".to_string(),
+        target: "空证据".to_string(),
+        created: "2026-11-25T16:00:00+08:00".to_string(),
+        evidence: None,
+        inventory: Vec::new(),
+        exports: Vec::new(),
+        partition_scans: None,
+        offset: None,
+        fsstat: None,
+        index_verification: None,
+        verification: None,
+    };
+    let md = render_report(&data, &[], "无证据兜底");
+    assert!(md.contains("NO-EV-001"));
+}

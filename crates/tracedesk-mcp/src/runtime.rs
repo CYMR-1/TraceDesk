@@ -2,12 +2,13 @@
 
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde_json::{Value, json};
 use tracedesk_core::{AppPaths, resolve_clean};
 
+use crate::activity::McpActivitySink;
 use crate::http::{
     DEFAULT_HOST, DEFAULT_HTTP_PATH, DEFAULT_PORT, McpHttpServerHandle, normalize_http_path,
     validate_loopback_host,
@@ -186,6 +187,7 @@ struct ManagerState {
 pub struct LocalHttpMcpManager {
     cases_root: PathBuf,
     default_actor: Option<String>,
+    activity_sink: Option<Arc<dyn McpActivitySink>>,
     state: Mutex<ManagerState>,
 }
 
@@ -202,6 +204,7 @@ impl LocalHttpMcpManager {
         Self {
             cases_root: resolved_root,
             default_actor: clean_actor,
+            activity_sink: None,
             state: Mutex::new(ManagerState {
                 handle: None,
                 host: DEFAULT_HOST.to_string(),
@@ -209,6 +212,12 @@ impl LocalHttpMcpManager {
                 path: DEFAULT_HTTP_PATH.to_string(),
             }),
         }
+    }
+
+    /// 链式配置自定义实时活动遥测接收器（便于测试隔离或自定义消费，未设置时默认写入共享 JSONL）。
+    pub fn with_activity_sink(mut self, sink: Arc<dyn McpActivitySink>) -> Self {
+        self.activity_sink = Some(sink);
+        self
     }
 
     pub fn cases_root(&self) -> &Path {
@@ -285,10 +294,22 @@ impl LocalHttpMcpManager {
         if let Some(ref existing) = guard.handle
             && existing.is_running()
         {
-            return Ok(existing.url().to_string());
+            // 若已在相同监听端点运行则幂等返回；若请求了新的主机/端口/路径则平滑重启到新端点。
+            if existing.host() == clean_host
+                && existing.port() == port
+                && existing.path() == clean_path
+            {
+                return Ok(existing.url().to_string());
+            }
+            if let Some(mut old) = guard.handle.take() {
+                old.stop();
+            }
         }
 
-        let server = McpServer::new(Some(self.cases_root.clone()), self.default_actor.clone());
+        let mut server = McpServer::new(Some(self.cases_root.clone()), self.default_actor.clone());
+        if let Some(ref sink) = self.activity_sink {
+            server = server.with_activity_sink(Arc::clone(sink));
+        }
         let handle = McpHttpServerHandle::start(server, &clean_host, port, &clean_path)?;
         let url = handle.url().to_string();
         guard.host = handle.host().to_string();

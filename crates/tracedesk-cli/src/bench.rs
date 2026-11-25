@@ -26,7 +26,8 @@ use tracedesk_engines::{InventoryEntry, TskCli, map_fat_regions};
 use crate::make_demo::create_demo_image;
 use crate::verify::verify_bundle_strict;
 
-const DEFAULT_PYTHON_BENCH_PATH: &str = r"C:\Users\cymr1\.gemini\antigravity\brain\17680ca1-4084-4cc1-9fbe-b9bcc92744bb\scratch\baseline\python_bench.json";
+/// 可选通过环境变量 `TRACEDESK_PYTHON_BENCH_JSON` 指定 Python 基线 JSON 路径。
+const PYTHON_BENCH_ENV_VAR: &str = "TRACEDESK_PYTHON_BENCH_JSON";
 
 #[inline]
 fn round2(val: f64) -> f64 {
@@ -407,19 +408,21 @@ pub fn bench_fat_500k_clusters() -> CoreResult<Fat500kBench> {
     let regions_zero = map_fat_regions(&img, 0, fsstat, &mut [], None)?;
     let all_zero_fast_path_ms = elapsed_ms(t);
 
-    let non_sparse_free_bytes = regions_mixed[1].size;
-    let non_sparse_idle_bytes = regions_mixed[2].size;
-    let non_sparse_free_extents = regions_mixed[1]
-        .extents
-        .as_ref()
-        .map(Vec::len)
-        .unwrap_or(0);
-    let non_sparse_idle_extents = regions_mixed[2]
-        .extents
-        .as_ref()
-        .map(Vec::len)
-        .unwrap_or(0);
-    let all_zero_free_bytes = regions_zero[1].size;
+    let mixed_free = regions_mixed
+        .get(1)
+        .ok_or_else(|| CoreError::Other("FAT32 非稀疏基准缺少未分配区段结果".to_string()))?;
+    let mixed_idle = regions_mixed
+        .get(2)
+        .ok_or_else(|| CoreError::Other("FAT32 非稀疏基准缺少空闲区段结果".to_string()))?;
+    let zero_free = regions_zero
+        .get(1)
+        .ok_or_else(|| CoreError::Other("FAT32 全零基准缺少未分配区段结果".to_string()))?;
+
+    let non_sparse_free_bytes = mixed_free.size;
+    let non_sparse_idle_bytes = mixed_idle.size;
+    let non_sparse_free_extents = mixed_free.extents.as_ref().map(Vec::len).unwrap_or(0);
+    let non_sparse_idle_extents = mixed_idle.extents.as_ref().map(Vec::len).unwrap_or(0);
+    let all_zero_free_bytes = zero_free.size;
 
     Ok(Fat500kBench {
         clusters,
@@ -830,9 +833,9 @@ pub fn bench_avx2_content_search() -> CoreResult<Avx2SearchBench> {
     }
 
     let t = Instant::now();
-    let total_hits: usize = (0..num_streams)
+    let per_stream_hits: Vec<usize> = (0..num_streams)
         .into_par_iter()
-        .map(|_| {
+        .map(|_| -> CoreResult<usize> {
             let mut cursor = Cursor::new(template.as_slice());
             let hits = find_matches_in_reader(
                 &mut cursor,
@@ -841,11 +844,11 @@ pub fn bench_avx2_content_search() -> CoreResult<Avx2SearchBench> {
                 None,
                 None,
                 None,
-            )
-            .expect("AVX2 search");
-            hits.len()
+            )?;
+            Ok(hits.len())
         })
-        .sum();
+        .collect::<CoreResult<Vec<usize>>>()?;
+    let total_hits: usize = per_stream_hits.into_iter().sum();
     let elapsed = elapsed_ms(t);
 
     if total_hits != num_streams * 8 {
@@ -882,9 +885,22 @@ fn find_python_bench_path(json_out: Option<&Path>) -> Option<PathBuf> {
             return Some(sibling);
         }
     }
-    let default = PathBuf::from(DEFAULT_PYTHON_BENCH_PATH);
-    if default.is_file() {
-        return Some(default);
+    if let Ok(raw) = std::env::var(PYTHON_BENCH_ENV_VAR) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let candidate = PathBuf::from(trimmed);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    let repo_candidate = AppPaths::discover()
+        .root
+        .join("docs")
+        .join("validation")
+        .join("python_bench.json");
+    if repo_candidate.is_file() {
+        return Some(repo_candidate);
     }
     None
 }

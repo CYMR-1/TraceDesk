@@ -89,9 +89,12 @@ pub fn verify_bundle_strict(zip_path: &Path, expected_sha256: Option<&str>) -> C
         }
     }
 
-    if let Some(expected_report_sha) = last_report_sha
-        && checks.get("report.md") != Some(&expected_report_sha)
-    {
+    let expected_report_sha = last_report_sha.ok_or_else(|| {
+        CoreError::IntegrityFailed(
+            "审计链缺少有效的 REPORT_GENERATE 摘要记录，无法核验 report.md".to_string(),
+        )
+    })?;
+    if checks.get("report.md") != Some(&expected_report_sha) {
         return Err(CoreError::IntegrityFailed(
             "报告摘要不匹配：report.md 与审计链记录不一致".to_string(),
         ));

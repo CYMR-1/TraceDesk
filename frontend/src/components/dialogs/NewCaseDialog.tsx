@@ -22,10 +22,18 @@ export const NewCaseDialog: React.FC<NewCaseDialogProps> = ({
   const [examiner, setExaminer] = useState('');
   const [target, setTarget] = useState('');
   const [parentDir, setParentDir] = useState(defaultCasesDir);
+  const [parentDirTouched, setParentDirTouched] = useState(false);
   const [folderName, setFolderName] = useState('');
   const [folderCustomized, setFolderCustomized] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // 若打开弹窗时应用默认路径尚未异步返回，待其到达且用户尚未手动修改时自动同步
+  useEffect(() => {
+    if (!parentDirTouched && defaultCasesDir) {
+      setParentDir(defaultCasesDir);
+    }
+  }, [defaultCasesDir, parentDirTouched]);
 
   useEffect(() => {
     if (!number.trim() && !examiner.trim() && !target.trim()) {
@@ -61,6 +69,7 @@ export const NewCaseDialog: React.FC<NewCaseDialogProps> = ({
       defaultPath: parentDir || defaultCasesDir,
     });
     if (picked) {
+      setParentDirTouched(true);
       setParentDir(picked);
     }
   };
@@ -98,30 +107,40 @@ export const NewCaseDialog: React.FC<NewCaseDialogProps> = ({
     }
   };
 
+  const handleSafeClose = () => {
+    if (!submitting) {
+      onClose();
+    }
+  };
+
   return (
     <Modal
       title="新建取证案件"
       subtitle="源镜像须存放于案件库目录之外"
       width={560}
-      onClose={onClose}
+      onClose={handleSafeClose}
       footer={
         <>
-          <button type="button" className="td-btn" disabled={submitting} onClick={onClose}>
+          <button type="button" className="td-btn" disabled={submitting} onClick={handleSafeClose}>
             取消
           </button>
           <div className="td-modal-footer-spacer" />
           <button
-            type="button"
+            type="submit"
+            form="td-new-case-form"
             className="td-btn td-btn--accent"
             disabled={submitting}
-            onClick={() => void handleSubmit()}
           >
             {submitting ? '正在创建…' : '创建案件'}
           </button>
         </>
       }
     >
-      <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <form
+        id="td-new-case-form"
+        onSubmit={handleSubmit}
+        style={{ display: 'flex', flexDirection: 'column', gap: 14 }}
+      >
         <div>
           <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>填写案件信息</div>
           <div className="td-muted-text" style={{ fontSize: 12, marginTop: 3 }}>
@@ -173,7 +192,10 @@ export const NewCaseDialog: React.FC<NewCaseDialogProps> = ({
               className="td-input td-mono"
               style={{ flex: 1, fontSize: 12 }}
               value={parentDir}
-              onChange={(e) => setParentDir(e.target.value)}
+              onChange={(e) => {
+                setParentDirTouched(true);
+                setParentDir(e.target.value);
+              }}
             />
             <button type="button" className="td-btn td-btn--soft" onClick={() => void handleBrowseParent()}>
               选择目录…

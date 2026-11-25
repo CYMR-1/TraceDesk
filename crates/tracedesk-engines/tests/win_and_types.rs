@@ -334,3 +334,26 @@ fn test_sha256_file_streaming_progress_and_cancel() {
     let h = sha256_file(&sample, None, None).unwrap();
     assert_eq!(h.len(), 64);
 }
+
+#[cfg(windows)]
+#[test]
+fn test_case_file_lock_non_lock_error_fails_fast_as_io() {
+    use std::time::{Duration, Instant};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    // 不存在的父目录：不应映射为 EngineError::Locked，更不应在超时窗口内白白重试等待。
+    let missing_lock = dir.path().join("non_existent_subdir").join("case.lock");
+    let start = Instant::now();
+    let err = CaseFileLock::acquire_with_timeout(&missing_lock, Duration::from_secs(2))
+        .err()
+        .expect("missing parent dir must fail");
+    let elapsed = start.elapsed();
+    assert!(
+        matches!(err, EngineError::Io(_)),
+        "非锁竞争系统错误应返回 EngineError::Io，实际为：{err:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "非锁竞争错误应立即失败而不等待重试超时，实际耗时 {elapsed:?}"
+    );
+}

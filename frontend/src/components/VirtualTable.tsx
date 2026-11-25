@@ -67,20 +67,52 @@ export function VirtualTable<T>({
   scrollToIndex = null,
 }: VirtualTableProps<T>) {
   const scrollerRef = useRef<HTMLDivElement>(null);
-  const [scrollTop, setScrollTop] = useState(0);
+  // 仅以行索引粒度触发 React 虚拟窗口重渲染，避免滚动 1px 引发整表重绘
+  const [firstVisibleRow, setFirstVisibleRow] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(420);
   const [colWidths, setColWidths] = useState<number[]>(() => columns.map((c) => c.width));
+  const scrollTopRef = useRef(0);
+  const scrollRafRef = useRef<number | null>(null);
+  const wasHiddenRef = useRef(false);
+  const lastSelectedIdxRef = useRef<number>(-1);
+  const colKeysSignature = useMemo(() => columns.map((c) => c.key).join('|'), [columns]);
+  const prevColSigRef = useRef(colKeysSignature);
+
+  // 列定义（列键序列）变更时同步列宽，避免跨表格复用旧列宽
+  useEffect(() => {
+    if (prevColSigRef.current === colKeysSignature) return;
+    prevColSigRef.current = colKeysSignature;
+    setColWidths(columns.map((c) => c.width));
+  }, [colKeysSignature, columns]);
 
   useEffect(() => {
-    setColWidths((prev) =>
-      columns.map((c, idx) => (idx < prev.length ? prev[idx] : c.width))
-    );
-  }, [columns.length]);
+    return () => {
+      if (scrollRafRef.current !== null) {
+        window.cancelAnimationFrame(scrollRafRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
-    const update = () => setViewportHeight(el.clientHeight || 420);
+    const update = () => {
+      if (el.clientHeight <= 0) {
+        // 所在标签页被 display:none 隐藏时标记状态；重新可见后恢复或同步滚动位置
+        wasHiddenRef.current = true;
+        return;
+      }
+      if (wasHiddenRef.current) {
+        wasHiddenRef.current = false;
+        if (scrollTopRef.current > 0 && el.scrollTop === 0) {
+          el.scrollTop = scrollTopRef.current;
+        }
+        scrollTopRef.current = el.scrollTop;
+        setFirstVisibleRow(Math.floor(el.scrollTop / rowHeight));
+      }
+      const nextHeight = el.clientHeight || 420;
+      setViewportHeight((prev) => (prev === nextHeight ? prev : nextHeight));
+    };
     update();
     if (typeof ResizeObserver !== 'undefined') {
       const obs = new ResizeObserver(update);
@@ -89,7 +121,20 @@ export function VirtualTable<T>({
     }
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
-  }, []);
+  }, [rowHeight]);
+
+  const handleScroll = useCallback(
+    (e: React.UIEvent<HTMLDivElement>) => {
+      scrollTopRef.current = e.currentTarget.scrollTop;
+      if (scrollRafRef.current !== null) return;
+      scrollRafRef.current = window.requestAnimationFrame(() => {
+        scrollRafRef.current = null;
+        const nextRow = Math.floor(scrollTopRef.current / rowHeight);
+        setFirstVisibleRow((prev) => (prev === nextRow ? prev : nextRow));
+      });
+    },
+    [rowHeight]
+  );
 
   useEffect(() => {
     if (scrollToIndex == null || scrollToIndex < 0 || !scrollerRef.current) return;
@@ -100,13 +145,19 @@ export function VirtualTable<T>({
     const visibleBottom = visibleTop + el.clientHeight - headerHeight;
     if (targetTop < visibleTop) {
       el.scrollTop = targetTop;
+      scrollTopRef.current = targetTop;
+      setFirstVisibleRow(Math.floor(targetTop / rowHeight));
     } else if (targetTop + rowHeight > visibleBottom) {
-      el.scrollTop = Math.max(0, targetTop + rowHeight - (el.clientHeight - headerHeight));
+      const nextTop = Math.max(0, targetTop + rowHeight - (el.clientHeight - headerHeight));
+      el.scrollTop = nextTop;
+      scrollTopRef.current = nextTop;
+      setFirstVisibleRow(Math.floor(nextTop / rowHeight));
     }
   }, [scrollToIndex, rowHeight]);
 
   const handleResizeColumn = useCallback((index: number, width: number) => {
     setColWidths((prev) => {
+      if (prev[index] === width) return prev;
       const next = [...prev];
       next[index] = width;
       return next;
@@ -122,15 +173,16 @@ export function VirtualTable<T>({
 
   useEffect(() => {
     const el = scrollerRef.current;
-    if (!el) return;
+    if (!el || el.clientHeight <= 0) return;
     const maxScroll = Math.max(0, totalHeight - Math.max(0, viewportHeight - 32));
     if (el.scrollTop > maxScroll) {
       el.scrollTop = maxScroll;
-      setScrollTop(maxScroll);
+      scrollTopRef.current = maxScroll;
+      setFirstVisibleRow(Math.floor(maxScroll / rowHeight));
     }
-  }, [totalHeight, viewportHeight]);
+  }, [totalHeight, viewportHeight, rowHeight]);
 
-  const startIndex = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
+  const startIndex = Math.max(0, firstVisibleRow - overscan);
   const visibleCount = Math.ceil(viewportHeight / rowHeight) + overscan * 2;
   const endIndex = Math.min(rows.length, startIndex + visibleCount);
 
@@ -138,20 +190,39 @@ export function VirtualTable<T>({
     if (rows.length === 0 || !onSelectRow) return;
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
     e.preventDefault();
-    const currentIndex = rows.findIndex((r, idx) => rowKey(r, idx) === selectedKey);
+    // 优先复用上次选中下标实现 O(1) 定位，未命中时再退回线性查找
+    let currentIndex = -1;
+    const cached = lastSelectedIdxRef.current;
+    if (
+      selectedKey !== null &&
+      cached >= 0 &&
+      cached < rows.length &&
+      rowKey(rows[cached], cached) === selectedKey
+    ) {
+      currentIndex = cached;
+    } else if (selectedKey !== null) {
+      currentIndex = rows.findIndex((r, idx) => rowKey(r, idx) === selectedKey);
+    }
     const nextIndex =
       e.key === 'ArrowDown'
         ? Math.min(rows.length - 1, currentIndex + 1)
         : Math.max(0, currentIndex <= 0 ? 0 : currentIndex - 1);
     const target = rows[nextIndex];
     if (target) {
+      lastSelectedIdxRef.current = nextIndex;
       onSelectRow(target, nextIndex);
       const el = scrollerRef.current;
       if (el) {
         const y = nextIndex * rowHeight;
-        if (y < el.scrollTop) el.scrollTop = y;
-        else if (y + rowHeight > el.scrollTop + el.clientHeight - 32) {
-          el.scrollTop = Math.max(0, y + rowHeight - (el.clientHeight - 32));
+        if (y < el.scrollTop) {
+          el.scrollTop = y;
+          scrollTopRef.current = y;
+          setFirstVisibleRow(Math.floor(y / rowHeight));
+        } else if (y + rowHeight > el.scrollTop + el.clientHeight - 32) {
+          const nextTop = Math.max(0, y + rowHeight - (el.clientHeight - 32));
+          el.scrollTop = nextTop;
+          scrollTopRef.current = nextTop;
+          setFirstVisibleRow(Math.floor(nextTop / rowHeight));
         }
       }
     }
@@ -162,7 +233,7 @@ export function VirtualTable<T>({
       <div
         ref={scrollerRef}
         className="td-vtable-scroller"
-        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+        onScroll={handleScroll}
       >
         <div style={{ minWidth: totalWidth, width: '100%' }}>
           <FilterHeader
@@ -203,10 +274,14 @@ export function VirtualTable<T>({
                     ]
                       .filter(Boolean)
                       .join(' ')}
-                    onClick={() => onSelectRow?.(row, index)}
+                    onClick={() => {
+                      lastSelectedIdxRef.current = index;
+                      onSelectRow?.(row, index);
+                    }}
                     onContextMenu={(e) => {
                       if (onContextMenuRow) {
                         e.preventDefault();
+                        lastSelectedIdxRef.current = index;
                         onSelectRow?.(row, index);
                         onContextMenuRow(e, row, index);
                       }

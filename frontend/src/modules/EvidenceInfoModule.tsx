@@ -80,7 +80,7 @@ function buildSourceStatus(evidence: EvidenceInfo): string {
     : '警告：交付方摘要与本机固定值不一致';
 }
 
-export const EvidenceInfoModule: React.FC<EvidenceInfoModuleProps> = ({
+const EvidenceInfoModuleInner: React.FC<EvidenceInfoModuleProps> = ({
   snapshot,
   busy,
   onRegisterSource,
@@ -263,3 +263,5 @@ export const EvidenceInfoModule: React.FC<EvidenceInfoModuleProps> = ({
     </div>
   );
 };
+
+export const EvidenceInfoModule = React.memo(EvidenceInfoModuleInner);

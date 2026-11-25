@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tracedesk_engines::{
     ByteInterval, EngineError, EntryReadPlan, InventoryEntry, MediaReader, SourceGuard, TskCli,
-    VolumeReader, can_export, deleted_source_note, ewf, open_media, sha256_file,
+    VolumeReader, can_export, deleted_source_note, ewf, open_media,
 };
 use uuid::Uuid;
 
@@ -230,8 +230,11 @@ impl<'a> StreamMatcher<'a> {
             }
         }
 
-        let advance = base + (search_end as u64).saturating_sub(self.needle_len as u64) + 1;
-        self.cursor = self.cursor.max(advance);
+        // 仅当本次确实执行了有效扫描窗口时推进游标，避免首块不足 needle_len + CONTEXT_BYTES 时跳过字节 0。
+        if search_end >= self.needle_len {
+            let advance = base + (search_end - self.needle_len) as u64 + 1;
+            self.cursor = self.cursor.max(advance);
+        }
 
         let keep = (self.needle_len + 2 * CONTEXT_BYTES).min(self.work_buf.len());
         self.tail.clear();
@@ -371,6 +374,7 @@ fn parse_inode_num(inode: &str) -> Option<u64> {
     first.parse::<u64>().ok()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_direct_intervals(
     vol: &mut VolumeReader,
     entry: &InventoryEntry,
@@ -379,6 +383,7 @@ fn scan_direct_intervals(
     finder: &memmem::Finder<'_>,
     limit: Option<usize>,
     cancel: &AtomicBool,
+    io_buf: &mut Vec<u8>,
 ) -> CoreResult<Vec<RawHit>> {
     let mut hits = Vec::new();
     let extra = (needle.len() as u64).saturating_sub(1) + CONTEXT_BYTES as u64;
@@ -410,15 +415,12 @@ fn scan_direct_intervals(
             if cancel.load(Ordering::Relaxed) {
                 return Err(CoreError::Cancelled("已取消内容搜索".to_string()));
             }
-            let want = ((read_hi - pos) as usize).min(STREAM_CHUNK_BYTES);
-            let block = vol.read_entry_at(entry, pos, want)?;
-            if block.len() != want {
-                return Err(CoreError::Io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "原始文件内容短读",
-                )));
+            let want = (read_hi - pos).min(STREAM_CHUNK_BYTES as u64) as usize;
+            if io_buf.len() < want {
+                io_buf.resize(want, 0);
             }
-            let reached = matcher.push_chunk(&block, Some(cancel))?;
+            vol.read_entry_into(entry, pos, &mut io_buf[..want])?;
+            let reached = matcher.push_chunk(&io_buf[..want], Some(cancel))?;
             pos += want as u64;
             if reached {
                 break;
@@ -642,10 +644,14 @@ pub fn search_case(
             let mut probe_vol: Option<VolumeReader> = media
                 .as_ref()
                 .map(|m| VolumeReader::open_with_media(Arc::clone(m)));
-            let icat_pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(ICAT_THREADS)
-                .build()
-                .map_err(|e| CoreError::Other(format!("无法创建 icat 线程池：{e}")))?;
+            // 预先探测所有已识别分区（共享只读 Arc<NtfsVolume>），避免每个工作线程和滚动窗口重复解析 $MFT。
+            if let Some(ref mut pv) = probe_vol {
+                for part in &evidence.partitions {
+                    pv.prime_partition(part.offset);
+                }
+            }
+            // 按需延迟创建 8 线程 icat 回退池，常规直读搜索零线程开销。
+            let mut icat_pool: Option<rayon::ThreadPool> = None;
 
             let mut cursor = 0usize;
             let mut emitted = 0usize;
@@ -775,18 +781,18 @@ pub fn search_case(
                 }
 
                 // 3. 按 (offset, inode_num, piece_start) 排序直读任务以提升 MFT/磁盘局部性，
-                //    并在共享 `Arc<dyn MediaReader>` 的 rayon 工作线程中并行执行。
+                //    并在共享 `Arc<dyn MediaReader>` 与只读 NTFS 元数据的 rayon 工作线程中并行执行。
                 direct_tasks.sort_unstable_by_key(|t| t.sort_key);
                 let window_done = AtomicUsize::new(0);
 
-                if let Some(ref shared_media) = media
+                if let Some(ref pv_ref) = probe_vol
                     && !direct_tasks.is_empty()
                 {
                     let raw_outcomes: Vec<CoreResult<(DedupKey, u64, DirectOutcome)>> = direct_tasks
                         .into_par_iter()
                         .map_init(
-                            || VolumeReader::open_with_media(Arc::clone(shared_media)),
-                            |vol, task| {
+                            || (pv_ref.fork_worker(), Vec::<u8>::new()),
+                            |(vol, io_buf), task| {
                                 if cancel.load(Ordering::Relaxed) {
                                     return Err(CoreError::Cancelled("已取消内容搜索".to_string()));
                                 }
@@ -811,6 +817,7 @@ pub fn search_case(
                                     &finder,
                                     options.limit,
                                     cancel,
+                                    io_buf,
                                 ) {
                                     Ok(found) => {
                                         let done = window_done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -871,26 +878,39 @@ pub fn search_case(
                     }
                 }
 
-                // 4. 在 8 线程 `icat` 池上并发执行所有回退条目与 FAT 已删除条目。
+                // 4. 在按需创建的 `icat` 池上并发执行所有回退条目与 FAT 已删除条目。
                 if !icat_tasks.is_empty() {
-                    let icat_outcomes: Vec<IcatOutcome> = icat_pool.install(|| {
-                            icat_tasks
-                                .into_par_iter()
-                                .map(|(key, entry)| {
-                                    let (found, err) = scan_via_icat(
-                                        tool,
-                                        &image,
-                                        &entry,
-                                        &needle,
-                                        &finder,
-                                        options.limit,
-                                        cancel,
-                                        byte_progress,
-                                    )?;
-                                    Ok((key, found, err))
-                                })
-                                .collect()
-                        });
+                    let pool = match icat_pool {
+                        Some(ref p) => p,
+                        None => {
+                            let threads = icat_tasks.len().clamp(1, ICAT_THREADS);
+                            let built = rayon::ThreadPoolBuilder::new()
+                                .num_threads(threads)
+                                .build()
+                                .map_err(|e| {
+                                    CoreError::Other(format!("无法创建 icat 线程池：{e}"))
+                                })?;
+                            icat_pool.insert(built)
+                        }
+                    };
+                    let icat_outcomes: Vec<IcatOutcome> = pool.install(|| {
+                        icat_tasks
+                            .into_par_iter()
+                            .map(|(key, entry)| {
+                                let (found, err) = scan_via_icat(
+                                    tool,
+                                    &image,
+                                    &entry,
+                                    &needle,
+                                    &finder,
+                                    options.limit,
+                                    cancel,
+                                    byte_progress,
+                                )?;
+                                Ok((key, found, err))
+                            })
+                            .collect()
+                    });
                     for item in icat_outcomes {
                         let (key, found, err) = item?;
                         key_results.insert(key, (found, err));
@@ -1061,7 +1081,7 @@ pub fn search_case(
     let report_path = case.folder().join("reports").join(&report_name);
     let json_text = serde_json::to_string_pretty(&record)?;
     fs::write(&report_path, json_text.as_bytes())?;
-    let report_sha256 = sha256_file(&report_path, None, None)?;
+    let report_sha256 = crate::formatting::sha256_hex(json_text.as_bytes());
 
     let mut details = Map::new();
     details.insert("query".to_string(), Value::String(options.query.clone()));

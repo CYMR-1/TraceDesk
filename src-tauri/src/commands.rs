@@ -163,6 +163,8 @@ pub fn cmd_create_case(
     if let Some(mut old) = case_guard.take() {
         old.close();
     }
+    // 切换至新建案件前清理旧案件残留的搜索会话，避免内存泄漏或跨案误存书签。
+    state.clear_search_sessions();
     let mut view = state
         .view
         .write()
@@ -232,6 +234,7 @@ pub fn cmd_open_case(state: &Arc<AppState>, case_path: &str) -> Result<CaseSnaps
     if let Some(mut old) = case_guard.take() {
         old.close();
     }
+    state.clear_search_sessions();
 
     let mut view = state
         .view
@@ -257,6 +260,7 @@ pub fn cmd_close_case(state: &Arc<AppState>) -> Result<CloseCaseResponse, String
     if let Some(mut cur) = case_guard.take() {
         cur.close();
     }
+    state.clear_search_sessions();
     if let Ok(mut view) = state.view.write() {
         view.clear();
     }
@@ -264,8 +268,8 @@ pub fn cmd_close_case(state: &Arc<AppState>) -> Result<CloseCaseResponse, String
 }
 
 pub fn cmd_get_case_snapshot(state: &Arc<AppState>) -> Result<Option<CaseSnapshot>, String> {
-    // 轻量检测外部 MCP 进程是否修改了磁盘案件状态，若有变化则即时热重载。
-    let _ = state.reload_active_case_from_disk();
+    // 非阻塞轻量检测外部 MCP 进程是否修改了磁盘案件状态：若当前有长耗时扫描/搜索占锁则直接返回缓存视图，不卡顿 UI。
+    let _ = state.reload_active_case_from_disk_nonblocking();
     let view = state
         .view
         .read()
@@ -339,7 +343,6 @@ pub fn cmd_load_image(
     image_path: &str,
     app: Option<&AppHandle>,
 ) -> Result<CaseSnapshot, String> {
-    emit_task_started(app, "打开镜像并识别分区");
     state.task_cancel.store(false, Ordering::Relaxed);
     let cancel = Arc::clone(&state.task_cancel);
 
@@ -351,6 +354,7 @@ pub fn cmd_load_image(
         .as_mut()
         .ok_or_else(|| "请先新建或打开案件".to_string())?;
 
+    emit_task_started(app, "打开镜像并识别分区");
     let progress_cb = |done: u64, total: u64| {
         emit_task_progress(app, "固定镜像 SHA-256", done, total);
     };
@@ -368,10 +372,14 @@ pub fn cmd_load_image(
         return Err(msg);
     }
 
-    let mut view = state
-        .view
-        .write()
-        .map_err(|_| "视图缓存锁异常".to_string())?;
+    let mut view = match state.view.write() {
+        Ok(v) => v,
+        Err(_) => {
+            let msg = "视图缓存锁异常".to_string();
+            emit_task_finished(app, "打开镜像并识别分区", false, Some(msg.clone()));
+            return Err(msg);
+        }
+    };
     view.sync_from_case(case, true);
     let snap = view.snapshot.clone().expect("snapshot updated");
     emit_task_finished(app, "打开镜像并识别分区", true, None);
@@ -410,8 +418,7 @@ pub fn cmd_verify_integrity(
         });
     }
 
-    // 同步/小镜像校验（附带 task:progress 事件推送）。
-    emit_task_started(app, "校验 SHA-256");
+    // 同步/小镜像校验（先完成锁与状态前置校验，确保每次 `task:started` 都有匹配的 `task:finished`）。
     state.hash_cancel.store(false, Ordering::Relaxed);
     let cancel = Arc::clone(&state.hash_cancel);
 
@@ -431,6 +438,7 @@ pub fn cmd_verify_integrity(
         .as_deref()
         .is_none_or(str::is_empty);
 
+    emit_task_started(app, "校验 SHA-256");
     let progress_cb = |done: u64, total: u64| {
         emit_task_progress(app, "校验 SHA-256", done, total);
     };
@@ -446,10 +454,14 @@ pub fn cmd_verify_integrity(
         }
     };
 
-    let mut view = state
-        .view
-        .write()
-        .map_err(|_| "视图缓存锁异常".to_string())?;
+    let mut view = match state.view.write() {
+        Ok(v) => v,
+        Err(_) => {
+            let msg = "视图缓存锁异常".to_string();
+            emit_task_finished(app, "校验 SHA-256", false, Some(msg.clone()));
+            return Err(msg);
+        }
+    };
     view.sync_from_case(case, false);
     let snapshot = view.snapshot.clone().expect("snapshot updated");
     emit_task_finished(app, "校验 SHA-256", true, None);
@@ -811,30 +823,59 @@ pub fn cmd_scan_all_partitions(
 pub fn cmd_scan_partition(
     state: &Arc<AppState>,
     offset: u64,
+    app: Option<&AppHandle>,
 ) -> Result<ScanPartitionsResponse, String> {
+    let stage = format!("扫描分区（偏移 {offset}）");
+    emit_task_started(app, &stage);
     state.scan_cancel.store(false, Ordering::Relaxed);
+    state.scanning_active.store(true, Ordering::SeqCst);
     let cancel = Arc::clone(&state.scan_cancel);
-    let mut case_guard = state
-        .case_lock
-        .lock()
-        .map_err(|_| "案件状态锁异常".to_string())?;
-    let case = case_guard
-        .as_mut()
-        .ok_or_else(|| "请先新建或打开案件".to_string())?;
-    case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
-        c.scan_partition(offset, None, Some(&cancel))
-    })
-    .map_err(|e| e.to_string())?;
-    let mut view = state
-        .view
-        .write()
-        .map_err(|_| "视图缓存锁异常".to_string())?;
-    view.sync_from_case(case, true);
-    let snapshot = view.snapshot.clone().expect("snapshot updated");
-    Ok(ScanPartitionsResponse {
-        completed: true,
-        snapshot,
-    })
+
+    let res = (|| -> Result<ScanPartitionsResponse, String> {
+        let mut case_guard = state
+            .case_lock
+            .lock()
+            .map_err(|_| "案件状态锁异常".to_string())?;
+        let case = case_guard
+            .as_mut()
+            .ok_or_else(|| "请先新建或打开案件".to_string())?;
+        match case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+            c.scan_partition(offset, None, Some(&cancel))
+        }) {
+            Ok(_) => {
+                let mut view = state
+                    .view
+                    .write()
+                    .map_err(|_| "视图缓存锁异常".to_string())?;
+                view.sync_from_case(case, true);
+                let snapshot = view.snapshot.clone().expect("snapshot updated");
+                Ok(ScanPartitionsResponse {
+                    completed: true,
+                    snapshot,
+                })
+            }
+            Err(err) if err.is_cancelled() => {
+                let mut view = state
+                    .view
+                    .write()
+                    .map_err(|_| "视图缓存锁异常".to_string())?;
+                view.sync_from_case(case, false);
+                let snapshot = view.snapshot.clone().expect("snapshot updated");
+                Ok(ScanPartitionsResponse {
+                    completed: false,
+                    snapshot,
+                })
+            }
+            Err(err) => Err(err.to_string()),
+        }
+    })();
+
+    state.scanning_active.store(false, Ordering::SeqCst);
+    match &res {
+        Ok(_) => emit_task_finished(app, &stage, true, None),
+        Err(e) => emit_task_finished(app, &stage, false, Some(e.clone())),
+    }
+    res
 }
 
 pub fn cmd_cancel_scan_partitions(state: &Arc<AppState>) -> Result<CancelResponse, String> {
@@ -1159,7 +1200,8 @@ pub fn cmd_get_tree_children(
         // 案件刚加载大镜像、此前尚未浏览任何目录时，同步刷新快照与 browser_index。
         view.sync_from_case(case, true);
     }
-    view.cache_quick_tree_branch(offset, &norm_scope, &entries);
+    // 直接接管已构建好的 `dir_index`，避免对同一批 `entries` 重复执行 `BrowserIndex::build`。
+    view.cache_quick_tree_branch_index(offset, &norm_scope, dir_index);
 
     Ok(resp)
 }
@@ -1569,7 +1611,6 @@ pub fn cmd_list_findings(
     sort_column: &str,
     descending: bool,
 ) -> Result<ListFindingsResponse, String> {
-    let _ = state.reload_active_case_from_disk();
     let mut case_guard = state
         .case_lock
         .lock()
@@ -1584,6 +1625,8 @@ pub fn cmd_list_findings(
             groups: Vec::new(),
         });
     };
+    // 在单次 `case_lock` 内同步外部磁盘变更，避免重复加锁。
+    let _ = state.reload_case_and_sync_view(case);
 
     let records = match case.check_audit() {
         Ok(r) => r,
@@ -1599,7 +1642,7 @@ pub fn cmd_list_findings(
         }
     };
 
-    let mut raw_groups = group_findings(&records);
+    let raw_groups = group_findings(&records);
     let total_group_count = raw_groups.len();
     let status_text = if total_group_count > 0 {
         format!("取证发现 · {total_group_count} 个文件 · 日志链校验通过")
@@ -1607,41 +1650,30 @@ pub fn cmd_list_findings(
         "尚无取证发现 · 右键文件可记录笔记、计算摘要或比对副本".to_string()
     };
 
-    // 与 FindingsPanel.set_text 保持一致：将原始分组按 (display_time(last.timestamp), last.seq) 升序排列，
-    // 并按该顺序分配从 1 开始的 `seq` 编号。
-    raw_groups.sort_by(|a, b| {
-        let a_last = a.records.last();
-        let b_last = b.records.last();
-        let a_key = (
-            a_last
-                .map(|r| display_iso_time(&r.timestamp, false))
-                .unwrap_or_default(),
-            a_last.map(|r| r.seq).unwrap_or(0),
-        );
-        let b_key = (
-            b_last
-                .map(|r| display_iso_time(&r.timestamp, false))
-                .unwrap_or_default(),
-            b_last.map(|r| r.seq).unwrap_or(0),
-        );
-        a_key.cmp(&b_key)
-    });
+    // 预计算每个分组的 `(最新完整时间, 最新序号)` 排序键，避免在 O(N log N) 比较器内重复格式化时间戳。
+    let mut keyed_groups: Vec<(String, u64, FindingGroup)> = raw_groups
+        .into_iter()
+        .map(|g| {
+            let (ts, seq) = g
+                .records
+                .last()
+                .map(|r| (display_iso_time(&r.timestamp, false), r.seq))
+                .unwrap_or_default();
+            (ts, seq, g)
+        })
+        .collect();
+    keyed_groups.sort_by(|a, b| (a.0.as_str(), a.1).cmp(&(b.0.as_str(), b.1)));
 
     let mut statuses_set: BTreeSet<String> = BTreeSet::new();
     let mut offsets_set: BTreeSet<u64> = BTreeSet::new();
-    let mut all_dtos: Vec<(String, FindingGroupDto)> = Vec::with_capacity(raw_groups.len());
+    let mut all_dtos: Vec<(String, FindingGroupDto)> = Vec::with_capacity(keyed_groups.len());
 
-    for (idx, g) in raw_groups.into_iter().enumerate() {
+    for (idx, (latest_full, _last_seq, g)) in keyed_groups.into_iter().enumerate() {
         let group_seq = idx + 1;
         let status_label = if g.key.deleted { "已删除" } else { "现存" }.to_string();
         statuses_set.insert(status_label.clone());
         offsets_set.insert(g.key.offset);
 
-        let latest_full = g
-            .records
-            .last()
-            .map(|r| display_iso_time(&r.timestamp, false))
-            .unwrap_or_default();
         let latest_compact = g
             .records
             .last()
@@ -1711,14 +1743,20 @@ pub fn cmd_list_findings(
                 return false;
             }
             if let Some(ref kw) = kw_filter {
-                let rec_json = serde_json::to_string(&g.records).unwrap_or_default();
-                let hay = format!(
-                    "{} {} {} {} {} {} {} {rec_json}",
-                    g.seq, g.subject, g.status, g.offset, g.inode, g.count, g.latest_time
-                )
-                .to_lowercase();
-                if !hay.contains(kw) {
-                    return false;
+                // 先在高频轻量字符串字段上短路匹配，未命中时再序列化 `records` JSON，降低搜索开销。
+                let cheap_hit = g.subject.to_lowercase().contains(kw)
+                    || g.inode.to_lowercase().contains(kw)
+                    || g.status.to_lowercase().contains(kw)
+                    || g.latest_time.to_lowercase().contains(kw)
+                    || g.offset.to_string().contains(kw)
+                    || g.seq.to_string().contains(kw);
+                if !cheap_hit {
+                    let rec_json = serde_json::to_string(&g.records)
+                        .unwrap_or_default()
+                        .to_lowercase();
+                    if !rec_json.contains(kw) {
+                        return false;
+                    }
                 }
             }
             true
@@ -1823,15 +1861,16 @@ pub fn cmd_export_findings(
  * ========================================================================================== */
 
 pub fn cmd_build_timeline(state: &Arc<AppState>) -> Result<BuildTimelineResponse, String> {
-    let _ = state.reload_active_case_from_disk();
     let entries = {
-        let case_guard = state
+        let mut case_guard = state
             .case_lock
             .lock()
             .map_err(|_| "案件状态锁异常".to_string())?;
         let case = case_guard
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| "请先新建或打开案件".to_string())?;
+        // 在单次 `case_lock` 内同步外部磁盘变更，避免重复加锁。
+        let _ = state.reload_case_and_sync_view(case);
         if case.browsing_directories() {
             return Err("请先在文件浏览中建立完整文件索引以生成全案时间线。".to_string());
         }
@@ -1960,7 +1999,6 @@ pub fn cmd_list_audit_log(
     sort_column: &str,
     descending: bool,
 ) -> Result<ListAuditLogResponse, String> {
-    let _ = state.reload_active_case_from_disk();
     let mut case_guard = state
         .case_lock
         .lock()
@@ -1978,6 +2016,7 @@ pub fn cmd_list_audit_log(
             records: Vec::new(),
         });
     };
+    let _ = state.reload_case_and_sync_view(case);
 
     let raw_records = match case.check_audit() {
         Ok(r) => r,
@@ -2110,25 +2149,27 @@ pub fn cmd_list_audit_log(
                 return false;
             }
             if let Some(ref kw) = q_f {
-                let details_str = serde_json::to_string(&r.details).unwrap_or_default();
+                // 先在高频轻量字符串字段上短路匹配，未命中时再序列化 `details` JSON。
                 let mcp_user_str = r.mcp_user.as_deref().unwrap_or("");
-                let hay = format!(
-                    "{} {} {} {} {mcp_user_str} {} {} {} {} {} {details_str} {} {}",
-                    r.seq,
-                    r.timestamp,
-                    r.origin,
-                    r.origin_label,
-                    r.actor,
-                    r.action_title,
-                    r.action,
-                    r.result,
-                    r.subject,
-                    r.previous,
-                    r.hash
-                )
-                .to_lowercase();
-                if !hay.contains(kw) {
-                    return false;
+                let cheap_hit = r.subject.to_lowercase().contains(kw)
+                    || r.actor.to_lowercase().contains(kw)
+                    || r.action_title.to_lowercase().contains(kw)
+                    || r.action.to_lowercase().contains(kw)
+                    || r.result.to_lowercase().contains(kw)
+                    || r.origin.to_lowercase().contains(kw)
+                    || r.origin_label.to_lowercase().contains(kw)
+                    || mcp_user_str.to_lowercase().contains(kw)
+                    || r.timestamp.to_lowercase().contains(kw)
+                    || r.seq.to_string().contains(kw)
+                    || r.previous.to_lowercase().contains(kw)
+                    || r.hash.to_lowercase().contains(kw);
+                if !cheap_hit {
+                    let details_str = serde_json::to_string(&r.details)
+                        .unwrap_or_default()
+                        .to_lowercase();
+                    if !details_str.contains(kw) {
+                        return false;
+                    }
                 }
             }
             true
@@ -2157,6 +2198,17 @@ pub fn cmd_list_audit_log(
     })
 }
 
+/// 内存中最多保留的已完成内容搜索会话数，防止连续多次搜索后命中列表长期占满内存。
+const MAX_RETAINED_COMPLETED_SEARCHES: usize = 16;
+
+/// 轻量级搜索命中索引：避免在搜索开始前克隆 10 万条 `InventoryEntry`。
+enum EntryLookupMode {
+    /// 单文件搜索仅保留单个选中条目。
+    Single(String, InventoryEntry),
+    /// 全案搜索仅保存 `(offset, inode, deleted, path) -> browser_index 下标`，命中时按需查找。
+    IndexMap(HashMap<(u64, String, bool, String), usize>),
+}
+
 pub fn cmd_start_content_search(
     state: &Arc<AppState>,
     query: &str,
@@ -2167,7 +2219,7 @@ pub fn cmd_start_content_search(
     let needle = parse_pattern(query, encoding).map_err(|e| e.to_string())?;
     let needle_hex = hex_lower(&needle);
 
-    let (selected_entry, image_sha256, source_note, entry_lookup) = {
+    let (case_folder, selected_entry, image_sha256, source_note, entry_lookup) = {
         let view = state
             .view
             .read()
@@ -2176,38 +2228,45 @@ pub fn cmd_start_content_search(
             .snapshot
             .as_ref()
             .ok_or_else(|| "请先新建或打开案件".to_string())?;
+        let folder = view
+            .case_folder
+            .clone()
+            .ok_or_else(|| "请先新建或打开案件".to_string())?;
         let ev = snap
             .evidence
             .as_ref()
             .ok_or_else(|| "请先加载镜像".to_string())?;
-        let selected = match selected_entry_id.map(str::trim).filter(|s| !s.is_empty()) {
+        let (selected, lookup) = match selected_entry_id.map(str::trim).filter(|s| !s.is_empty()) {
             Some(eid) => {
-                let (_, e) = view
+                let (idx, e) = view
                     .resolve_entry(eid)
                     .ok_or_else(|| format!("未在当前清单中找到选中文件：{eid}"))?;
-                Some(e)
+                let lookup = EntryLookupMode::Single(idx.to_string(), e.clone());
+                (Some(e), lookup)
             }
             None => {
                 if snap.browsing_directories {
                     return Err("全案搜索需要先在文件浏览中建立完整文件索引，亦可选择搜索单个文件。".to_string());
                 }
-                None
+                let ordered = view.browser_index.ordered();
+                let mut map: HashMap<(u64, String, bool, String), usize> =
+                    HashMap::with_capacity(ordered.len());
+                for (idx, row) in ordered.iter().enumerate() {
+                    map.insert(
+                        (row.offset, row.inode.clone(), row.deleted, row.path.clone()),
+                        idx,
+                    );
+                }
+                (None, EntryLookupMode::IndexMap(map))
             }
         };
 
-        let mut map: HashMap<(u64, String, bool, String), (String, InventoryEntry)> =
-            HashMap::with_capacity(view.browser_index.ordered().len());
-        for (idx, row) in view.browser_index.ordered().iter().enumerate() {
-            map.insert(
-                (row.offset, row.inode.clone(), row.deleted, row.path.clone()),
-                (idx.to_string(), row.clone()),
-            );
-        }
         (
+            folder,
             selected,
             ev.sha256.clone(),
             snap.source_note.clone(),
-            Arc::new(map),
+            Arc::new(lookup),
         )
     };
 
@@ -2215,6 +2274,7 @@ pub fn cmd_start_content_search(
     let cancel = Arc::new(AtomicBool::new(false));
     let session = SearchSessionState {
         search_id: search_id.clone(),
+        case_folder,
         query: query.to_string(),
         encoding: encoding.to_string(),
         needle_hex: needle_hex.clone(),
@@ -2231,6 +2291,20 @@ pub fn cmd_start_content_search(
     };
 
     if let Ok(mut searches) = state.searches.lock() {
+        // 清理超量的已完成旧搜索会话，控制内存占用。
+        let completed_keys: Vec<String> = searches
+            .iter()
+            .filter(|(_, s)| !s.running)
+            .map(|(k, _)| k.clone())
+            .collect();
+        if completed_keys.len() >= MAX_RETAINED_COMPLETED_SEARCHES {
+            for old_key in completed_keys
+                .into_iter()
+                .take(MAX_RETAINED_COMPLETED_SEARCHES / 2)
+            {
+                searches.remove(&old_key);
+            }
+        }
         searches.insert(search_id.clone(), session);
     }
 
@@ -2241,7 +2315,7 @@ pub fn cmd_start_content_search(
     let app_clone = app.cloned();
 
     if app_clone.is_some() {
-        thread::Builder::new()
+        let spawn_res = thread::Builder::new()
             .name(format!("tracedesk-search-{sid}"))
             .spawn(move || {
                 run_content_search_worker(
@@ -2254,8 +2328,17 @@ pub fn cmd_start_content_search(
                     entry_lookup,
                     app_clone,
                 );
-            })
-            .map_err(|e| format!("无法启动后台内容搜索线程：{e}"))?;
+            });
+        match spawn_res {
+            Ok(handle) => state.track_search_worker(handle),
+            Err(e) => {
+                // 线程创建失败时必须移除或终止已登记的 `running = true` 会话，防止永久触发 `check_busy`。
+                if let Ok(mut searches) = state.searches.lock() {
+                    searches.remove(&search_id);
+                }
+                return Err(format!("无法启动后台内容搜索线程：{e}"));
+            }
+        }
     } else {
         // 在无 AppHandle 的 Rust 集成测试直接调用时采用同步执行。
         run_content_search_worker(
@@ -2276,7 +2359,34 @@ pub fn cmd_start_content_search(
     })
 }
 
-type EntryLookupMap = HashMap<(u64, String, bool, String), (String, InventoryEntry)>;
+fn fallback_hit_entry(h: &SearchHit) -> (String, InventoryEntry) {
+    (
+        format!(
+            "{}:{}:{}:{}",
+            h.offset,
+            h.inode,
+            if h.deleted { 1 } else { 0 },
+            h.path
+        ),
+        InventoryEntry {
+            offset: h.offset,
+            inode: h.inode.clone(),
+            path: h.path.clone(),
+            deleted: h.deleted,
+            reallocated: h.reallocated,
+            directory: false,
+            mode: "r/rrwxrwxrwx".to_string(),
+            size: h.file_byte.saturating_add(4096),
+            mtime: 0,
+            atime: 0,
+            ctime: 0,
+            crtime: 0,
+            filesystem: String::new(),
+            start_cluster_allocated: None,
+            extents: None,
+        },
+    )
+}
 
 #[allow(clippy::too_many_arguments)]
 fn run_content_search_worker(
@@ -2286,7 +2396,7 @@ fn run_content_search_worker(
     encoding: String,
     selected: Option<InventoryEntry>,
     cancel: Arc<AtomicBool>,
-    entry_lookup: Arc<EntryLookupMap>,
+    entry_lookup: Arc<EntryLookupMode>,
     app: Option<AppHandle>,
 ) {
     let mut next_hit_index = 0usize;
@@ -2312,41 +2422,31 @@ fn run_content_search_worker(
         }
     };
 
+    let state_for_hits = Arc::clone(&state);
     let mut hit_cb = |batch: &[SearchHit]| {
         if batch.is_empty() {
             return;
         }
         let mut stored_chunk = Vec::with_capacity(batch.len());
+        // 命中到达时再按需从 `ViewCache` 读锁中取对应条目，避免搜索开始前克隆全部 10 万条清单。
+        let view_guard = match *entry_lookup {
+            EntryLookupMode::IndexMap(_) => state_for_hits.view.read().ok(),
+            EntryLookupMode::Single(_, _) => None,
+        };
         for h in batch {
-            let key = (h.offset, h.inode.clone(), h.deleted, h.path.clone());
-            let (entry_id, entry_obj) = match entry_lookup.get(&key) {
-                Some((id, e)) => (id.clone(), e.clone()),
-                None => (
-                    format!(
-                        "{}:{}:{}:{}",
-                        h.offset,
-                        h.inode,
-                        if h.deleted { 1 } else { 0 },
-                        h.path
-                    ),
-                    InventoryEntry {
-                        offset: h.offset,
-                        inode: h.inode.clone(),
-                        path: h.path.clone(),
-                        deleted: h.deleted,
-                        reallocated: h.reallocated,
-                        directory: false,
-                        mode: "r/rrwxrwxrwx".to_string(),
-                        size: h.file_byte.saturating_add(4096),
-                        mtime: 0,
-                        atime: 0,
-                        ctime: 0,
-                        crtime: 0,
-                        filesystem: String::new(),
-                        start_cluster_allocated: None,
-                        extents: None,
-                    },
-                ),
+            let (entry_id, entry_obj) = match &*entry_lookup {
+                EntryLookupMode::Single(id, e) => (id.clone(), e.clone()),
+                EntryLookupMode::IndexMap(map) => {
+                    let key = (h.offset, h.inode.clone(), h.deleted, h.path.clone());
+                    if let Some(&idx) = map.get(&key)
+                        && let Some(ref view) = view_guard
+                        && let Some(e) = view.browser_index.get(idx)
+                    {
+                        (idx.to_string(), e.clone())
+                    } else {
+                        fallback_hit_entry(h)
+                    }
+                }
             };
             let dto = SearchHitDto {
                 hit_index: next_hit_index,
@@ -2368,8 +2468,9 @@ fn run_content_search_worker(
                 source_note: h.source_note.clone(),
             });
         }
+        drop(view_guard);
 
-        if let Ok(mut searches) = state.searches.lock()
+        if let Ok(mut searches) = state_for_hits.searches.lock()
             && let Some(sess) = searches.get_mut(&search_id)
         {
             sess.hits.extend(stored_chunk);
@@ -2392,13 +2493,22 @@ fn run_content_search_worker(
         }
     };
 
-    let search_res = {
+    // 统一将所有异常路径汇总至 `search_res`，保证无论任何原因退出都会复位 `sess.running = false` 并推送 `search:finished`。
+    let search_res = (|| -> (Result<tracedesk_core::SearchOutput, CoreError>, Option<CaseSnapshot>) {
         let mut case_guard = match state.case_lock.lock() {
             Ok(g) => g,
-            Err(_) => return,
+            Err(_) => {
+                return (
+                    Err(CoreError::Other("案件状态锁异常".to_string())),
+                    None,
+                );
+            }
         };
         let Some(case) = case_guard.as_mut() else {
-            return;
+            return (
+                Err(CoreError::InvalidInput("当前案件已关闭，内容搜索已中止".to_string())),
+                None,
+            );
         };
         let out = case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
             search_case(
@@ -2422,7 +2532,7 @@ fn run_content_search_worker(
             None
         };
         (out, snap)
-    };
+    })();
 
     // 在发送 search:finished 之前刷新所有剩余命中结果。
     if let Some(ref handle) = app
@@ -2525,7 +2635,16 @@ pub fn cmd_bookmark_search_hits(
     search_id: &str,
     hit_indices: &[usize],
 ) -> Result<BookmarkSearchHitsResponse, String> {
-    let (query, encoding, needle_hex, image_sha256, verification, report_name, selected_hits) = {
+    let (
+        session_case_folder,
+        query,
+        encoding,
+        needle_hex,
+        image_sha256,
+        verification,
+        report_name,
+        selected_hits,
+    ) = {
         let searches = state
             .searches
             .lock()
@@ -2540,6 +2659,7 @@ pub fn cmd_bookmark_search_hits(
             }
         }
         (
+            sess.case_folder.clone(),
             sess.query.clone(),
             sess.encoding.clone(),
             sess.needle_hex.clone(),
@@ -2559,6 +2679,11 @@ pub fn cmd_bookmark_search_hits(
     let case = case_guard
         .as_mut()
         .ok_or_else(|| "请先新建或打开案件".to_string())?;
+
+    // 校验搜索会话所属案件目录与当前打开案件一致，防止跨案误将旧搜索命中写入新案件审计链。
+    if resolve_clean(&session_case_folder) != resolve_clean(case.folder()) {
+        return Err("该搜索会话属于其他案件，请重新执行搜索后再保存为取证发现。".to_string());
+    }
 
     let saved_count = case
         .with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
@@ -2627,23 +2752,14 @@ pub fn cmd_load_search_record(
     state: &Arc<AppState>,
     report_name: &str,
 ) -> Result<Vec<SearchHitDto>, String> {
-    let (case_folder, entry_lookup) = {
+    let case_folder = {
         let view = state
             .view
             .read()
             .map_err(|_| "视图缓存锁异常".to_string())?;
-        let folder = view
-            .case_folder
+        view.case_folder
             .clone()
-            .ok_or_else(|| "请先新建或打开案件".to_string())?;
-        let mut map = HashMap::new();
-        for (idx, row) in view.browser_index.ordered().iter().enumerate() {
-            map.insert(
-                (row.offset, row.inode.clone(), row.deleted, row.path.clone()),
-                idx.to_string(),
-            );
-        }
-        (folder, map)
+            .ok_or_else(|| "请先新建或打开案件".to_string())?
     };
     let clean_name = Path::new(report_name.trim())
         .file_name()
@@ -2655,6 +2771,27 @@ pub fn cmd_load_search_record(
     let record: SearchRecord =
         serde_json::from_str(&raw).map_err(|e| format!("历史搜索记录格式错误：{e}"))?;
 
+    if record.hits.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 仅在搜索记录确有命中时再按需构建索引映射，避免 0 命中时扫描 10 万条清单。
+    let entry_lookup: HashMap<(u64, String, bool, String), usize> = {
+        let view = state
+            .view
+            .read()
+            .map_err(|_| "视图缓存锁异常".to_string())?;
+        let ordered = view.browser_index.ordered();
+        let mut map = HashMap::with_capacity(ordered.len());
+        for (idx, row) in ordered.iter().enumerate() {
+            map.insert(
+                (row.offset, row.inode.clone(), row.deleted, row.path.clone()),
+                idx,
+            );
+        }
+        map
+    };
+
     let dtos: Vec<SearchHitDto> = record
         .hits
         .into_iter()
@@ -2662,7 +2799,7 @@ pub fn cmd_load_search_record(
         .map(|(idx, h)| {
             let entry_id = entry_lookup
                 .get(&(h.offset, h.inode.clone(), h.deleted, h.path.clone()))
-                .cloned()
+                .map(|i| i.to_string())
                 .unwrap_or_else(|| {
                     format!(
                         "{}:{}:{}:{}",
@@ -2718,7 +2855,6 @@ pub fn cmd_generate_report(state: &Arc<AppState>) -> Result<PathAndSnapshotRespo
 pub fn cmd_inspect_bundle_materials(
     state: &Arc<AppState>,
 ) -> Result<BundleMaterialsResponse, String> {
-    let _ = state.reload_active_case_from_disk();
     let mut case_guard = state
         .case_lock
         .lock()
@@ -2726,6 +2862,7 @@ pub fn cmd_inspect_bundle_materials(
     let case = case_guard
         .as_mut()
         .ok_or_else(|| "请先新建或打开案件".to_string())?;
+    let _ = state.reload_case_and_sync_view(case);
 
     let export_rows = inspect_bundle_exports(case).map_err(|e| e.to_string())?;
     let search_rows = inspect_bundle_searches(case).map_err(|e| e.to_string())?;
@@ -2900,10 +3037,18 @@ pub fn cmd_open_in_os(
 
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+
         let mut cmd = std::process::Command::new("explorer.exe");
         if reveal_folder {
             if resolved.is_file() {
-                cmd.arg(format!("/select,{}", resolved.display()));
+                let raw_str = resolved.to_string_lossy();
+                // Windows `explorer.exe /select,"<path>"` 要求引号紧跟逗号之后，避免路径含空格或逗号时定位失效。
+                if !raw_str.contains(['"', '\r', '\n']) {
+                    cmd.raw_arg(format!("/select,\"{raw_str}\""));
+                } else {
+                    cmd.arg(format!("/select,{raw_str}"));
+                }
             } else {
                 cmd.arg(&resolved);
             }
@@ -3018,7 +3163,12 @@ pub async fn suggest_case_dir(
     target: String,
     parent_dir: Option<String>,
 ) -> Result<SuggestCaseDirResponse, String> {
-    cmd_suggest_case_dir(&state, &number, &examiner, &target, parent_dir.as_deref())
+    let st = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        cmd_suggest_case_dir(&st, &number, &examiner, &target, parent_dir.as_deref())
+    })
+    .await
+    .map_err(|e| format!("后台任务执行异常：{e}"))?
 }
 
 #[tauri::command]
@@ -3058,14 +3208,20 @@ pub async fn open_case(
 
 #[tauri::command]
 pub async fn close_case(state: State<'_, Arc<AppState>>) -> Result<CloseCaseResponse, String> {
-    cmd_close_case(&state)
+    let st = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || cmd_close_case(&st))
+        .await
+        .map_err(|e| format!("后台任务执行异常：{e}"))?
 }
 
 #[tauri::command]
 pub async fn release_case_lock(
     state: State<'_, Arc<AppState>>,
 ) -> Result<CloseCaseResponse, String> {
-    cmd_close_case(&state)
+    let st = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || cmd_close_case(&st))
+        .await
+        .map_err(|e| format!("后台任务执行异常：{e}"))?
 }
 
 #[tauri::command]
@@ -3177,11 +3333,12 @@ pub async fn scan_all_partitions(
 
 #[tauri::command]
 pub async fn scan_partition(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     offset: u64,
 ) -> Result<ScanPartitionsResponse, String> {
     let st = Arc::clone(&state);
-    tauri::async_runtime::spawn_blocking(move || cmd_scan_partition(&st, offset))
+    tauri::async_runtime::spawn_blocking(move || cmd_scan_partition(&st, offset, Some(&app)))
         .await
         .map_err(|e| format!("后台任务执行异常：{e}"))?
 }
@@ -3446,13 +3603,18 @@ pub async fn start_content_search(
     encoding: String,
     selected_entry_id: Option<String>,
 ) -> Result<StartContentSearchResponse, String> {
-    cmd_start_content_search(
-        &state,
-        &query,
-        &encoding,
-        selected_entry_id.as_deref(),
-        Some(&app),
-    )
+    let st = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        cmd_start_content_search(
+            &st,
+            &query,
+            &encoding,
+            selected_entry_id.as_deref(),
+            Some(&app),
+        )
+    })
+    .await
+    .map_err(|e| format!("后台任务执行异常：{e}"))?
 }
 
 #[tauri::command]
@@ -3578,19 +3740,27 @@ pub async fn list_mcp_activities(
     transport: Option<String>,
     keyword: Option<String>,
 ) -> Result<McpActivitySnapshot, String> {
-    cmd_list_mcp_activities(
-        &state,
-        limit,
-        client.as_deref(),
-        status.as_deref(),
-        transport.as_deref(),
-        keyword.as_deref(),
-    )
+    let st = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        cmd_list_mcp_activities(
+            &st,
+            limit,
+            client.as_deref(),
+            status.as_deref(),
+            transport.as_deref(),
+            keyword.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("后台任务执行异常：{e}"))?
 }
 
 #[tauri::command]
 pub async fn clear_mcp_activities(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
-    cmd_clear_mcp_activities(&state)
+    let st = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || cmd_clear_mcp_activities(&st))
+        .await
+        .map_err(|e| format!("后台任务执行异常：{e}"))?
 }
 
 #[tauri::command]
@@ -3599,7 +3769,10 @@ pub async fn open_in_os(
     path: String,
     reveal_folder: bool,
 ) -> Result<OpenInOsResponse, String> {
-    cmd_open_in_os(&state, &path, reveal_folder)
+    let st = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || cmd_open_in_os(&st, &path, reveal_folder))
+        .await
+        .map_err(|e| format!("后台任务执行异常：{e}"))?
 }
 
 #[tauri::command]

@@ -1,7 +1,11 @@
 /**
  * 统一桌面弹窗底座：标题栏 (#F7FAFD)、内容区 (#FFFFFF)、底栏 (#F7FAFD，取消在左、确认主按钮在右)
  */
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
+
+/** 维护已挂载弹窗的打开栈，确保按 Escape 时仅关闭最顶层弹窗（避免嵌套弹窗同时关闭） */
+let nextModalId = 1;
+const openModalStack: number[] = [];
 
 interface ModalProps {
   title: string;
@@ -26,16 +30,28 @@ export const Modal: React.FC<ModalProps> = ({
   onClose,
   children,
 }) => {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
+    const id = nextModalId++;
+    openModalStack.push(id);
+
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && openModalStack[openModalStack.length - 1] === id) {
         e.stopPropagation();
-        onClose();
+        onCloseRef.current();
       }
     };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      const idx = openModalStack.lastIndexOf(id);
+      if (idx >= 0) {
+        openModalStack.splice(idx, 1);
+      }
+    };
+  }, []);
 
   return (
     <div

@@ -4,7 +4,7 @@
  * - 实时搜索框 + 7 列虚拟滚动表格（序号默认倒序、时间正倒序，来源/操作人员/操作/结果表头下拉筛选）
  * - 双击下方展开分栏详情（操作详情、操作参数与结果、前序/当前 SHA-256 哈希）
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { tauriApi } from '../api/tauri';
 import { DossierView, type DossierSection } from '../components/DossierView';
 import { UiIcon } from '../components/Icons';
@@ -30,8 +30,10 @@ const AUDIT_DETAIL_LABELS: Record<string, string> = {
   actual: '实测摘要',
 };
 
-export const AuditLogModule: React.FC<AuditLogModuleProps> = ({ snapshot, refreshToken }) => {
+const AuditLogModuleInner: React.FC<AuditLogModuleProps> = ({ snapshot, refreshToken }) => {
   const [query, setQuery] = useState('');
+  // 对审计日志关键词搜索做防抖，避免每次按键触发全链 SHA-256 磁盘核验
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [activeFilters, setActiveFilters] = useState<Record<string, string[]>>({});
   const [filterOptions, setFilterOptions] = useState<Record<string, string[]>>({
     origin: [],
@@ -47,7 +49,38 @@ export const AuditLogModule: React.FC<AuditLogModuleProps> = ({ snapshot, refres
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
 
+  const reqSeqRef = useRef(0);
+  const prevCaseIdRef = useRef<string>(snapshot?.id ?? '');
+
+  // 案件切换或关闭时重置筛选条件、搜索词与详情面板状态
+  useEffect(() => {
+    const cid = snapshot?.id ?? '';
+    if (prevCaseIdRef.current !== cid) {
+      prevCaseIdRef.current = cid;
+      reqSeqRef.current += 1;
+      setQuery('');
+      setDebouncedQuery('');
+      setActiveFilters({});
+      setSelectedSeq(null);
+      setDetailOpen(false);
+    }
+  }, [snapshot?.id]);
+
+  // 200ms 防抖同步搜索词；清空时立即生效
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setDebouncedQuery('');
+      return undefined;
+    }
+    const timer = window.setTimeout(() => {
+      setDebouncedQuery(trimmed);
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+
   const loadAudit = useCallback(async () => {
+    const seq = ++reqSeqRef.current;
     if (!snapshot) {
       setStatusText('尚未打开案件');
       setValid(true);
@@ -58,7 +91,7 @@ export const AuditLogModule: React.FC<AuditLogModuleProps> = ({ snapshot, refres
     }
     try {
       const res = await tauriApi.listAuditLog({
-        query: query.trim(),
+        query: debouncedQuery,
         origin: activeFilters.origin?.[0] ?? null,
         actor: activeFilters.actor?.[0] ?? null,
         action: activeFilters.action?.[0] ?? null,
@@ -66,6 +99,7 @@ export const AuditLogModule: React.FC<AuditLogModuleProps> = ({ snapshot, refres
         sortColumn,
         descending: sortDescending,
       });
+      if (seq !== reqSeqRef.current) return;
       setValid(res.valid);
       setStatusText(res.statusText);
       setFilterOptions({
@@ -76,11 +110,12 @@ export const AuditLogModule: React.FC<AuditLogModuleProps> = ({ snapshot, refres
       });
       setRecords(res.records);
     } catch (err) {
+      if (seq !== reqSeqRef.current) return;
       setValid(false);
       setStatusText(`日志校验失败：${formatError(err)}`);
       setRecords([]);
     }
-  }, [snapshot, query, activeFilters, sortColumn, sortDescending]);
+  }, [snapshot, debouncedQuery, activeFilters, sortColumn, sortDescending]);
 
   useEffect(() => {
     void loadAudit();
@@ -192,9 +227,21 @@ export const AuditLogModule: React.FC<AuditLogModuleProps> = ({ snapshot, refres
             placeholder="搜索来源（人工/MCP/使用者）、操作、人员、对象或结果"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                setDebouncedQuery(query.trim());
+              }
+            }}
           />
           {query && (
-            <button type="button" className="td-search-clear" onClick={() => setQuery('')}>
+            <button
+              type="button"
+              className="td-search-clear"
+              onClick={() => {
+                setQuery('');
+                setDebouncedQuery('');
+              }}
+            >
               ×
             </button>
           )}
@@ -252,3 +299,5 @@ export const AuditLogModule: React.FC<AuditLogModuleProps> = ({ snapshot, refres
     </div>
   );
 };
+
+export const AuditLogModule = React.memo(AuditLogModuleInner);

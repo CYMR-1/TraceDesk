@@ -13,22 +13,22 @@
 //! - 当 `tools/call` 指向桌面端 UI 当前打开的案件时，与活跃的 [`AppState`] 平滑协调 `case.lock`。
 
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::BufReader;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tracedesk_mcp::{
     CallbackActivitySink, CaseService, DEFAULT_HOST, DEFAULT_HTTP_PATH, DEFAULT_PORT,
-    MAX_HTTP_BODY_BYTES, McpActivityRecord, McpServer, TOOL_CATALOG, normalize_http_path,
-    request_context_from_http_headers, validate_loopback_host, verify_dns_rebinding,
+    HttpConnectionPermit, HttpParseError, MAX_CONCURRENT_HTTP_CONNS, MAX_HTTP_BODY_BYTES,
+    McpActivityRecord, McpServer, TOOL_CATALOG, normalize_http_path, normalize_request_path,
+    parse_http_request, request_context_from_http_headers, sanitize_session_id,
+    validate_loopback_host, verify_dns_rebinding, write_http_response,
 };
-use uuid::Uuid;
 
 use crate::state::{AppState, ToolCatalogItem};
 
@@ -153,9 +153,6 @@ impl LocalMcpHttpServer {
         let listener = TcpListener::bind(addr).map_err(|err| {
             format!("无法在 {clean_host}:{port} 启动本地 MCP HTTP 服务（端口可能已被占用）：{err}")
         })?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|err| format!("配置本地 MCP HTTP 监听套接字失败：{err}"))?;
 
         let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
         let st_for_sink = Arc::clone(&app_state);
@@ -206,12 +203,20 @@ impl LocalMcpHttpServer {
     /// 优雅停止本地 Streamable HTTP MCP 服务。
     pub fn stop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
-        let bind_ip = resolve_bind_ip(&self.host);
-        let _ = TcpStream::connect_timeout(
-            &SocketAddr::new(bind_ip, self.port),
-            Duration::from_millis(50),
-        );
+        // 仅在实际启动过监听线程时发起回环唤醒连接，避免未启动状态在关闭应用时误连本机默认端口。
         if let Some(handle) = self.handle.take() {
+            let bind_ip = resolve_bind_ip(&self.host);
+            let wake_addr = SocketAddr::new(bind_ip, self.port);
+            for _ in 0..10 {
+                if handle.is_finished() {
+                    break;
+                }
+                let _ = TcpStream::connect_timeout(&wake_addr, Duration::from_millis(50));
+                if handle.is_finished() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(15));
+            }
             let _ = handle.join();
         }
         self.running.store(false, Ordering::SeqCst);
@@ -231,19 +236,6 @@ fn resolve_bind_ip(host: &str) -> IpAddr {
     }
 }
 
-/// 规范化入站 HTTP 请求路径（仅去除末尾斜杠）。
-/// 根路径 `"/"` 保持为 `"/"`，绝不回退为 `DEFAULT_HTTP_PATH`。
-fn normalize_request_path(raw_path: &str) -> String {
-    let clean = raw_path.trim().trim_end_matches('/');
-    if clean.is_empty() {
-        "/".to_string()
-    } else if clean.starts_with('/') {
-        clean.to_string()
-    } else {
-        format!("/{clean}")
-    }
-}
-
 fn accept_loop(
     listener: TcpListener,
     server: Arc<McpServer>,
@@ -253,202 +245,44 @@ fn accept_loop(
     expected_path: String,
     shutdown: Arc<AtomicBool>,
 ) {
-    while !shutdown.load(Ordering::Relaxed) {
-        match listener.accept() {
-            Ok((stream, _peer)) => {
-                if shutdown.load(Ordering::Relaxed) {
-                    break;
-                }
-                let _ = stream.set_nonblocking(false);
-                let srv = Arc::clone(&server);
-                let st = Arc::clone(&app_state);
-                let host = configured_host.clone();
-                let path = expected_path.clone();
-                let sd = Arc::clone(&shutdown);
-                let _ = thread::Builder::new()
-                    .name("tracedesk-mcp-conn".to_string())
-                    .spawn(move || {
-                        handle_client_connection(stream, srv, st, host, port, path, sd);
-                    });
-            }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(40));
-            }
-            Err(_) => {
-                if shutdown.load(Ordering::Relaxed) {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(40));
-            }
-        }
-    }
-}
-
-struct ParsedHttpRequest {
-    method: String,
-    target: String,
-    headers: HashMap<String, String>,
-    body: Vec<u8>,
-}
-
-enum HttpParseError {
-    Io,
-    BadRequest(&'static str),
-    PayloadTooLarge,
-}
-
-impl From<io::Error> for HttpParseError {
-    fn from(_err: io::Error) -> Self {
-        Self::Io
-    }
-}
-
-fn read_crlf_line<R: BufRead>(reader: &mut R, max_len: usize) -> io::Result<Option<String>> {
-    let mut buf = Vec::new();
-    loop {
-        let available = reader.fill_buf()?;
-        if available.is_empty() {
-            if buf.is_empty() {
-                return Ok(None);
-            }
+    // 使用阻塞 accept 消除空闲 40ms 忙轮询唤醒，并通过并发连接槽位限制线程数。
+    let active_conns = Arc::new(AtomicUsize::new(0));
+    for incoming in listener.incoming() {
+        if shutdown.load(Ordering::Relaxed) {
             break;
         }
-        if let Some(pos) = available.iter().position(|&b| b == b'\n') {
-            buf.extend_from_slice(&available[..=pos]);
-            reader.consume(pos + 1);
-            break;
-        }
-        let len = available.len();
-        buf.extend_from_slice(available);
-        reader.consume(len);
-        if buf.len() > max_len {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "HTTP header line too long",
-            ));
-        }
-    }
-    while matches!(buf.last(), Some(b'\r' | b'\n')) {
-        buf.pop();
-    }
-    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
-}
-
-fn read_chunked_body<R: BufRead>(reader: &mut R) -> Result<Vec<u8>, HttpParseError> {
-    let mut out = Vec::new();
-    loop {
-        let Some(size_line) = read_crlf_line(reader, 1024)? else {
-            return Err(HttpParseError::Io);
+        let Ok(mut stream) = incoming else {
+            if shutdown.load(Ordering::Relaxed) {
+                break;
+            }
+            continue;
         };
-        let hex_part = size_line.split(';').next().unwrap_or("").trim();
-        let chunk_len = usize::from_str_radix(hex_part, 16)
-            .map_err(|_| HttpParseError::BadRequest("invalid chunk size in HTTP body"))?;
-        if chunk_len == 0 {
-            while let Some(trailer) = read_crlf_line(reader, 4096)? {
-                if trailer.is_empty() {
-                    break;
-                }
-            }
-            break;
-        }
-        let start = out.len();
-        let next_len = start
-            .checked_add(chunk_len)
-            .ok_or(HttpParseError::PayloadTooLarge)?;
-        if next_len > MAX_HTTP_BODY_BYTES {
-            return Err(HttpParseError::PayloadTooLarge);
-        }
-        out.resize(next_len, 0);
-        reader.read_exact(&mut out[start..next_len])?;
-        let _ = read_crlf_line(reader, 64)?;
+        let Some(permit) =
+            HttpConnectionPermit::try_acquire(&active_conns, MAX_CONCURRENT_HTTP_CONNS)
+        else {
+            let _ = write_http_response(
+                &mut stream,
+                503,
+                "Service Unavailable",
+                Some("application/json; charset=utf-8"),
+                &[],
+                b"{\"error\":\"Too many concurrent HTTP connections\"}",
+                true,
+            );
+            continue;
+        };
+        let srv = Arc::clone(&server);
+        let st = Arc::clone(&app_state);
+        let host = configured_host.clone();
+        let path = expected_path.clone();
+        let sd = Arc::clone(&shutdown);
+        let _ = thread::Builder::new()
+            .name("tracedesk-mcp-conn".to_string())
+            .spawn(move || {
+                let _permit = permit;
+                handle_client_connection(stream, srv, st, host, port, path, sd);
+            });
     }
-    Ok(out)
-}
-
-fn parse_http_request<R: BufRead>(
-    reader: &mut R,
-) -> Result<Option<ParsedHttpRequest>, HttpParseError> {
-    let Some(request_line) = read_crlf_line(reader, 8192)? else {
-        return Ok(None);
-    };
-    if request_line.trim().is_empty() {
-        return Ok(None);
-    }
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or("").to_ascii_uppercase();
-    let target = parts.next().unwrap_or("/").to_string();
-    if method.is_empty() {
-        return Ok(None);
-    }
-
-    let mut headers = HashMap::new();
-    while let Some(line) = read_crlf_line(reader, 16384)? {
-        if line.is_empty() {
-            break;
-        }
-        if let Some((k, v)) = line.split_once(':') {
-            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
-        }
-    }
-
-    let body = if headers
-        .get("transfer-encoding")
-        .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"))
-    {
-        read_chunked_body(reader)?
-    } else if let Some(raw_cl) = headers.get("content-length") {
-        let cl_u64 = raw_cl
-            .trim()
-            .parse::<u64>()
-            .map_err(|_| HttpParseError::BadRequest("invalid Content-Length header"))?;
-        if cl_u64 > MAX_HTTP_BODY_BYTES as u64 {
-            return Err(HttpParseError::PayloadTooLarge);
-        }
-        let cl = cl_u64 as usize;
-        let mut buf = vec![0u8; cl];
-        if cl > 0 {
-            reader.read_exact(&mut buf)?;
-        }
-        buf
-    } else {
-        Vec::new()
-    };
-
-    Ok(Some(ParsedHttpRequest {
-        method,
-        target,
-        headers,
-        body,
-    }))
-}
-
-fn write_http_response<W: Write>(
-    writer: &mut W,
-    status_code: u16,
-    reason: &str,
-    content_type: Option<&str>,
-    extra_headers: &[(&str, &str)],
-    body: &[u8],
-    close: bool,
-) -> io::Result<()> {
-    write!(writer, "HTTP/1.1 {status_code} {reason}\r\n")?;
-    if let Some(ct) = content_type {
-        write!(writer, "Content-Type: {ct}\r\n")?;
-    }
-    write!(writer, "Content-Length: {}\r\n", body.len())?;
-    write!(
-        writer,
-        "Connection: {}\r\n",
-        if close { "close" } else { "keep-alive" }
-    )?;
-    for &(k, v) in extra_headers {
-        write!(writer, "{k}: {v}\r\n")?;
-    }
-    write!(writer, "\r\n")?;
-    if !body.is_empty() {
-        writer.write_all(body)?;
-    }
-    writer.flush()
 }
 
 fn handle_client_connection(
@@ -553,14 +387,8 @@ fn handle_client_connection(
             continue;
         }
 
-        // 3. HTTP 方法分发。
-        let session_id = req
-            .headers
-            .get("mcp-session-id")
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+        // 3. HTTP 方法分发（清理并校验 Mcp-Session-Id 防止响应头注入）。
+        let session_id = sanitize_session_id(req.headers.get("mcp-session-id").map(String::as_str));
 
         match req.method.as_str() {
             "OPTIONS" => {
@@ -729,11 +557,23 @@ fn collect_case_dir_from_request(req: &Value, cases_root: &Path, out: &mut Vec<P
         return;
     };
 
+    let push_normalized = |mut candidate: PathBuf, out: &mut Vec<PathBuf>| {
+        // 兼容 MCP 调用直接传入 `.../case.json` 路径，归一化至其父目录以便匹配当前打开案件。
+        if candidate
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("case.json"))
+            && let Some(parent) = candidate.parent()
+        {
+            candidate = parent.to_path_buf();
+        }
+        out.push(candidate);
+    };
+
     let p = PathBuf::from(raw);
     if p.is_absolute() {
-        out.push(p);
+        push_normalized(p, out);
     } else {
-        out.push(cases_root.join(&p));
-        out.push(p);
+        push_normalized(cases_root.join(&p), out);
+        push_normalized(p, out);
     }
 }

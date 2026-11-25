@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 
+use memchr::memchr2;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use tracedesk_engines::{InventoryEntry, entry_status};
@@ -49,7 +50,7 @@ fn entry_field_timestamp(entry: &InventoryEntry, field_idx: usize) -> i64 {
     }
 }
 
-/// 零堆分配的 ASCII 大小写不敏感子串匹配检查。
+/// 零堆分配的 ASCII 大小写不敏感子串匹配检查（借助 SIMD `memchr2` 加速首字节定位）。
 #[inline]
 fn contains_ascii_icase(haystack: &[u8], needle_lower: &[u8]) -> bool {
     if needle_lower.is_empty() {
@@ -58,21 +59,23 @@ fn contains_ascii_icase(haystack: &[u8], needle_lower: &[u8]) -> bool {
     if needle_lower.len() > haystack.len() {
         return false;
     }
-    let first = needle_lower[0];
-    let limit = haystack.len() - needle_lower.len();
-    for i in 0..=limit {
-        if haystack[i].to_ascii_lowercase() == first {
-            let mut matched = true;
-            for j in 1..needle_lower.len() {
-                if haystack[i + j].to_ascii_lowercase() != needle_lower[j] {
-                    matched = false;
-                    break;
-                }
-            }
-            if matched {
-                return true;
-            }
+    let first_lo = needle_lower[0];
+    let first_hi = first_lo.to_ascii_uppercase();
+    let max_start = haystack.len() - needle_lower.len();
+    let mut pos = 0usize;
+    while pos <= max_start {
+        let Some(rel) = memchr2(first_lo, first_hi, &haystack[pos..=max_start]) else {
+            return false;
+        };
+        let idx = pos + rel;
+        if haystack[idx + 1..idx + needle_lower.len()]
+            .iter()
+            .zip(&needle_lower[1..])
+            .all(|(&h, &n)| h.to_ascii_lowercase() == n)
+        {
+            return true;
         }
+        pos = idx + 1;
     }
     false
 }
@@ -132,26 +135,27 @@ pub struct TimelineIndex {
 impl TimelineIndex {
     /// 从 `entries` 构建并并行排序紧凑 MACB 时间线（跳过 `<= 0` 的时间戳）。
     pub fn build(entries: Vec<InventoryEntry>) -> Self {
-        let mut positions = Vec::with_capacity(entries.len().saturating_mul(3));
+        // 先构造缓存友好的紧凑 `(timestamp, pos)` 元组数组，避免排序比较时反复随机跳转读取大结构 `entries`。
+        // 由于 `pos = idx * 4 + field_idx` 严格递增且唯一，按 `(ts, pos)` 执行不稳定多核并行排序
+        // 与按 `ts` 执行稳定排序结果 100% 一致，且无需额外归并缓冲。
+        let mut keyed: Vec<(i64, u64)> = Vec::with_capacity(entries.len().saturating_mul(3));
         for (idx, entry) in entries.iter().enumerate() {
             let base = (idx as u64) * 4;
             if entry.mtime > 0 {
-                positions.push(base);
+                keyed.push((entry.mtime, base));
             }
             if entry.atime > 0 {
-                positions.push(base + 1);
+                keyed.push((entry.atime, base + 1));
             }
             if entry.ctime > 0 {
-                positions.push(base + 2);
+                keyed.push((entry.ctime, base + 2));
             }
             if entry.crtime > 0 {
-                positions.push(base + 3);
+                keyed.push((entry.crtime, base + 3));
             }
         }
-        // 按 Unix 时间戳执行稳定的多核并行升序排序。
-        positions.par_sort_by_key(|&pos| {
-            entry_field_timestamp(&entries[(pos / 4) as usize], (pos % 4) as usize)
-        });
+        keyed.par_sort_unstable();
+        let positions: Vec<u64> = keyed.into_iter().map(|(_, pos)| pos).collect();
         Self { entries, positions }
     }
 
@@ -278,6 +282,34 @@ impl TimelineIndex {
             return Ok((0..self.positions.len()).collect());
         }
 
+        // 预先针对 4 个静态事件标签执行一次匹配，避免在 40 万事件热循环中反复对常量字符串做 to_lowercase()。
+        let label_matches: [bool; 4] = if has_query {
+            [
+                if query_is_ascii {
+                    contains_ascii_icase(TIMELINE_FIELDS[0].1.as_bytes(), query_ascii_bytes)
+                } else {
+                    TIMELINE_FIELDS[0].1.to_lowercase().contains(&query_lower)
+                },
+                if query_is_ascii {
+                    contains_ascii_icase(TIMELINE_FIELDS[1].1.as_bytes(), query_ascii_bytes)
+                } else {
+                    TIMELINE_FIELDS[1].1.to_lowercase().contains(&query_lower)
+                },
+                if query_is_ascii {
+                    contains_ascii_icase(TIMELINE_FIELDS[2].1.as_bytes(), query_ascii_bytes)
+                } else {
+                    TIMELINE_FIELDS[2].1.to_lowercase().contains(&query_lower)
+                },
+                if query_is_ascii {
+                    contains_ascii_icase(TIMELINE_FIELDS[3].1.as_bytes(), query_ascii_bytes)
+                } else {
+                    TIMELINE_FIELDS[3].1.to_lowercase().contains(&query_lower)
+                },
+            ]
+        } else {
+            [false; 4]
+        };
+
         let entries = &self.entries;
         let hits: Vec<usize> = self
             .positions
@@ -303,19 +335,10 @@ impl TimelineIndex {
                     return None;
                 }
                 if has_query {
-                    let label = TIMELINE_FIELDS[field_idx].1;
-                    let ts = entry_field_timestamp(entry, field_idx);
                     if query_is_ascii {
-                        let mut matched = contains_ascii_icase(
-                            entry.path.as_bytes(),
-                            query_ascii_bytes,
-                        ) || contains_ascii_icase(
-                            entry.inode.as_bytes(),
-                            query_ascii_bytes,
-                        ) || contains_ascii_icase(
-                            label.as_bytes(),
-                            query_ascii_bytes,
-                        );
+                        let mut matched = label_matches[field_idx]
+                            || contains_ascii_icase(entry.path.as_bytes(), query_ascii_bytes)
+                            || contains_ascii_icase(entry.inode.as_bytes(), query_ascii_bytes);
                         if !matched {
                             // 在栈上格式化分区偏移，避免堆分配。
                             let mut off_buf = [0u8; 20];
@@ -325,6 +348,7 @@ impl TimelineIndex {
                             }
                         }
                         if !matched {
+                            let ts = entry_field_timestamp(entry, field_idx);
                             if let Some(mut ts_buf) = format_unix_east8_stack(ts) {
                                 if contains_ascii_icase(&ts_buf, query_ascii_bytes) {
                                     matched = true;
@@ -350,17 +374,14 @@ impl TimelineIndex {
                             return None;
                         }
                     } else {
-                        let formatted = display_timestamp(ts, false);
-                        let matched = entry.path.to_lowercase().contains(&query_lower)
-                            || entry.inode.to_lowercase().contains(&query_lower)
-                            || entry.offset.to_string().contains(&query_lower)
-                            || label.to_lowercase().contains(&query_lower)
-                            || status.to_lowercase().contains(&query_lower)
-                            || formatted.to_lowercase().contains(&query_lower)
-                            || formatted
-                                .replace('T', " ")
-                                .to_lowercase()
-                                .contains(&query_lower);
+                        // 非 ASCII 关键词绝不可能匹配纯 ASCII 的数字偏移或已过滤 `>0` 的 ISO 时间戳，
+                        // 仅在事件标签、中文状态或路径/非 ASCII inode 上匹配，显著降低中文检索开销。
+                        let matched = label_matches[field_idx]
+                            || status.contains(&query_lower)
+                            || (!entry.path.is_ascii()
+                                && entry.path.to_lowercase().contains(&query_lower))
+                            || (!entry.inode.is_ascii()
+                                && entry.inode.to_lowercase().contains(&query_lower));
                         if !matched {
                             return None;
                         }

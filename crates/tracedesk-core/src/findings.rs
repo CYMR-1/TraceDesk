@@ -375,15 +375,38 @@ pub fn export_findings(case: &mut Case, groups: &[FindingGroup]) -> CoreResult<E
         return Err(CoreError::InvalidInput("当前案件尚未加载镜像。".to_string()));
     }
 
-    let mut entry_map = HashMap::new();
+    // 仅收集待导出取证发现涉及的目标键，避免克隆整个大清单的几十万条记录。
+    let mut needed_keys: std::collections::HashSet<(&str, u64, &str, bool)> =
+        std::collections::HashSet::with_capacity(groups.len());
+    for group in groups {
+        needed_keys.insert((
+            group.key.subject.as_str(),
+            group.key.offset,
+            group.key.inode.as_str(),
+            group.key.deleted,
+        ));
+    }
+
+    let mut entry_map = HashMap::with_capacity(needed_keys.len());
     for entry in case.displayed_entries() {
-        let key = (
-            entry.path.clone(),
+        let probe = (
+            entry.path.as_str(),
             entry.offset,
-            entry.inode.clone(),
+            entry.inode.as_str(),
             entry.deleted,
         );
-        entry_map.entry(key).or_insert_with(|| entry.clone());
+        if needed_keys.contains(&probe) {
+            let key = (
+                entry.path.clone(),
+                entry.offset,
+                entry.inode.clone(),
+                entry.deleted,
+            );
+            entry_map.entry(key).or_insert_with(|| entry.clone());
+            if entry_map.len() == needed_keys.len() {
+                break;
+            }
+        }
     }
 
     let mut results: Vec<(&FindingGroup, Option<PathBuf>, Option<String>)> =

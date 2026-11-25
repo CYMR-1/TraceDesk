@@ -194,7 +194,7 @@ pub fn format_unix_east8_stack(unix_secs: i64) -> Option<[u8; 25]> {
 
 /// 将 UTF-8 字符串截断至不超过 `max_units` 个 UTF-16 代码单元，且不拆分代理对。
 pub fn truncate_utf16_units(s: &str, max_units: usize) -> String {
-    let mut out = String::with_capacity(s.len().min(max_units * 3));
+    let mut out = String::with_capacity(s.len().min(max_units.saturating_mul(3)));
     let mut units = 0usize;
     for ch in s.chars() {
         let len = ch.len_utf16();
@@ -216,17 +216,27 @@ pub fn utf16_unit_len(s: &str) -> usize {
 /// 按 Windows NTFS/FAT 规则净化单个文件名组件（对应 `core-contract.md` §3.1）。
 pub fn windows_filename(name: &str, max_units: usize) -> String {
     let mut cleaned = INVALID_WIN_CHARS_RE.replace_all(name, "_").into_owned();
-    let stem = cleaned.split('.').next().unwrap_or(&cleaned);
-    let device = stem.trim_end_matches(' ').to_uppercase();
-    if RESERVED_WIN_DEVICE_RE.is_match(&device) {
+    let is_reserved = |candidate: &str| {
+        let stem = candidate.split('.').next().unwrap_or(candidate);
+        let device = stem.trim_end_matches(' ').to_uppercase();
+        RESERVED_WIN_DEVICE_RE.is_match(&device)
+    };
+    if is_reserved(&cleaned) {
         cleaned.insert(0, '_');
     }
     let truncated = truncate_utf16_units(&cleaned, max_units);
-    let trimmed = truncated.trim_end_matches([' ', '.']);
+    let mut trimmed = truncated.trim_end_matches([' ', '.']).to_string();
+    // 截断后可能再次落入 Windows 保留设备名（例如 "CONSOLE" 截断为 3 单元变成 "CON"），需二次校验。
+    if !trimmed.is_empty() && is_reserved(&trimmed) {
+        trimmed.insert(0, '_');
+        trimmed = truncate_utf16_units(&trimmed, max_units)
+            .trim_end_matches([' ', '.'])
+            .to_string();
+    }
     if trimmed.is_empty() {
         "file".to_string()
     } else {
-        trimmed.to_string()
+        trimmed
     }
 }
 

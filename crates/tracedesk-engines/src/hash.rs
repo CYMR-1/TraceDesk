@@ -30,7 +30,7 @@ pub fn sha256_file(
 ) -> EngineResult<String> {
     let mut file = File::open(path)?;
     let before = file_identity_from_file(&file)?;
-    let buf_len = (before.size.max(1) as usize).min(STREAM_BUF_MAX);
+    let buf_len = before.size.clamp(1, STREAM_BUF_MAX as u64) as usize;
     let mut buf = vec![0u8; buf_len];
 
     let mut hasher = Sha256::new();

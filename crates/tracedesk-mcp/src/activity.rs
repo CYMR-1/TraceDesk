@@ -5,17 +5,19 @@
 //! - 提供 `ActivityLogTailer` 增量字节偏移尾随读取器（支持截断重置与半行保护）
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedesk_core::{
     AppPaths, format_commas, format_unix_east8_stack, resolve_clean, strip_trailing_version,
 };
+use tracedesk_engines::CaseFileLock;
 use uuid::Uuid;
 
 use crate::tools::TOOL_CATALOG;
@@ -171,8 +173,15 @@ pub fn new_activity_id() -> String {
     Uuid::new_v4().to_string()
 }
 
-/// 返回默认的跨进程遥测日志路径：`<app_root>/logs/mcp-activity.jsonl`。
+/// 返回默认的跨进程遥测日志路径：优先读取 `TRACEDESK_MCP_ACTIVITY_LOG` 环境变量，
+/// 未设置时回退至 `<app_root>/logs/mcp-activity.jsonl`。
 pub fn default_activity_log_path() -> PathBuf {
+    if let Ok(explicit) = env::var("TRACEDESK_MCP_ACTIVITY_LOG") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
     AppPaths::discover().logs_dir.join(ACTIVITY_LOG_FILENAME)
 }
 
@@ -436,7 +445,16 @@ pub fn resolve_case_context(
                 p
             }
         };
-        resolve_clean(&candidate)
+        let mut clean = resolve_clean(&candidate);
+        // 兼容直接传入 `.../case.json` 路径的场景，与 `CaseService::resolve_case_dir` 保持一致。
+        if clean
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("case.json"))
+            && let Some(parent) = clean.parent()
+        {
+            clean = parent.to_path_buf();
+        }
+        clean
     });
 
     let case_number = resolved_dir
@@ -617,6 +635,26 @@ impl McpActivitySink for FileActivitySink {
     }
 }
 
+/// 跨进程遥测日志锁超时时间（短锁排队，绝不长时间阻塞 MCP 调用）。
+const ACTIVITY_LOCK_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// 返回指定 JSONL 遥测日志对应的跨进程伴随锁文件路径（`<path>.lock`）。
+fn activity_lock_path(path: &Path) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(".lock");
+    PathBuf::from(os)
+}
+
+/// 尝试获取跨进程遥测伴随锁；若父目录存在则创建锁文件并等待短锁。
+fn acquire_activity_cross_process_lock(path: &Path) -> Option<CaseFileLock> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        let _ = fs::create_dir_all(parent);
+    }
+    CaseFileLock::acquire_with_timeout(&activity_lock_path(path), ACTIVITY_LOCK_TIMEOUT).ok()
+}
+
 /// 向指定 JSONL 文件追加单条活动记录，并在超过 1,200 行时温和截断保留最近 600 行。
 pub fn append_activity_record(path: &Path, record: &McpActivityRecord) -> io::Result<()> {
     let _guard = file_write_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -625,6 +663,8 @@ pub fn append_activity_record(path: &Path, record: &McpActivityRecord) -> io::Re
     {
         fs::create_dir_all(parent)?;
     }
+    // 加跨进程短锁，防止与其他进程的温和截断/清空交错导致丢失或半行损坏。
+    let _proc_lock = acquire_activity_cross_process_lock(path);
 
     let mut line = serde_json::to_string(record)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -652,6 +692,7 @@ pub fn trim_activity_log_if_needed(
     keep_lines: usize,
 ) -> io::Result<bool> {
     let _guard = file_write_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _proc_lock = acquire_activity_cross_process_lock(path);
     trim_activity_log_locked(path, max_lines, keep_lines)
 }
 
@@ -667,11 +708,30 @@ fn trim_activity_log_locked(path: &Path, max_lines: usize, keep_lines: usize) ->
     }
     let keep = keep_lines.min(lines.len());
     let start = lines.len().saturating_sub(keep);
-    let mut trimmed = String::new();
+    let mut trimmed = String::with_capacity(content.len() / 2);
     for line in &lines[start..] {
         trimmed.push_str(line);
         trimmed.push('\n');
     }
+
+    // 优先通过临时文件写入再替换，避免截断窗口暴露空文件或半写内容；若目标被外部只读句柄占用则回退到锁内原地覆写。
+    let tmp_path = path.with_extension(format!("jsonl.tmp.{}", Uuid::new_v4().simple()));
+    let write_tmp = (|| -> io::Result<()> {
+        let mut f = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)?;
+        f.write_all(trimmed.as_bytes())?;
+        f.flush()?;
+        Ok(())
+    })();
+    if write_tmp.is_ok() {
+        if fs::rename(&tmp_path, path).is_ok() {
+            return Ok(true);
+        }
+        let _ = fs::remove_file(&tmp_path);
+    }
+
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -685,6 +745,7 @@ fn trim_activity_log_locked(path: &Path, max_lines: usize, keep_lines: usize) ->
 /// 清空并截断遥测日志文件（文件不存在时静默视为成功）。
 pub fn truncate_activity_log(path: &Path) -> io::Result<()> {
     let _guard = file_write_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _proc_lock = acquire_activity_cross_process_lock(path);
     if !path.exists() {
         return Ok(());
     }
@@ -697,19 +758,30 @@ pub fn truncate_activity_log(path: &Path) -> io::Result<()> {
  * 增量字节偏移尾随读取器（ActivityLogTailer）
  * ========================================================================================== */
 
-/// 极轻量的 JSONL 增量尾随读取器：跟踪已读字节偏移，检测截断重置并保护未写完的半行。
+/// 用于检测文件被清空/滚动截断后又重写至 `new_len >= old_offset` 的头部指纹长度（字节）。
+const TAILER_HEAD_FINGERPRINT_BYTES: usize = 128;
+
+/// 极轻量的 JSONL 增量尾随读取器：跟踪已读字节偏移与头部指纹，检测截断重置并保护未写完的半行。
 #[derive(Debug, Clone)]
 pub struct ActivityLogTailer {
     path: PathBuf,
     offset: u64,
+    /// 已读取文件的头部字节前缀指纹，用于识别“截断/滚动后又写到不小于旧偏移”的重写场景。
+    head_prefix: Vec<u8>,
 }
 
 impl ActivityLogTailer {
     /// 创建绑定到 `path` 且初始字节偏移为 `initial_offset` 的尾随读取器。
     pub fn new(path: PathBuf, initial_offset: u64) -> Self {
+        let head_prefix = if initial_offset > 0 {
+            read_head_prefix(&path)
+        } else {
+            Vec::new()
+        };
         Self {
             path,
             offset: initial_offset,
+            head_prefix,
         }
     }
 
@@ -721,29 +793,45 @@ impl ActivityLogTailer {
         self.offset
     }
 
-    /// 重置读取偏移为 0（例如在手动清空日志后调用）。
+    /// 重置读取偏移与头部指纹为 0（例如在手动清空日志后调用）。
     pub fn reset(&mut self) {
         self.offset = 0;
+        self.head_prefix.clear();
     }
 
     /// 检查文件增量并解析所有新到达的完整 JSONL 活动记录。
     pub fn poll_new_records(&mut self) -> Vec<McpActivityRecord> {
         let Ok(meta) = fs::metadata(&self.path) else {
             self.offset = 0;
+            self.head_prefix.clear();
             return Vec::new();
         };
         let len = meta.len();
         if len < self.offset {
             // 检测到文件被清空或滚动截断，自动从头读取。
             self.offset = 0;
-        }
-        if len == self.offset {
-            return Vec::new();
+            self.head_prefix.clear();
         }
 
         let Ok(mut file) = File::open(&self.path) else {
             return Vec::new();
         };
+
+        // 当已有偏移且文件头部前缀发生变化时（例如清空/温和截断后迅速写到 >= old_offset），
+        // 主动重置偏移到 0，防止 seek 落入某行 JSON 中间导致丢数据或解析失败。
+        if self.offset > 0 && !self.head_prefix.is_empty() {
+            let mut probe = vec![0u8; self.head_prefix.len()];
+            let n = read_prefix_from_file(&mut file, &mut probe);
+            if n < self.head_prefix.len() || probe[..n] != self.head_prefix[..] {
+                self.offset = 0;
+                self.head_prefix.clear();
+            }
+        }
+
+        if len == self.offset {
+            return Vec::new();
+        }
+
         if file.seek(SeekFrom::Start(self.offset)).is_err() {
             return Vec::new();
         }
@@ -757,7 +845,14 @@ impl ActivityLogTailer {
             return Vec::new();
         };
         let consumed = last_nl + 1;
+        let was_from_start = self.offset == 0;
         self.offset = self.offset.saturating_add(consumed as u64);
+        if was_from_start {
+            let fp_len = consumed.min(TAILER_HEAD_FINGERPRINT_BYTES);
+            self.head_prefix = buf[..fp_len].to_vec();
+        } else if self.head_prefix.is_empty() {
+            self.head_prefix = read_head_prefix(&self.path);
+        }
 
         let text = String::from_utf8_lossy(&buf[..consumed]);
         let mut records = Vec::new();
@@ -775,6 +870,30 @@ impl ActivityLogTailer {
     }
 }
 
+fn read_prefix_from_file(file: &mut File, buf: &mut [u8]) -> usize {
+    if file.seek(SeekFrom::Start(0)).is_err() {
+        return 0;
+    }
+    let mut total = 0usize;
+    while total < buf.len() {
+        match file.read(&mut buf[total..]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => total += n,
+        }
+    }
+    total
+}
+
+fn read_head_prefix(path: &Path) -> Vec<u8> {
+    let Ok(mut file) = File::open(path) else {
+        return Vec::new();
+    };
+    let mut buf = vec![0u8; TAILER_HEAD_FINGERPRINT_BYTES];
+    let n = read_prefix_from_file(&mut file, &mut buf);
+    buf.truncate(n);
+    buf
+}
+
 /* ==========================================================================================
  * 内存环形聚合队列与实时统计（McpActivityStore）
  * ========================================================================================== */
@@ -786,8 +905,8 @@ impl ActivityLogTailer {
 #[derive(Debug, Clone)]
 pub struct McpActivityStore {
     capacity: usize,
-    /// 按入队时间正序存储合并后的调用记录（最新记录位于末尾）。
-    records: Vec<McpActivityRecord>,
+    /// 按入队时间正序存储合并后的调用记录（最新记录位于末尾，使用环形双端队列 O(1) 淘汰队首）。
+    records: VecDeque<McpActivityRecord>,
     /// 已接收事件 `id` 去重集合。
     seen_ids: HashSet<String>,
     /// 维护 `seen_ids` 的淘汰顺序，限制最大缓存规模。
@@ -806,7 +925,7 @@ impl McpActivityStore {
         let cap = capacity.max(1);
         Self {
             capacity: cap,
-            records: Vec::with_capacity(cap.min(64)),
+            records: VecDeque::with_capacity(cap.min(64)),
             seen_ids: HashSet::new(),
             seen_id_order: VecDeque::new(),
         }
@@ -855,10 +974,9 @@ impl McpActivityStore {
             return true;
         }
 
-        self.records.push(record);
-        if self.records.len() > self.capacity {
-            let overflow = self.records.len() - self.capacity;
-            self.records.drain(0..overflow);
+        self.records.push_back(record);
+        while self.records.len() > self.capacity {
+            self.records.pop_front();
         }
         true
     }
@@ -907,11 +1025,11 @@ impl McpActivityStore {
             .filter(|s| !s.is_empty())
             .map(str::to_lowercase);
 
-        let mut matched: Vec<McpActivityRecord> = Vec::new();
+        // 先仅收集匹配记录的引用并计算全量统计，再仅克隆前 `max_items` 条，避免大预览文本的无效克隆。
+        let mut matched_refs: Vec<&McpActivityRecord> = Vec::new();
         for rec in self.records.iter().rev() {
-            let clean_client = normalize_activity_client(&rec.client);
             if let Some(ref cf) = client_filter
-                && !clean_client.eq_ignore_ascii_case(cf)
+                && !rec.client.eq_ignore_ascii_case(cf)
             {
                 continue;
             }
@@ -930,21 +1048,18 @@ impl McpActivityStore {
             {
                 continue;
             }
-            let mut item = rec.clone();
-            item.client = clean_client;
-            matched.push(item);
+            matched_refs.push(rec);
         }
 
-        let stats = compute_activity_stats(&matched);
+        let stats = compute_activity_stats_refs(matched_refs.iter().copied(), false);
         let max_items = limit.unwrap_or(self.capacity);
-        if matched.len() > max_items {
-            matched.truncate(max_items);
-        }
+        let activities = matched_refs
+            .into_iter()
+            .take(max_items)
+            .cloned()
+            .collect();
 
-        McpActivitySnapshot {
-            activities: matched,
-            stats,
-        }
+        McpActivitySnapshot { activities, stats }
     }
 }
 
@@ -997,6 +1112,13 @@ fn record_matches_keyword(rec: &McpActivityRecord, kw_lower: &str) -> bool {
 
 /// 基于合并后的活动记录列表计算聚合统计信息。
 pub fn compute_activity_stats(records: &[McpActivityRecord]) -> McpActivityStats {
+    compute_activity_stats_refs(records.iter(), true)
+}
+
+fn compute_activity_stats_refs<'a, I>(records: I, normalize_client: bool) -> McpActivityStats
+where
+    I: IntoIterator<Item = &'a McpActivityRecord>,
+{
     let mut total_calls = 0usize;
     let mut running_calls = 0usize;
     let mut succeeded_calls = 0usize;
@@ -1029,7 +1151,11 @@ pub fn compute_activity_stats(records: &[McpActivityRecord]) -> McpActivityStats
             duration_sum += u128::from(ms);
             duration_count += 1;
         }
-        let client_clean = normalize_activity_client(&rec.client);
+        let client_clean = if normalize_client {
+            normalize_activity_client(&rec.client)
+        } else {
+            rec.client.clone()
+        };
         if !client_clean.is_empty() && seen_clients.insert(client_clean.clone()) {
             active_clients.push(client_clean);
         }
@@ -1297,5 +1423,70 @@ mod tests {
         assert_eq!(after_trim.len(), 4);
         assert_eq!(after_trim[0].id, "id-6");
         assert_eq!(after_trim[3].id, "id-9");
+    }
+
+    #[test]
+    fn test_tailer_detects_rewrite_when_new_len_exceeds_old_offset() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log_path = tmp.path().join(ACTIVITY_LOG_FILENAME);
+
+        let mut tailer = ActivityLogTailer::new(log_path.clone(), 0);
+        let rec0 = sample_record(
+            "old-0",
+            "call-old-0",
+            "completed",
+            "stdio",
+            "Cursor",
+            Some("tracedesk_list_cases"),
+            true,
+            Some(5),
+        );
+        append_activity_record(&log_path, &rec0).expect("append old");
+        let first = tailer.poll_new_records();
+        assert_eq!(first.len(), 1);
+        let old_offset = tailer.offset();
+        assert!(old_offset > 0);
+
+        // 清空文件后立即写入 3 条新记录，使新文件长度大于旧偏移量。
+        truncate_activity_log(&log_path).expect("truncate");
+        for i in 0..3 {
+            let rec = sample_record(
+                &format!("new-{i}"),
+                &format!("call-new-{i}"),
+                "completed",
+                "stdio",
+                "Cursor",
+                Some("tracedesk_list_cases"),
+                true,
+                Some(12),
+            );
+            append_activity_record(&log_path, &rec).expect("append new");
+        }
+        assert!(fs::metadata(&log_path).unwrap().len() > old_offset);
+
+        // 头部指纹变化应触发从头重读，避免 seek 落到半行中间导致丢记录。
+        let reloaded = tailer.poll_new_records();
+        assert_eq!(reloaded.len(), 3);
+        assert_eq!(reloaded[0].id, "new-0");
+        assert_eq!(reloaded[2].id, "new-2");
+    }
+
+    #[test]
+    fn test_resolve_case_context_strips_case_json_filename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let case_dir = tmp.path().join("CASE-01");
+        fs::create_dir_all(&case_dir).expect("mkdir");
+        let case_json = case_dir.join("case.json");
+        fs::write(&case_json, r#"{"number":"CASE-2026-99"}"#).expect("write case.json");
+
+        let (dir_opt, num_opt) = resolve_case_context(
+            &json!({ "case_dir": case_json.to_string_lossy() }),
+            tmp.path(),
+        );
+        assert_eq!(
+            dir_opt.as_deref(),
+            Some(resolve_clean(&case_dir).to_string_lossy().as_ref())
+        );
+        assert_eq!(num_opt.as_deref(), Some("CASE-2026-99"));
     }
 }

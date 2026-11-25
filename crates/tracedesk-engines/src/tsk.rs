@@ -4,9 +4,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -237,9 +236,10 @@ fn clean_image_arg(image: &Path) -> OsString {
     strip_verbatim_prefix(image).into_os_string()
 }
 
-/// 看门狗定时器：当触发 `cancel` 或超过 `deadline` 时终止阻塞中的子进程。
+/// 看门狗定时器：当超过 `deadline` 时终止阻塞中的子进程；
+/// 使用 `Condvar` 通知退出，子进程正常结束时零延迟唤醒回收。
 struct ChildWatchdog {
-    done: Arc<AtomicBool>,
+    state: Arc<(Mutex<bool>, Condvar)>,
     reason: Arc<AtomicU8>,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -250,7 +250,7 @@ const KILL_TIMEOUT: u8 = 2;
 
 impl ChildWatchdog {
     fn start(child: &Child, timeout: Duration, cancel: Option<&AtomicBool>) -> Self {
-        let done = Arc::new(AtomicBool::new(false));
+        let state = Arc::new((Mutex::new(false), Condvar::new()));
         let reason = Arc::new(AtomicU8::new(KILL_NONE));
 
         #[cfg(windows)]
@@ -277,12 +277,11 @@ impl ChildWatchdog {
         #[cfg(not(windows))]
         let child_pid = child.id();
 
-        let done_bg = Arc::clone(&done);
-        let reason_bg = Arc::clone(&reason);
+        let state_bg = Arc::clone(&state);
         // 说明：为避免任何生命周期相关的不安全操作，此处不通过裸指针轮询 `cancel`，
-        // 仅处理超时场景（`cancel` 为 `None`）；当需要协作式取消时，在 `stream_entry` 与
-        // `img_cat_ewf_stream` 中直接使用 `thread::scope` 安全借用 `&AtomicBool`。
+        // 仅处理超时场景（`cancel` 为 `None`）；当需要协作式取消时，在作用域线程中安全借用 `&AtomicBool`。
         let _ = cancel;
+        let reason_bg = Arc::clone(&reason);
         let deadline = Instant::now() + timeout;
 
         let handle = thread::spawn(move || {
@@ -291,8 +290,11 @@ impl ChildWatchdog {
             #[cfg(windows)]
             use windows_sys::Win32::System::Threading::TerminateProcess;
 
-            while !done_bg.load(Ordering::Acquire) {
-                if Instant::now() >= deadline {
+            let (lock, cvar) = &*state_bg;
+            let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while !*done {
+                let now = Instant::now();
+                if now >= deadline {
                     reason_bg.store(KILL_TIMEOUT, Ordering::Release);
                     #[cfg(windows)]
                     if let Some(h) = dup_handle {
@@ -306,7 +308,11 @@ impl ChildWatchdog {
                     }
                     break;
                 }
-                thread::sleep(Duration::from_millis(25));
+                let wait = deadline.saturating_duration_since(now);
+                let (guard, _) = cvar
+                    .wait_timeout(done, wait)
+                    .unwrap_or_else(|e| e.into_inner());
+                done = guard;
             }
             #[cfg(windows)]
             if let Some(h) = dup_handle {
@@ -317,7 +323,7 @@ impl ChildWatchdog {
         });
 
         Self {
-            done,
+            state,
             reason,
             handle: Some(handle),
         }
@@ -328,7 +334,12 @@ impl ChildWatchdog {
     }
 
     fn stop(&mut self) {
-        self.done.store(true, Ordering::Release);
+        let (lock, cvar) = &*self.state;
+        {
+            let mut done = lock.lock().unwrap_or_else(|e| e.into_inner());
+            *done = true;
+            cvar.notify_one();
+        }
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
@@ -481,12 +492,19 @@ impl TskCli {
         Ok(command)
     }
 
-    fn run_captured(
+    fn run_captured_cancellable(
         &self,
         cmd: TskCommand,
         args: Vec<OsString>,
         timeout: Duration,
+        cancel: Option<&AtomicBool>,
     ) -> EngineResult<Vec<u8>> {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return Err(EngineError::Cancelled(format!(
+                "已取消执行 {}",
+                cmd.as_str()
+            )));
+        }
         let mut stdout_tmp = tempfile::tempfile()?;
         let mut stderr_tmp = tempfile::tempfile()?;
 
@@ -501,11 +519,60 @@ impl TskCli {
             message: format!("无法启动 {}：{e}", cmd.as_str()),
         })?;
 
-        let mut watchdog = ChildWatchdog::start(&child, timeout, None);
-        let status = child.wait()?;
-        watchdog.stop();
+        let (status, kill_reason) = if let Some(cancel_flag) = cancel {
+            let terminator = ProcessTerminator::from_child(&child);
+            let done_lock = Mutex::new(false);
+            let done_cvar = Condvar::new();
+            let reason = AtomicU8::new(KILL_NONE);
+            let deadline = Instant::now() + timeout;
 
-        if watchdog.kill_reason() == KILL_TIMEOUT {
+            let status = thread::scope(|s| {
+                let watchdog = s.spawn(|| {
+                    let mut done = done_lock.lock().unwrap_or_else(|e| e.into_inner());
+                    while !*done {
+                        if cancel_flag.load(Ordering::Relaxed) {
+                            reason.store(KILL_CANCELLED, Ordering::Release);
+                            terminator.terminate();
+                            break;
+                        }
+                        let now = Instant::now();
+                        if now >= deadline {
+                            reason.store(KILL_TIMEOUT, Ordering::Release);
+                            terminator.terminate();
+                            break;
+                        }
+                        let wait = Duration::from_millis(20)
+                            .min(deadline.saturating_duration_since(now));
+                        let (guard, _) = done_cvar
+                            .wait_timeout(done, wait)
+                            .unwrap_or_else(|e| e.into_inner());
+                        done = guard;
+                    }
+                });
+                let wait_res = child.wait();
+                {
+                    let mut done = done_lock.lock().unwrap_or_else(|e| e.into_inner());
+                    *done = true;
+                    done_cvar.notify_one();
+                }
+                let _ = watchdog.join();
+                wait_res
+            })?;
+            (status, reason.load(Ordering::Acquire))
+        } else {
+            let mut watchdog = ChildWatchdog::start(&child, timeout, None);
+            let status = child.wait()?;
+            watchdog.stop();
+            (status, watchdog.kill_reason())
+        };
+
+        if kill_reason == KILL_CANCELLED || cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return Err(EngineError::Cancelled(format!(
+                "已取消执行 {}",
+                cmd.as_str()
+            )));
+        }
+        if kill_reason == KILL_TIMEOUT {
             return Err(EngineError::Timeout(format!(
                 "{} 执行超时（{} 秒）",
                 cmd.as_str(),
@@ -528,6 +595,15 @@ impl TskCli {
         let mut out = Vec::new();
         stdout_tmp.read_to_end(&mut out)?;
         Ok(out)
+    }
+
+    fn run_captured(
+        &self,
+        cmd: TskCommand,
+        args: Vec<OsString>,
+        timeout: Duration,
+    ) -> EngineResult<Vec<u8>> {
+        self.run_captured_cancellable(cmd, args, timeout, None)
     }
 
     fn run_text(&self, cmd: TskCommand, args: Vec<OsString>, timeout: Duration) -> EngineResult<String> {
@@ -593,6 +669,17 @@ impl TskCli {
 
     /// 对位于 `offset`（以 512 字节扇区计）的分区执行 `fsstat`（完整输出或 `-t` 仅输出类型）。
     pub fn fsstat(&self, image: &Path, offset: u64, type_only: bool) -> EngineResult<String> {
+        self.fsstat_cancellable(image, offset, type_only, None)
+    }
+
+    /// 支持协作式取消的 `fsstat` 执行接口（供分区扫描与 `fls` 并行执行时共享取消/中止信号）。
+    pub fn fsstat_cancellable(
+        &self,
+        image: &Path,
+        offset: u64,
+        type_only: bool,
+        cancel: Option<&AtomicBool>,
+    ) -> EngineResult<String> {
         let mut args = Vec::with_capacity(6);
         if type_only {
             args.push(OsString::from("-t"));
@@ -602,7 +689,13 @@ impl TskCli {
         args.push(OsString::from("-o"));
         args.push(OsString::from(offset.to_string()));
         args.push(clean_image_arg(image));
-        self.run_text(TskCommand::Fsstat, args, Duration::from_secs(300))
+        let bytes = self.run_captured_cancellable(
+            TskCommand::Fsstat,
+            args,
+            Duration::from_secs(300),
+            cancel,
+        )?;
+        Ok(decode_acp_lossy(&bytes))
     }
 
     /// 执行 `fsstat` 并将原始标准输出直接流式写入 `dest`。
@@ -784,30 +877,65 @@ impl TskCli {
             }
         })?;
 
+        let terminator = ProcessTerminator::from_child(&child);
+        let done_lock = Mutex::new(false);
+        let done_cvar = Condvar::new();
+        let kill_reason = AtomicU8::new(KILL_NONE);
         let deadline = Instant::now() + timeout;
-        let exit_status = loop {
-            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
-                abort.store(true, Ordering::Release);
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(EngineError::Cancelled("已取消建立索引".to_string()));
+
+        // 主线程直接阻塞等待子进程退出（零轮询延迟），作用域看门狗通过 Condvar 响应取消/中止/超时。
+        let exit_status = thread::scope(|s| {
+            let watchdog = s.spawn(|| {
+                let mut done = done_lock.lock().unwrap_or_else(|e| e.into_inner());
+                while !*done {
+                    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                        abort.store(true, Ordering::Release);
+                        kill_reason.store(KILL_CANCELLED, Ordering::Release);
+                        terminator.terminate();
+                        break;
+                    }
+                    if abort.load(Ordering::Acquire) {
+                        kill_reason.store(KILL_CANCELLED, Ordering::Release);
+                        terminator.terminate();
+                        break;
+                    }
+                    let now = Instant::now();
+                    if now >= deadline {
+                        abort.store(true, Ordering::Release);
+                        kill_reason.store(KILL_TIMEOUT, Ordering::Release);
+                        terminator.terminate();
+                        break;
+                    }
+                    let wait = Duration::from_millis(20)
+                        .min(deadline.saturating_duration_since(now));
+                    let (guard, _) = done_cvar
+                        .wait_timeout(done, wait)
+                        .unwrap_or_else(|e| e.into_inner());
+                    done = guard;
+                }
+            });
+
+            let wait_res = child.wait();
+            {
+                let mut done = done_lock.lock().unwrap_or_else(|e| e.into_inner());
+                *done = true;
+                done_cvar.notify_one();
             }
-            if abort.load(Ordering::Acquire) {
-                let _ = child.kill();
-                let _ = child.wait();
+            let _ = watchdog.join();
+            wait_res
+        })?;
+
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            abort.store(true, Ordering::Release);
+            return Err(EngineError::Cancelled("已取消建立索引".to_string()));
+        }
+        match kill_reason.load(Ordering::Acquire) {
+            KILL_TIMEOUT => return Err(EngineError::Timeout("fls 执行超时".to_string())),
+            KILL_CANCELLED => {
                 return Err(EngineError::Cancelled("同行 fls 任务失败，已中止".to_string()));
             }
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
-            if Instant::now() > deadline {
-                abort.store(true, Ordering::Release);
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(EngineError::Timeout("fls 执行超时".to_string()));
-            }
-            thread::sleep(Duration::from_millis(20));
-        };
+            _ => {}
+        }
 
         if !exit_status.success() {
             abort.store(true, Ordering::Release);
@@ -840,8 +968,16 @@ impl TskCli {
             while matches!(raw_line.last(), Some(b'\n' | b'\r')) {
                 raw_line.pop();
             }
-            let decoded = decode_acp_strict(&raw_line)?;
-            entries.push(parse_bodyfile_line(&decoded, offset, deleted)?);
+            // 纯 ASCII 行零拷贝快速路径：直接以 &str 解析，跳过 Win32 宽字符解码与堆分配。
+            let entry = if raw_line.is_ascii() {
+                let ascii_line =
+                    std::str::from_utf8(&raw_line).expect("ASCII 字节必为有效 UTF-8");
+                parse_bodyfile_line(ascii_line, offset, deleted)?
+            } else {
+                let decoded = decode_acp_strict(&raw_line)?;
+                parse_bodyfile_line(&decoded, offset, deleted)?
+            };
+            entries.push(entry);
             line_index += 1;
         }
 
@@ -997,29 +1133,37 @@ impl TskCli {
         };
 
         let terminator = ProcessTerminator::from_child(&child);
-        let done = AtomicBool::new(false);
+        let done_lock = Mutex::new(false);
+        let done_cvar = Condvar::new();
         let kill_reason = AtomicU8::new(KILL_NONE);
         let deadline = Instant::now() + timeout;
 
         thread::scope(|s| {
             let watchdog = s.spawn(|| {
-                while !done.load(Ordering::Acquire) {
+                let mut done = done_lock.lock().unwrap_or_else(|e| e.into_inner());
+                while !*done {
                     if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
                         kill_reason.store(KILL_CANCELLED, Ordering::Release);
                         terminator.terminate();
                         break;
                     }
-                    if Instant::now() >= deadline {
+                    let now = Instant::now();
+                    if now >= deadline {
                         kill_reason.store(KILL_TIMEOUT, Ordering::Release);
                         terminator.terminate();
                         break;
                     }
-                    thread::sleep(Duration::from_millis(20));
+                    let wait = Duration::from_millis(20)
+                        .min(deadline.saturating_duration_since(now));
+                    let (guard, _) = done_cvar
+                        .wait_timeout(done, wait)
+                        .unwrap_or_else(|e| e.into_inner());
+                    done = guard;
                 }
             });
 
             let outcome = (|| -> EngineResult<(u64, String)> {
-                let buf_cap = (limit.max(1) as usize).min(1 << 20);
+                let buf_cap = limit.clamp(1, 1 << 20) as usize;
                 let mut buf = vec![0u8; buf_cap];
                 let mut written: u64 = 0;
 
@@ -1104,7 +1248,11 @@ impl TskCli {
                 Ok((written, String::new()))
             })();
 
-            done.store(true, Ordering::Release);
+            {
+                let mut done = done_lock.lock().unwrap_or_else(|e| e.into_inner());
+                *done = true;
+                done_cvar.notify_one();
+            }
             let _ = child.kill();
             let _ = child.wait();
             let _ = watchdog.join();
@@ -1212,24 +1360,32 @@ impl TskCli {
         };
 
         let terminator = ProcessTerminator::from_child(&child);
-        let done_flag = AtomicBool::new(false);
+        let done_lock = Mutex::new(false);
+        let done_cvar = Condvar::new();
         let kill_reason = AtomicU8::new(KILL_NONE);
         let deadline = Instant::now() + timeout;
 
         thread::scope(|s| {
             let watchdog = s.spawn(|| {
-                while !done_flag.load(Ordering::Acquire) {
+                let mut done = done_lock.lock().unwrap_or_else(|e| e.into_inner());
+                while !*done {
                     if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
                         kill_reason.store(KILL_CANCELLED, Ordering::Release);
                         terminator.terminate();
                         break;
                     }
-                    if Instant::now() >= deadline {
+                    let now = Instant::now();
+                    if now >= deadline {
                         kill_reason.store(KILL_TIMEOUT, Ordering::Release);
                         terminator.terminate();
                         break;
                     }
-                    thread::sleep(Duration::from_millis(20));
+                    let wait = Duration::from_millis(20)
+                        .min(deadline.saturating_duration_since(now));
+                    let (guard, _) = done_cvar
+                        .wait_timeout(done, wait)
+                        .unwrap_or_else(|e| e.into_inner());
+                    done = guard;
                 }
             });
 
@@ -1267,7 +1423,11 @@ impl TskCli {
                 Ok(total)
             })();
 
-            done_flag.store(true, Ordering::Release);
+            {
+                let mut done = done_lock.lock().unwrap_or_else(|e| e.into_inner());
+                *done = true;
+                done_cvar.notify_one();
+            }
             let _ = child.kill();
             let _ = child.wait();
             let _ = watchdog.join();
@@ -1304,57 +1464,63 @@ pub fn parse_bodyfile_line(
     offset: u64,
     deleted: bool,
 ) -> EngineResult<InventoryEntry> {
-    let parts: Vec<&str> = line.split('|').collect();
-    if parts.len() < 11 {
+    let invalid_line = || {
         let preview: String = line.chars().take(150).collect();
-        return Err(EngineError::TskFailed {
+        EngineError::TskFailed {
             command: "fls".to_string(),
             message: format!("无法解析 fls bodyfile 行：{preview}"),
-        });
-    }
-    let split_idx = parts.len() - 9;
-    let tail = &parts[split_idx..];
-    let inode = tail[0].to_string();
-    let mode = tail[1].to_string();
-    let size = tail[4].parse::<u64>().map_err(|e| EngineError::TskFailed {
+        }
+    };
+    // 从右侧切分末尾 9 个固定字段，保留路径中可能包含的 `|`，避免分配 Vec<&str> 与 join。
+    let mut rev = line.rsplitn(10, '|');
+    let crtime_s = rev.next().ok_or_else(invalid_line)?;
+    let ctime_s = rev.next().ok_or_else(invalid_line)?;
+    let mtime_s = rev.next().ok_or_else(invalid_line)?;
+    let atime_s = rev.next().ok_or_else(invalid_line)?;
+    let size_s = rev.next().ok_or_else(invalid_line)?;
+    let _gid = rev.next().ok_or_else(invalid_line)?;
+    let _uid = rev.next().ok_or_else(invalid_line)?;
+    let mode_s = rev.next().ok_or_else(invalid_line)?;
+    let inode_s = rev.next().ok_or_else(invalid_line)?;
+    let prefix = rev.next().ok_or_else(invalid_line)?;
+    let (_, raw_path) = prefix.split_once('|').ok_or_else(invalid_line)?;
+
+    let size = size_s.parse::<u64>().map_err(|e| EngineError::TskFailed {
         command: "fls".to_string(),
-        message: format!("fls 文件长度解析失败（{}）：{e}", tail[4]),
+        message: format!("fls 文件长度解析失败（{size_s}）：{e}"),
     })?;
-    let atime = tail[5].parse::<i64>().map_err(|e| EngineError::TskFailed {
+    let atime = atime_s.parse::<i64>().map_err(|e| EngineError::TskFailed {
         command: "fls".to_string(),
-        message: format!("fls atime 解析失败（{}）：{e}", tail[5]),
+        message: format!("fls atime 解析失败（{atime_s}）：{e}"),
     })?;
-    let mtime = tail[6].parse::<i64>().map_err(|e| EngineError::TskFailed {
+    let mtime = mtime_s.parse::<i64>().map_err(|e| EngineError::TskFailed {
         command: "fls".to_string(),
-        message: format!("fls mtime 解析失败（{}）：{e}", tail[6]),
+        message: format!("fls mtime 解析失败（{mtime_s}）：{e}"),
     })?;
-    let ctime = tail[7].parse::<i64>().map_err(|e| EngineError::TskFailed {
+    let ctime = ctime_s.parse::<i64>().map_err(|e| EngineError::TskFailed {
         command: "fls".to_string(),
-        message: format!("fls ctime 解析失败（{}）：{e}", tail[7]),
+        message: format!("fls ctime 解析失败（{ctime_s}）：{e}"),
     })?;
-    let crtime = tail[8].parse::<i64>().map_err(|e| EngineError::TskFailed {
+    let crtime = crtime_s.parse::<i64>().map_err(|e| EngineError::TskFailed {
         command: "fls".to_string(),
-        message: format!("fls crtime 解析失败（{}）：{e}", tail[8]),
+        message: format!("fls crtime 解析失败（{crtime_s}）：{e}"),
     })?;
 
-    let mut path = parts[1..split_idx]
-        .join("|")
-        .trim_start_matches('/')
-        .to_string();
-    let reallocated = deleted && path.ends_with(" (deleted-realloc)");
+    let mut path_str = raw_path.trim_start_matches('/');
+    let reallocated = deleted && path_str.ends_with(" (deleted-realloc)");
     if deleted {
-        if let Some(stripped) = path.strip_suffix(" (deleted-realloc)") {
-            path = stripped.to_string();
-        } else if let Some(stripped) = path.strip_suffix(" (deleted)") {
-            path = stripped.to_string();
+        if let Some(stripped) = path_str.strip_suffix(" (deleted-realloc)") {
+            path_str = stripped;
+        } else if let Some(stripped) = path_str.strip_suffix(" (deleted)") {
+            path_str = stripped;
         }
     }
-    let directory = mode.starts_with('d') || mode.starts_with('V');
+    let directory = mode_s.starts_with('d') || mode_s.starts_with('V');
 
     Ok(InventoryEntry {
-        path,
-        inode,
-        mode,
+        path: path_str.to_string(),
+        inode: inode_s.to_string(),
+        mode: mode_s.to_string(),
         size,
         deleted,
         reallocated,

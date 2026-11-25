@@ -17,7 +17,7 @@
 | `demo.dd` 端到端闭环总耗时（含真实 TSK） | 1,535.75 ms | **727.74 ms** | **2.11×** |
 | 纯 Rust EWF1 多段并行校验 / SIMD 搜索吞吐 | — | **501.69 MiB/s** / **14.44 GiB/s** | 原生并发 |
 
-三大 Release 原生二进制体积紧凑（启用 LTO、符号裁剪、WebP 引导图与可选 `image-preview` 特性）：`tracedesk-desktop.exe` **8.18 MiB**（已内嵌 `frontend/dist` 生产资源）、`tracedesk-mcp.exe` **3.15 MiB**（独立构建 **3.12 MiB**）、`tracedesk-cli.exe` **2.69 MiB**（独立构建 **2.67 MiB**）。
+三大 Release 原生二进制体积紧凑（启用 LTO、符号裁剪、WebP 引导图与可选 `image-preview` 特性）：`tracedesk-desktop.exe` **8.28 MiB**（已内嵌 `frontend/dist` 生产资源）、`tracedesk-mcp.exe` **3.18 MiB**、`tracedesk-cli.exe` **2.72 MiB**。
 
 ## 目录导航
 
@@ -82,7 +82,7 @@ cargo test --workspace
 ```powershell
 # 运行 demo.dd 端到端取证演示并自验签 ZIP64 复核包（默认写入 cases/）
 .\target\release\tracedesk-cli.exe run-demo
-# 指定自定义案件目录
+# 指定自定义案件目录（未设 TRACEDESK_LOGS_DIR 时标记文件写入自定义目录，不覆盖全局 logs/latest-demo.txt）
 .\target\release\tracedesk-cli.exe run-demo --cases-dir .\cases
 
 # 重新生成两份自建 FAT16 演示镜像及哈希清单（已存在文件默认保留）
@@ -135,7 +135,7 @@ TraceDesk 内置原生标准 Model Context Protocol（MCP）服务端 `tracedesk
 - **发现、时间线与审计**：`tracedesk_record_finding`、`tracedesk_list_findings`、`tracedesk_query_timeline`、`tracedesk_query_audit_log`
 - **导出与报告**：`tracedesk_export_file`、`tracedesk_export_findings`、`tracedesk_generate_report`、`tracedesk_build_review_bundle`
 
-所有受控写操作以 `origin="mcp"` 记入案件 SHA-256 审计链（桌面端人工操作为 `origin="manual"`）。桌面端与 MCP 服务统一采用**仅写入瞬间短锁 + 实时自动同步**机制：桌面端打开案件浏览期间不长期占用 `case.lock`，写入瞬间自动排队加短锁并同步磁盘指纹、落盘后立即释放，外部 `stdio` 与 `HTTP` 客户端可直接对当前打开的案件执行读写操作（无需关闭案件或手动释放锁）；Streamable HTTP 模式仅允许绑定回环地址（`127.0.0.1` / `localhost` / `::1`）并启用 DNS 重绑定校验（非法 `Host` 返回 `421`、非法 `Origin` 返回 `403`、请求体上限 `16 MiB`）。
+所有受控写操作以 `origin="mcp"` 记入案件 SHA-256 审计链（桌面端人工操作为 `origin="manual"`）。桌面端与 MCP 服务统一采用**仅写入瞬间短锁 + 实时自动同步**机制：桌面端打开案件浏览期间不长期占用 `case.lock`，写入瞬间自动排队加短锁并同步磁盘指纹、落盘后立即释放，外部 `stdio` 与 `HTTP` 客户端可直接对当前打开的案件执行读写操作（无需关闭案件或手动释放锁）；Streamable HTTP 模式仅允许绑定回环地址（`127.0.0.1` / `localhost` / `::1`），启用 DNS 重绑定校验（非法 `Host` 返回 `421`、非法 `Origin` 返回 `403`、请求体上限 `16 MiB`）与请求帧安全加固（拒绝重复/冲突关键头、清理 `Mcp-Session-Id` 防止 CRLF 注入并限制最大并发连接数）。
 
 当审计日志来源为 MCP 时，服务端会自动采集并标记使用者与客户端身份：按优先级结合 `initialize` 握手的 `clientInfo.name`（并按 `Mcp-Session-Id` 或 `stdio` 会话关联，不再拼接末尾版本号数字）、HTTP 请求头 `X-MCP-User` / `X-MCP-Client`（或 `X-Client-Name`）及非通用 `User-Agent`，以及命令行 `--actor`、环境变量 `TRACEDESK_MCP_ACTOR` 与工具参数 `actor` 综合识别调用方；最终统一以去除末尾版本号数字的 `MCP · <使用者>`（同时具备使用者与客户端时为 `MCP · <使用者> / <客户端>`）展示在桌面端审计日志（支持按具体调用方合并筛选与检索且不改写历史 `audit.jsonl` 原文）、MCP 实时监控、取证发现、Markdown 报告与 `tracedesk_query_audit_log` 输出中，并完整纳入 `audit.jsonl` 的 SHA-256 哈希链防篡改保护。
 
@@ -149,13 +149,13 @@ TraceDesk 内置原生标准 Model Context Protocol（MCP）服务端 `tracedesk
 .\target\release\tracedesk-mcp.exe --transport streamable-http --host 127.0.0.1 --port 8765 --path /mcp
 ```
 
-支持 `--cases-dir`、`--actor` 参数及环境变量 `TRACEDESK_CASES_DIR`、`TRACEDESK_MCP_ACTOR`。在桌面工作台点击顶部 **MCP 服务** 按钮，可直接一键复制客户端 JSON 配置、启停内嵌本地 HTTP MCP 服务，并在保持案件打开的同时实时监控外部 `stdio` 与 `HTTP` 客户端协同操作（采用仅写入瞬间短锁，无需手动释放锁）。
+支持 `--cases-dir`、`--actor` 参数及环境变量 `TRACEDESK_CASES_DIR`、`TRACEDESK_MCP_ACTOR`、`TRACEDESK_MCP_ACTIVITY_LOG`（可选指定跨进程遥测日志路径）。在桌面工作台点击顶部 **MCP 服务** 按钮，可直接一键复制客户端 JSON 配置、启停内嵌本地 HTTP MCP 服务，并在保持案件打开的同时实时监控外部 `stdio` 与 `HTTP` 客户端协同操作（采用仅写入瞬间短锁，无需手动释放锁）。
 
 ### MCP 实时监控与案件自动热刷新
 
 桌面工作台内置 **MCP 实时监控** 主工作区标签页，结合 `crates/tracedesk-mcp/src/activity.rs` 与桌面宿主后台尾随推送，完整可视外部 AI 客户端的实时取证过程：
 
-- **跨进程全通道实时监控**：同时汇聚桌面端内嵌 HTTP（`desktop-http`）、独立 HTTP 进程（`streamable-http`）与外部客户端拉起的独立 `stdio` 子进程三类通道活动。`desktop-http` 通过进程内事件直推前端（`mcp:activity`），独立 `stdio` / `streamable-http` 进程同步追加写入 `logs/mcp-activity.jsonl`（超过 1,200 行自动温和截断保留最近 600 行），桌面端以低开销增量字节尾随线程实时汇聚并按 `callId` 原位更新“执行中 → 成功 / 失败”状态。
+- **跨进程全通道实时监控**：同时汇聚桌面端内嵌 HTTP（`desktop-http`）、独立 HTTP 进程（`streamable-http`）与外部客户端拉起的独立 `stdio` 子进程三类通道活动。`desktop-http` 通过进程内事件直推前端（`mcp:activity`），独立 `stdio` / `streamable-http` 进程通过跨进程伴随锁安全追加写入 `logs/mcp-activity.jsonl`（超过 1,200 行自动原子截断保留最近 600 行），桌面端以带头部指纹校验的增量字节尾随线程实时汇聚并按 `callId` 原位更新“执行中 → 成功 / 失败”状态。
 - **单步参数与结果透视**：支持按阶段（执行中/成功/失败）、只读/受控写入、调用方客户端、传输通道与关键词多维筛选；右侧可拖拽分栏展示单步调用的完整时间戳、耗时、来源与目标案件、美化后的入参 JSON、返回结果预览（超 16 KiB 安全截断）及失败错误详情，并支持一键跳转审计日志核查哈希链。
 - **19 工具调用统计与接入配置**：内置四项紧凑遥测指标卡（总调用/执行中、成功率与平均耗时、活跃客户端、只读与受控写入占比）以及“实时操作流 / 接入配置 / 工具清单与调用统计”三合一子视图，集中呈现全部 **19 项 MCP 工具**的累计调用次数、失败次数与平均耗时。
 - **案件自动热刷新**：当任意 MCP 进程对桌面端当前已打开的案件完成受控写入（如加载镜像、扫描分区、记录发现、生成报告或导出复核包）后，宿主自动发出 `mcp:case-updated` 事件并触发当前案件视图平滑热刷新（同步刷新案件快照、文件浏览、发现、时间线与审计日志），无需手动关闭重开案件。

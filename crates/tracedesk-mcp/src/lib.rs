@@ -29,10 +29,12 @@ pub use activity::{
 };
 
 pub use http::{
-    DEFAULT_HOST, DEFAULT_HTTP_PATH, DEFAULT_PORT, LOOPBACK_HOSTS, MAX_HTTP_BODY_BYTES,
-    McpHttpServerHandle, check_port_available, extract_user_agent_client, normalize_http_path,
-    request_context_from_http_headers, run_http_blocking, validate_loopback_host,
-    verify_dns_rebinding,
+    DEFAULT_HOST, DEFAULT_HTTP_PATH, DEFAULT_PORT, HttpConnectionPermit, HttpParseError,
+    LOOPBACK_HOSTS, MAX_CHUNKED_TRAILERS, MAX_CONCURRENT_HTTP_CONNS, MAX_HTTP_BODY_BYTES,
+    MAX_HTTP_HEADERS, MAX_SESSION_ID_BYTES, McpHttpServerHandle, ParsedHttpRequest,
+    check_port_available, extract_user_agent_client, normalize_http_path, normalize_request_path,
+    parse_http_request, request_context_from_http_headers, run_http_blocking, sanitize_session_id,
+    validate_loopback_host, verify_dns_rebinding, write_http_response,
 };
 pub use runtime::{
     LocalHttpMcpManager, McpStatusSnapshot, build_claude_config, build_cli_command,

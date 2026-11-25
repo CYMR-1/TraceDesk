@@ -40,15 +40,21 @@ export const FindingNoteDialog: React.FC<FindingNoteDialogProps> = ({ entry, onS
     }
   };
 
+  const handleSafeClose = () => {
+    if (!submitting) {
+      onClose();
+    }
+  };
+
   return (
     <Modal
       title="记录取证发现"
       subtitle={`分区偏移 ${entry.offset} · inode ${entry.inode}`}
       width={540}
-      onClose={onClose}
+      onClose={handleSafeClose}
       footer={
         <>
-          <button type="button" className="td-btn" disabled={submitting} onClick={onClose}>
+          <button type="button" className="td-btn" disabled={submitting} onClick={handleSafeClose}>
             取消
           </button>
           <div className="td-modal-footer-spacer" />

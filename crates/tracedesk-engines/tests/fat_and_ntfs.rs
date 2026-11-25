@@ -968,3 +968,152 @@ fn test_native_ntfs_volume_reader_all_features_and_fallbacks() {
         "highest_vcn mismatch must fall back to icat"
     );
 }
+
+#[test]
+fn test_ntfs_64k_cluster_0x80_and_malformed_cpmr_0x80_and_fat_deleted_dash_r() {
+    // 1. 构造标准 64 KiB 簇（boot[13] = 0x80 = 128 扇区/簇）的合成 NTFS 卷，验证不 panic 且精确读取。
+    let cluster_size = 65_536usize;
+    let mft_lcn = 2u64;
+    let total_clusters = 8usize;
+    let mut img = vec![0u8; total_clusters * cluster_size];
+
+    img[3..11].copy_from_slice(b"NTFS    ");
+    img[11..13].copy_from_slice(&512u16.to_le_bytes());
+    img[13] = 0x80; // 128 扇区/簇 = 64 KiB 簇（过去强制转 i8 取反会触发 -128 溢出 panic）
+    img[48..56].copy_from_slice(&mft_lcn.to_le_bytes());
+    img[64] = (-10i8) as u8; // MFT 记录 1024 字节
+    img[510] = 0x55;
+    img[511] = 0xAA;
+
+    let write_mft = |disk: &mut [u8], idx: usize, rec: &[u8]| {
+        let off = (mft_lcn as usize) * cluster_size + idx * 1024;
+        disk[off..off + 1024].copy_from_slice(rec);
+    };
+
+    let mft0 = build_mft_record(
+        true,
+        0,
+        &[make_non_resident_attr(
+            0x80,
+            1,
+            0,
+            "",
+            0,
+            0,
+            (16 * 1024) as u64,
+            (16 * 1024) as u64,
+            &encode_data_run(1, Some(mft_lcn as i64)),
+        )],
+    );
+    write_mft(&mut img, 0, &mft0);
+
+    // 在 LCN 4 写入测试数据，验证 64 KiB 簇偏移计算精确无误。
+    let payload = b"NTFS_64K_CLUSTER_OK_0x80";
+    let data_lcn = 4usize;
+    img[data_lcn * cluster_size..data_lcn * cluster_size + payload.len()].copy_from_slice(payload);
+    let rec5 = build_mft_record(
+        true,
+        0,
+        &[make_non_resident_attr(
+            0x80,
+            1,
+            0,
+            "",
+            0,
+            0,
+            payload.len() as u64,
+            payload.len() as u64,
+            &encode_data_run(1, Some(data_lcn as i64)),
+        )],
+    );
+    write_mft(&mut img, 5, &rec5);
+
+    let media64k: Arc<dyn MediaReader> = Arc::new(MemoryMedia(img.clone()));
+    let mut vol64k = VolumeReader::open_with_media(media64k);
+    let mut e5 = ntfs_entry("5-128-1", payload.len() as u64, false);
+    e5.offset = 0;
+    assert!(matches!(
+        vol64k.plan_entry(&e5, b"64K"),
+        EntryReadPlan::Direct { .. }
+    ));
+    let mut buf = vec![0u8; payload.len()];
+    vol64k.read_entry_into(&e5, 0, &mut buf).expect("read 64K NTFS");
+    assert_eq!(&buf, payload);
+
+    // 2. 畸形 boot[64] = 0x80（i8::MIN = -128）：必须平滑回退 FallbackToIcat，严禁 panic。
+    let mut bad_boot = img;
+    bad_boot[64] = 0x80;
+    let media_bad: Arc<dyn MediaReader> = Arc::new(MemoryMedia(bad_boot));
+    let mut vol_bad = VolumeReader::open_with_media(media_bad);
+    assert_eq!(vol_bad.plan_entry(&e5, b"64K"), EntryReadPlan::FallbackToIcat);
+
+    // 3. 验证 FAT 已删除且 mode 为 `-/r...` 的条目在起始簇被占用时能被正确标注 start_cluster_allocated。
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let fat_path = tmp.path().join("fat16_del_dash_r.img");
+    let sector_size = 512usize;
+    let reserved = 1usize;
+    let fat_sectors = 1usize;
+    let root_entries = 16usize;
+    let root_sectors = (root_entries * 32) / sector_size;
+    let data_clusters = 32usize;
+    let total_sectors = reserved + fat_sectors + root_sectors + data_clusters;
+    let mut fat_img = vec![0u8; total_sectors * sector_size];
+    fat_img[0] = 0xEB;
+    fat_img[1] = 0x3C;
+    fat_img[2] = 0x90;
+    fat_img[11..13].copy_from_slice(&(sector_size as u16).to_le_bytes());
+    fat_img[13] = 1; // 每簇 1 扇区
+    fat_img[14..16].copy_from_slice(&(reserved as u16).to_le_bytes());
+    fat_img[16] = 1; // 1 份 FAT
+    fat_img[17..19].copy_from_slice(&(root_entries as u16).to_le_bytes());
+    fat_img[19..21].copy_from_slice(&(total_sectors as u16).to_le_bytes());
+    fat_img[22..24].copy_from_slice(&(fat_sectors as u16).to_le_bytes());
+    fat_img[54..62].copy_from_slice(b"FAT12   ");
+    fat_img[510] = 0x55;
+    fat_img[511] = 0xAA;
+    // 在 FAT12 表中将簇 3 标记为已占用（EOC = 0xFFF）。
+    // 簇 3 在 FAT12 的偏移为 (3 * 3) / 2 = 4，奇数簇占高 12 位。
+    let fat_off = reserved * sector_size;
+    fat_img[fat_off + 4] = 0xF0;
+    fat_img[fat_off + 5] = 0xFF;
+    // 在根目录槽位 0（TSK inode = 3）写入已删除文件目录项，起始簇指向簇 3。
+    let root_off = (reserved + fat_sectors) * sector_size;
+    fat_img[root_off] = 0xE5;
+    fat_img[root_off + 1..root_off + 11].copy_from_slice(b"ELFILE TXT");
+    fat_img[root_off + 11] = 0x20;
+    fat_img[root_off + 26..root_off + 28].copy_from_slice(&3u16.to_le_bytes());
+    fat_img[root_off + 28..root_off + 32].copy_from_slice(&64u32.to_le_bytes());
+    std::fs::write(&fat_path, &fat_img).expect("write fat img");
+
+    let mut entries = vec![InventoryEntry {
+        path: "DELFILE.TXT".to_string(),
+        inode: "3".to_string(),
+        mode: "-/r---------".to_string(),
+        size: 64,
+        deleted: true,
+        reallocated: false,
+        atime: 0,
+        mtime: 0,
+        ctime: 0,
+        crtime: 0,
+        directory: false,
+        offset: 0,
+        filesystem: "FAT12".to_string(),
+        start_cluster_allocated: None,
+        extents: None,
+    }];
+    let regions = map_fat_regions(
+        &fat_path,
+        0,
+        "File System Type: FAT12\n",
+        &mut entries,
+        None,
+    )
+    .expect("map_fat_regions");
+    assert_eq!(regions.len(), 3);
+    assert_eq!(
+        entries[0].start_cluster_allocated,
+        Some(true),
+        "已删除且 mode 为 -/r 的 FAT 条目在起始簇被占用时必须标注 start_cluster_allocated=Some(true)"
+    );
+}

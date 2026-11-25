@@ -47,10 +47,29 @@ fn value_is_truthy(v: &Value) -> bool {
 
 /// 渲染完整的 10 节 Markdown 取证报告（`reports/report_<12hex>.md`）。
 pub fn render_report(data: &CaseData, records: &[AuditRecord], conclusion: &str) -> String {
-    let evidence = data
-        .evidence
-        .as_ref()
-        .expect("render_report requires loaded evidence");
+    let fallback_evidence;
+    let evidence = match data.evidence.as_ref() {
+        Some(ev) => ev,
+        None => {
+            // 兜底保护：若外部调用方在未加载镜像时误调用，返回降级占位信息而不 panic。
+            fallback_evidence = crate::case::EvidenceInfo {
+                path: String::new(),
+                size: 0,
+                sha256: None,
+                fixed_at: None,
+                partitions: Vec::new(),
+                layout: String::new(),
+                format: None,
+                large_image: None,
+                opened_at: None,
+                source_stamp: None,
+                segments: None,
+                provenance: None,
+                coverage: None,
+            };
+            &fallback_evidence
+        }
+    };
     let inventory = &data.inventory;
     let exports = &data.exports;
     let groups = group_findings(records);

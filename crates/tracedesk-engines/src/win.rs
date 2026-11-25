@@ -44,7 +44,8 @@ mod platform {
     use std::ptr::{null, null_mut};
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+        CloseHandle, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, GENERIC_READ, GENERIC_WRITE,
+        HANDLE, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::Globalization::{CP_ACP, MB_ERR_INVALID_CHARS, MultiByteToWideChar};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -181,9 +182,16 @@ mod platform {
             };
             if handle == INVALID_HANDLE_VALUE {
                 let err = io::Error::last_os_error();
-                return Err(EngineError::Locked(format!(
-                    "案件已被占用或无法加锁：{err}"
-                )));
+                let raw_code = err.raw_os_error().map(|c| c as u32);
+                if matches!(
+                    raw_code,
+                    Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION)
+                ) {
+                    return Err(EngineError::Locked(format!(
+                        "案件已被占用或无法加锁：{err}"
+                    )));
+                }
+                return Err(EngineError::Io(err));
             }
             let mut overlapped: OVERLAPPED = unsafe { zeroed() };
             let locked = unsafe {
@@ -221,6 +229,10 @@ mod platform {
     pub fn decode_acp_strict(bytes: &[u8]) -> EngineResult<String> {
         if bytes.is_empty() {
             return Ok(String::new());
+        }
+        // 纯 ASCII 字节在所有 Windows ANSI 代码页中与 UTF-8 完全等价，跳过两次 Win32 调用。
+        if bytes.is_ascii() {
+            return Ok(String::from_utf8(bytes.to_vec()).expect("ASCII 必为有效 UTF-8"));
         }
         let len = i32::try_from(bytes.len()).map_err(|_| {
             EngineError::Encoding("待解码的 CP_ACP 字节长度超过系统限制".to_string())
@@ -265,12 +277,28 @@ mod platform {
         if bytes.is_empty() {
             return String::new();
         }
-        // 输入过大时按块切分，避免转换为 i32 时发生溢出。
+        // 纯 ASCII 字节在所有 Windows ANSI 代码页中与 UTF-8 完全等价，避免 Win32 解码开销。
+        if bytes.is_ascii() {
+            return String::from_utf8(bytes.to_vec()).expect("ASCII 必为有效 UTF-8");
+        }
+        // 输入过大时按块切分，尽量回退至最近的 ASCII 字节边界，避免截断多字节字符。
         const MAX_CHUNK: usize = 64 * 1024 * 1024;
         if bytes.len() > MAX_CHUNK {
             let mut out = String::new();
-            for chunk in bytes.chunks(MAX_CHUNK) {
-                out.push_str(&decode_acp_lossy(chunk));
+            let mut start = 0usize;
+            while start < bytes.len() {
+                let mut end = (start + MAX_CHUNK).min(bytes.len());
+                if end < bytes.len() {
+                    let search_lo = end.saturating_sub(64).max(start);
+                    if let Some(rel) = bytes[search_lo..end].iter().rposition(|&b| b < 0x80) {
+                        let candidate = search_lo + rel + 1;
+                        if candidate > start {
+                            end = candidate;
+                        }
+                    }
+                }
+                out.push_str(&decode_acp_lossy(&bytes[start..end]));
+                start = end;
             }
             return out;
         }

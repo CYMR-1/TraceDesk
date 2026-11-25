@@ -2,9 +2,9 @@
 //! 与原生 Rust 复核包校验器（`verify_bundle`），与 `scripts/verify_bundle.py`
 //! 保持 100% 兼容（对应 `core-contract.md` §2.5）。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -326,10 +326,27 @@ pub fn build_bundle(
         ));
     }
 
-    let records = case.check_audit()?;
-    let report_sha256 = records
-        .last()
-        .and_then(|r| r.details.get("sha256"))
+    // 一次性同步获取已验链的审计记录及原始 audit.jsonl 字节，消除压缩导出期间的 TOCTOU 窗口。
+    let (records, audit_bytes) = case.check_audit_with_raw()?;
+    let report_path_str = report_path.to_string_lossy();
+    let report_record = records
+        .iter()
+        .rev()
+        .find(|r| {
+            r.action == "REPORT_GENERATE"
+                && r.result == "成功"
+                && r.subject == report_path_str.as_ref()
+        })
+        .or_else(|| {
+            records
+                .iter()
+                .rev()
+                .find(|r| r.action == "REPORT_GENERATE" && r.result == "成功")
+        })
+        .ok_or_else(|| CoreError::Other("无法获取最新报告的审计摘要".to_string()))?;
+    let report_sha256 = report_record
+        .details
+        .get("sha256")
         .and_then(Value::as_str)
         .ok_or_else(|| CoreError::Other("无法获取最新报告的审计摘要".to_string()))?
         .to_string();
@@ -367,9 +384,11 @@ pub fn build_bundle(
             .write(true)
             .create_new(true)
             .open(&temporary)?;
-        let mut archive = ZipWriter::new(temp_file);
+        // 使用 256 KiB 缓冲写入器包裹 ZIP 文件句柄，减少文件头与压缩块的碎片写系统调用。
+        let mut archive = ZipWriter::new(BufWriter::with_capacity(256 * 1024, temp_file));
+        let mut copy_buf = vec![0u8; 1024 * 1024];
 
-        let put_bytes = |archive: &mut ZipWriter<File>,
+        let put_bytes = |archive: &mut ZipWriter<BufWriter<File>>,
                          checksums: &mut BTreeMap<String, String>,
                          name: &str,
                          raw: &[u8]|
@@ -380,8 +399,9 @@ pub fn build_bundle(
             Ok(())
         };
 
-        let copy_verified = |archive: &mut ZipWriter<File>,
+        let copy_verified = |archive: &mut ZipWriter<BufWriter<File>>,
                              checksums: &mut BTreeMap<String, String>,
+                             buf: &mut [u8],
                              src_path: &Path,
                              member_name: &str,
                              expected_sha256: &str|
@@ -389,9 +409,8 @@ pub fn build_bundle(
             let mut source = File::open(src_path)?;
             archive.start_file(member_name, zip_options)?;
             let mut hasher = Sha256::new();
-            let mut buf = vec![0u8; 1024 * 1024];
             loop {
-                let n = source.read(&mut buf)?;
+                let n = source.read(buf)?;
                 if n == 0 {
                     break;
                 }
@@ -416,6 +435,7 @@ pub fn build_bundle(
         copy_verified(
             &mut archive,
             &mut checksums,
+            &mut copy_buf,
             &report_path,
             "report.md",
             &report_sha256,
@@ -460,6 +480,7 @@ pub fn build_bundle(
             copy_verified(
                 &mut archive,
                 &mut checksums,
+                &mut copy_buf,
                 &row.path,
                 &member,
                 &row.item.sha256,
@@ -514,6 +535,7 @@ pub fn build_bundle(
             copy_verified(
                 &mut archive,
                 &mut checksums,
+                &mut copy_buf,
                 &row.path,
                 &member,
                 &row.sha256,
@@ -521,8 +543,7 @@ pub fn build_bundle(
             included_searches += 1;
         }
 
-        // 4. audit.jsonl（原始字节原样写入）
-        let audit_bytes = fs::read(case.folder().join("audit.jsonl"))?;
+        // 4. audit.jsonl（写入验链快照的精确原始字节，确保与 audit.head 绝对一致）
         put_bytes(&mut archive, &mut checksums, "audit.jsonl", &audit_bytes)?;
 
         // 5. audit.head（严格 64 字节 ASCII，不含尾部换行符）
@@ -673,17 +694,18 @@ pub fn build_bundle(
     })
 }
 
-fn sha256_stream<R: Read>(mut reader: R) -> CoreResult<String> {
+fn sha256_and_len_with_buf<R: Read>(mut reader: R, buf: &mut [u8]) -> CoreResult<(String, u64)> {
     let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
+    let mut total: u64 = 0;
     loop {
-        let n = reader.read(&mut buf)?;
+        let n = reader.read(buf)?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
+        total = total.saturating_add(n as u64);
     }
-    Ok(hex_lower(&hasher.finalize()))
+    Ok((hex_lower(&hasher.finalize()), total))
 }
 
 /// 原生 Rust 独立复核包校验器（对应 `core-contract.md` §2.5），
@@ -691,10 +713,13 @@ fn sha256_stream<R: Read>(mut reader: R) -> CoreResult<String> {
 ///
 /// 返回 `SHA256SUMS.json` 中通过校验的材料成员总数。
 pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResult<usize> {
+    // 跨成员复用同一块 1 MiB 缓冲区，避免多成员复核包反复分配清零内存。
+    let mut io_buf = vec![0u8; 1024 * 1024];
+
     if let Some(exp) = expected_sha256
         && !exp.trim().is_empty()
     {
-        let actual = sha256_stream(File::open(zip_path)?)?;
+        let (actual, _) = sha256_and_len_with_buf(File::open(zip_path)?, &mut io_buf)?;
         if actual != exp.trim().to_ascii_lowercase() {
             return Err(CoreError::IntegrityFailed(
                 "复核包外部 SHA-256 不匹配".to_string(),
@@ -703,7 +728,7 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
     }
 
     let file = File::open(zip_path)?;
-    let mut archive = ZipArchive::new(file)?;
+    let mut archive = ZipArchive::new(BufReader::with_capacity(256 * 1024, file))?;
 
     // 1. 收集所有成员名称并拒绝重复成员。
     let mut names: Vec<String> = Vec::with_capacity(archive.len());
@@ -737,15 +762,18 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
         ));
     }
 
-    // 3. 重新计算清单中每个成员的 SHA-256。
+    // 3. 重新计算清单中每个成员的 SHA-256，同时记录实际解压字节数供第 6 步核对。
+    let mut actual_sizes: HashMap<&str, u64> = HashMap::with_capacity(checks.len());
     for (member_name, expected_digest) in &checks {
         let entry = archive.by_name(member_name)?;
-        let actual = sha256_stream(entry)?;
-        if &actual != expected_digest {
+        let header_size = entry.size();
+        let (actual, actual_len) = sha256_and_len_with_buf(entry, &mut io_buf)?;
+        if &actual != expected_digest || actual_len != header_size {
             return Err(CoreError::IntegrityFailed(format!(
                 "成员摘要不匹配：{member_name}"
             )));
         }
+        actual_sizes.insert(member_name.as_str(), actual_len);
     }
 
     // 4. 校验 `audit.jsonl` 内完整的 SHA-256 审计哈希链。
@@ -799,7 +827,7 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
         return Err(CoreError::AuditTampered("审计链尾不匹配".to_string()));
     }
 
-    // 6. 校验 `manifest.json` 中列出的每条导出记录均与对应成员的 SHA-256 及未压缩大小一致。
+    // 6. 校验 `manifest.json` 中列出的每条导出记录均与对应成员的 SHA-256 及实际解压大小一致。
     let exports = manifest
         .get("exports")
         .and_then(Value::as_array)
@@ -817,9 +845,9 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
             .get("size")
             .and_then(Value::as_u64)
             .unwrap_or(u64::MAX);
-        let zip_size = archive.by_name(member)?.size();
+        let zip_size = actual_sizes.get(member).copied();
         if checks.get(member).map(String::as_str) != Some(expected_sha)
-            || zip_size != expected_size
+            || zip_size != Some(expected_size)
         {
             return Err(CoreError::IntegrityFailed(format!(
                 "导出记录不匹配：{member}"

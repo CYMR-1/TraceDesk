@@ -29,16 +29,50 @@ export const SplitPane: React.FC<SplitPaneProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const [firstSize, setFirstSize] = useState<number | null>(initialSize > 1 ? initialSize : null);
   const [dragging, setDragging] = useState(false);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
 
+  // 组件卸载时确保清理正在进行的拖拽监听与动画帧
   useEffect(() => {
-    if (firstSize === null && initialSize > 0 && initialSize <= 1 && containerRef.current) {
-      const rect = containerRef.current.getBoundingClientRect();
+    return () => {
+      dragCleanupRef.current?.();
+      dragCleanupRef.current = null;
+    };
+  }, []);
+
+  // 容器尺寸变化时：首次按比例初始化像素值，窗口缩小时动态钳制避免挤没第二面板
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const syncBounds = () => {
+      const rect = el.getBoundingClientRect();
       const total = direction === 'horizontal' ? rect.width : rect.height;
-      if (total > 0) {
-        setFirstSize(Math.max(minFirst, Math.round(total * initialSize)));
-      }
+      if (total <= 0) return;
+
+      setFirstSize((prev) => {
+        if (prev === null) {
+          if (initialSize > 0 && initialSize <= 1) {
+            const maxFirst = Math.max(minFirst, Math.round(total - minSecond - 3));
+            return Math.min(maxFirst, Math.max(minFirst, Math.round(total * initialSize)));
+          }
+          return prev;
+        }
+        if (secondHidden) return prev;
+        const maxFirst = Math.max(minFirst, Math.round(total - minSecond - 3));
+        const clamped = Math.max(minFirst, Math.min(maxFirst, prev));
+        return clamped === prev ? prev : clamped;
+      });
+    };
+
+    syncBounds();
+    if (typeof ResizeObserver !== 'undefined') {
+      const obs = new ResizeObserver(syncBounds);
+      obs.observe(el);
+      return () => obs.disconnect();
     }
-  }, [direction, firstSize, initialSize, minFirst]);
+    window.addEventListener('resize', syncBounds);
+    return () => window.removeEventListener('resize', syncBounds);
+  }, [direction, initialSize, minFirst, minSecond, secondHidden]);
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -51,21 +85,44 @@ export const SplitPane: React.FC<SplitPaneProps> = ({
       const currentFirst =
         firstSize ?? Math.round(total * (initialSize <= 1 ? initialSize : 0.5));
 
+      dragCleanupRef.current?.();
       setDragging(true);
 
-      const handleMove = (moveEvent: MouseEvent) => {
-        const delta = (direction === 'horizontal' ? moveEvent.clientX : moveEvent.clientY) - startPos;
+      let rafId: number | null = null;
+      let latestPos = startPos;
+
+      // 通过 requestAnimationFrame 合并高频 mousemove，降低拖拽过程中的同步重排开销
+      const applySize = () => {
+        rafId = null;
+        const delta = latestPos - startPos;
         const maxFirst = Math.max(minFirst, total - minSecond - 3);
-        const next = Math.max(minFirst, Math.min(maxFirst, currentFirst + delta));
+        const next = Math.max(minFirst, Math.min(maxFirst, Math.round(currentFirst + delta)));
         setFirstSize(next);
       };
 
-      const handleUp = () => {
-        setDragging(false);
+      const handleMove = (moveEvent: MouseEvent) => {
+        latestPos = direction === 'horizontal' ? moveEvent.clientX : moveEvent.clientY;
+        if (rafId === null) {
+          rafId = window.requestAnimationFrame(applySize);
+        }
+      };
+
+      const cleanup = () => {
+        if (rafId !== null) {
+          window.cancelAnimationFrame(rafId);
+          rafId = null;
+        }
         window.removeEventListener('mousemove', handleMove);
         window.removeEventListener('mouseup', handleUp);
       };
 
+      const handleUp = () => {
+        cleanup();
+        dragCleanupRef.current = null;
+        setDragging(false);
+      };
+
+      dragCleanupRef.current = cleanup;
       window.addEventListener('mousemove', handleMove);
       window.addEventListener('mouseup', handleUp);
     },
