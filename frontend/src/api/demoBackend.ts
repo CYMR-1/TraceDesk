@@ -1637,15 +1637,15 @@ export const demoBackend = {
         {
           mcpServers: {
             tracedesk: {
-              command: 'tracedesk-mcp',
-              args: ['--transport', 'stdio', '--cases-root', 'C:\\TraceDesk\\cases'],
+              command: 'tracedesk-mcp.exe',
+              args: ['--transport', 'stdio', '--cases-dir', 'C:\\TraceDesk\\cases'],
             },
           },
         },
         null,
         2
       ),
-      stdioCli: 'tracedesk-mcp --transport stdio --cases-root "C:\\TraceDesk\\cases"',
+      stdioCli: 'tracedesk-mcp.exe --transport stdio --cases-dir "C:\\TraceDesk\\cases"',
       httpConfigJson: JSON.stringify(
         {
           mcpServers: {
