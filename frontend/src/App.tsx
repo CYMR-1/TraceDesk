@@ -718,10 +718,12 @@ export const App: React.FC = () => {
       await runTask('校验并导出证据副本', () => tauriApi.exportFile({ entryId: entry.entryId }), {
         onSuccess: (res) => {
           applySnapshot(res.snapshot);
+          // 保留原文件条目，便于导出成功弹窗一键打开“记录取证发现”
           setExportResult({
             title: res.title || '导出成功',
             path: res.path,
             note: res.note,
+            entry,
           });
         },
       });
@@ -970,6 +972,8 @@ export const App: React.FC = () => {
   const brandActions = registry.actionsAt('brand');
   const headerActions = registry.actionsAt('header');
   const evidenceActions = registry.actionsAt('evidence');
+  const fileNoteAction = registry.actions.file_note;
+  const hasFileNoteFeature = Boolean(registry.hasFeature('file_tools') && fileNoteAction);
 
   const custodyState = snapshot?.custodyState ?? 'idle';
   const showProgressBar = busy || hashingImage;
@@ -1400,6 +1404,17 @@ export const App: React.FC = () => {
           title={exportResult.title}
           path={exportResult.path}
           note={exportResult.note}
+          entry={exportResult.entry}
+          noteIcon={fileNoteAction?.icon ?? 'note'}
+          onRecordNote={
+            hasFileNoteFeature && exportResult.entry
+              ? (entry) => {
+                  // 关闭导出成功弹窗并立即打开该文件的取证发现笔记弹窗
+                  setExportResult(null);
+                  setNoteTarget(entry);
+                }
+              : undefined
+          }
           onClose={() => setExportResult(null)}
         />
       )}

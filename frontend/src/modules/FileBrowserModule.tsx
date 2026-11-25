@@ -2,7 +2,7 @@
  * 模块 1：文件浏览页 (files + export + file_tools 右键菜单)
  * - 左侧懒加载目录树（镜像 → 分区 → / 根目录 → 目录/文件/256 分组）
  * - 右上筛选栏 + 面包屑 + 9 列文件列表 + 分页器（>1000 项分页，每页 100 项，双击跳页）
- * - 右下内容预览（文本 9 编码 / 图片 / 十六进制）+ 导出所选文件按钮
+ * - 右下内容预览（文本 9 编码 / 图片 / 十六进制）+ 记为取证发现 / 导出所选文件按钮
  * - 右键菜单：导出所选文件 / 记录取证发现 / 计算哈希值（SHA-256）/ 校验一致性… / 单文件检索内容…
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -866,8 +866,22 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
           inventoryTotal > PAGING_THRESHOLD ? '展开目录可查看全部子项' : '含目录、删除记录与系统区域'
         }`;
 
+  const hasExportFeature = registry.hasFeature('export');
+  const fileNoteAction = registry.actions.file_note;
+  const hasFileNoteFeature = Boolean(registry.hasFeature('file_tools') && fileNoteAction);
+
   const canExportSelected = Boolean(
-    !busy && selectedEntry && canExportEntry(selectedEntry) && registry.hasFeature('export')
+    !busy && selectedEntry && canExportEntry(selectedEntry) && hasExportFeature
+  );
+
+  // 预览区「记为取证发现」与右键菜单及导出按钮保持完全一致的可用条件
+  const canRecordNoteSelected = Boolean(
+    !busy &&
+      selectedEntry &&
+      hasFileNoteFeature &&
+      (fileNoteAction.acceptsEntry
+        ? fileNoteAction.acceptsEntry(selectedEntry)
+        : canExportEntry(selectedEntry))
   );
 
   const leftNavPane = (
@@ -1249,17 +1263,46 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
     <div className="td-preview-panel">
       <div className="td-pane-header">
         <span className="td-section-title">内容预览</span>
-        {registry.hasFeature('export') && (
-          <button
-            type="button"
-            className="td-btn td-btn--soft"
-            style={{ height: 28, minHeight: 28 }}
-            disabled={!canExportSelected}
-            onClick={() => selectedEntry && onExportEntry(selectedEntry)}
-          >
-            <UiIcon name="export" size={14} color={canExportSelected ? 'var(--accent-soft-text)' : 'var(--text-disabled)'} />
-            导出所选文件
-          </button>
+        {(hasFileNoteFeature || hasExportFeature) && (
+          <div className="td-pane-header-actions">
+            {hasFileNoteFeature && (
+              <button
+                type="button"
+                className="td-btn"
+                style={{ height: 28, minHeight: 28 }}
+                disabled={!canRecordNoteSelected}
+                title={
+                  canRecordNoteSelected
+                    ? '为当前选中的文件记录取证发现并写入审计链'
+                    : '请先选择可读取的文件'
+                }
+                onClick={() => selectedEntry && onRecordNote(selectedEntry)}
+              >
+                <UiIcon
+                  name={fileNoteAction?.icon ?? 'note'}
+                  size={14}
+                  color={canRecordNoteSelected ? 'var(--text-secondary)' : 'var(--text-disabled)'}
+                />
+                记为取证发现
+              </button>
+            )}
+            {hasExportFeature && (
+              <button
+                type="button"
+                className="td-btn td-btn--soft"
+                style={{ height: 28, minHeight: 28 }}
+                disabled={!canExportSelected}
+                onClick={() => selectedEntry && onExportEntry(selectedEntry)}
+              >
+                <UiIcon
+                  name="export"
+                  size={14}
+                  color={canExportSelected ? 'var(--accent-soft-text)' : 'var(--text-disabled)'}
+                />
+                导出所选文件
+              </button>
+            )}
+          </div>
         )}
       </div>
       <PreviewPane

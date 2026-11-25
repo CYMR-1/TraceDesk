@@ -31,7 +31,8 @@ export type UiIconName =
   | 'activity'
   | 'settings'
   | 'list'
-  | 'arrow_right';
+  | 'arrow_right'
+  | 'note';
 
 export type EntryIconKind = 'folder' | 'disk' | 'file' | 'image' | 'table' | 'system';
 
@@ -279,6 +280,20 @@ export const UiIcon: React.FC<UiIconProps> = ({
           <>
             <line x1="3.0" y1="8.0" x2="12.6" y2="8.0" />
             <polyline points="9.2,4.6 12.8,8.0 9.2,11.4" fill="none" />
+          </>
+        );
+      case 'note':
+        // 取证笔记 / 记为取证发现图标（记录框 + 斜向笔尖）
+        return (
+          <>
+            <path
+              d="M11.6 9.0 L11.6 12.6 Q11.6 13.6 10.6 13.6 L3.4 13.6 Q2.4 13.6 2.4 12.6 L2.4 4.4 Q2.4 3.4 3.4 3.4 L7.2 3.4"
+              fill="none"
+            />
+            <path
+              d="M12.8 2.4 L13.8 3.4 Q14.2 3.8 13.8 4.2 L8.0 10.0 L5.8 10.4 L6.2 8.2 L12.0 2.4 Q12.4 2.0 12.8 2.4 Z"
+              fill="none"
+            />
           </>
         );
       default:

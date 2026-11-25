@@ -966,6 +966,19 @@
   flex-shrink: 0;
 }
 
+.td-pane-header .td-section-title {
+  white-space: nowrap;
+}
+
+/* 预览区标题栏右侧操作按钮组：保持单行紧凑对齐，避免窄屏换行错位 */
+.td-pane-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--control-gap);
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+}
+
 .td-preview-mode-bar {
   display: flex;
   align-items: center;

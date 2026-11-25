@@ -286,7 +286,7 @@ const FindingsModuleInner: React.FC<FindingsModuleProps> = ({
             }}
             emptyText={
               snapshot
-                ? '尚无取证发现 · 在文件浏览中右键文件可记录笔记、计算摘要或比对副本'
+                ? '尚无取证发现 · 在文件浏览预览区点击「记为取证发现」或右键文件可记录笔记、计算摘要或比对副本'
                 : '尚未打开案件'
             }
           />

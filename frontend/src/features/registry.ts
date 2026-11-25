@@ -151,7 +151,7 @@ const FEATURE_CATALOG: Record<FeatureKey, FeatureDefinition> = {
     key: 'file_tools',
     requires: ['files'],
     actions: [
-      { key: 'file_note', title: '记录取证发现', location: 'file_menu', acceptsEntry: canExportEntry },
+      { key: 'file_note', title: '记录取证发现', location: 'file_menu', icon: 'note', acceptsEntry: canExportEntry },
       { key: 'file_hash', title: '计算哈希值（SHA-256）', location: 'file_menu', acceptsEntry: canExportEntry },
       { key: 'compare_file', title: '校验一致性…', location: 'file_menu', acceptsEntry: canExportEntry },
     ],
