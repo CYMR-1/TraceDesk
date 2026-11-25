@@ -1,0 +1,996 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use crate::error::{EngineError, EngineResult};
+use crate::media::MediaReader;
+use crate::types::ByteInterval;
+
+const ATTR_TYPE_ATTRIBUTE_LIST: u32 = 0x20;
+const ATTR_TYPE_DATA: u32 = 0x80;
+const ATTR_TYPE_END: u32 = 0xFFFF_FFFF;
+
+const ATTR_FLAG_COMPRESSED: u16 = 0x0001;
+const ATTR_FLAG_ENCRYPTED: u16 = 0x4000;
+#[allow(dead_code)]
+const ATTR_FLAG_SPARSE: u16 = 0x8000;
+
+#[inline]
+fn read_u16_le(buf: &[u8], off: usize) -> u16 {
+    u16::from_le_bytes([buf[off], buf[off + 1]])
+}
+
+#[inline]
+fn read_u32_le(buf: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
+}
+
+#[inline]
+fn read_u64_le(buf: &[u8], off: usize) -> u64 {
+    u64::from_le_bytes([
+        buf[off],
+        buf[off + 1],
+        buf[off + 2],
+        buf[off + 3],
+        buf[off + 4],
+        buf[off + 5],
+        buf[off + 6],
+        buf[off + 7],
+    ])
+}
+
+/// 非常驻 NTFS 属性中的单个连续簇运行段（data run）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NtfsDataRun {
+    pub vcn: u64,
+    pub len_clusters: u64,
+    /// `Some(lcn)` 表示磁盘上已分配的簇，`None` 表示稀疏（全零填充）运行段。
+    pub lcn: Option<u64>,
+}
+
+/// 已解析的 NTFS 文件/属性数据描述，供高速随机读取与稀疏区间规划使用。
+#[derive(Debug, Clone)]
+pub(crate) enum NtfsEntryData {
+    Resident {
+        bytes: Vec<u8>,
+    },
+    NonResident {
+        data_size: u64,
+        initialized_size: u64,
+        cluster_size: u64,
+        runs: Vec<NtfsDataRun>,
+    },
+}
+
+impl NtfsEntryData {
+    pub fn size(&self) -> u64 {
+        match self {
+            Self::Resident { bytes } => bytes.len() as u64,
+            Self::NonResident { data_size, .. } => *data_size,
+        }
+    }
+
+    /// 计算与 `forensic/core/search_worker.py::_non_sparse_intervals` 对齐的非稀疏扫描区间。
+    ///
+    /// - 常驻属性始终返回 `[0, size)`。
+    /// - 当 `needle` 为空或全零字节时，不跳过稀疏区域（返回 `[0, size)`）。
+    /// - 非稀疏运行段会向前扩展 `needle.len().saturating_sub(1)` 字节，
+    ///   从而避免漏掉起始于运行段前尾部零字节处的跨边界命中。
+    pub fn non_sparse_intervals(&self, needle: &[u8]) -> Vec<ByteInterval> {
+        let size = self.size();
+        if size == 0 {
+            return Vec::new();
+        }
+        match self {
+            Self::Resident { .. } => vec![ByteInterval { start: 0, end: size }],
+            Self::NonResident {
+                data_size,
+                initialized_size,
+                cluster_size,
+                runs,
+            } => {
+                let all_zero_needle = needle.is_empty() || needle.iter().all(|&b| b == 0);
+                let has_sparse = runs.iter().any(|r| r.lcn.is_none()) || *initialized_size < *data_size;
+                if all_zero_needle || !has_sparse {
+                    return vec![ByteInterval {
+                        start: 0,
+                        end: *data_size,
+                    }];
+                }
+
+                let overlap = needle.len().saturating_sub(1) as u64;
+                let valid_end = (*initialized_size).min(*data_size);
+                let mut intervals: Vec<ByteInterval> = Vec::new();
+
+                for run in runs {
+                    if run.lcn.is_none() {
+                        continue;
+                    }
+                    let Some(run_start) = run.vcn.checked_mul(*cluster_size) else {
+                        continue;
+                    };
+                    if run_start >= valid_end {
+                        continue;
+                    }
+                    let Some(run_end_raw) = run
+                        .vcn
+                        .checked_add(run.len_clusters)
+                        .and_then(|v| v.checked_mul(*cluster_size))
+                    else {
+                        continue;
+                    };
+                    // `ByteInterval` 表示有效匹配起始偏移 `[emit_lo, emit_hi)`：
+                    // 向前扩展 `overlap` 覆盖起于前序稀疏零字节处的匹配；
+                    // 结束边界保持 `run_end_raw.min(valid_end)`（读取层会自动向后多读 `needle.len()-1+CONTEXT_BYTES`
+                    // 以覆盖起于非稀疏尾部、止于稀疏零字节处的 UTF-16LE 等跨界命中）。
+                    let h_lo = run_start.saturating_sub(overlap);
+                    let h_hi = run_end_raw.min(valid_end);
+                    if h_lo >= h_hi {
+                        continue;
+                    }
+                    if let Some(last) = intervals.last_mut()
+                        && h_lo <= last.end
+                    {
+                        last.end = last.end.max(h_hi);
+                    } else {
+                        intervals.push(ByteInterval {
+                            start: h_lo,
+                            end: h_hi,
+                        });
+                    }
+                }
+                intervals
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ParsedAttribute {
+    attr_type: u32,
+    attr_id: u16,
+    attr_flags: u16,
+    name_utf16: Vec<u16>,
+    body: ParsedAttrBody,
+}
+
+#[derive(Debug, Clone)]
+enum ParsedAttrBody {
+    Resident(Vec<u8>),
+    NonResident {
+        lowest_vcn: u64,
+        highest_vcn: u64,
+        data_size: u64,
+        initialized_size: u64,
+        compression_unit: u16,
+        runs: Vec<NtfsDataRun>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct AttrListEntry {
+    attr_type: u32,
+    attr_id: u16,
+    starting_vcn: u64,
+    mft_record: u64,
+    name_utf16: Vec<u16>,
+}
+
+/// 原生只读 NTFS 卷读取器，支持 MFT 更新序列修复（USA fixup）、`$ATTRIBUTE_LIST`、
+/// 非常驻多段及稀疏数据流，以及已删除（未分配）的 MFT 记录。
+pub(crate) struct NtfsVolume {
+    media: Arc<dyn MediaReader>,
+    partition_base: u64,
+    cluster_size: u64,
+    mft_record_size: usize,
+    mft_runs: Vec<NtfsDataRun>,
+    mft_size: u64,
+}
+
+impl NtfsVolume {
+    pub fn open(media: Arc<dyn MediaReader>, partition_offset: u64) -> EngineResult<Self> {
+        let partition_base = partition_offset
+            .checked_mul(512)
+            .ok_or_else(|| EngineError::Ntfs("NTFS 分区偏移溢出".to_string()))?;
+        let mut boot = [0u8; 512];
+        media.read_exact_at(partition_base, &mut boot)?;
+        if &boot[3..11] != b"NTFS    " || boot[510..512] != [0x55, 0xaa] {
+            return Err(EngineError::Ntfs("不是有效的 NTFS 引导扇区".to_string()));
+        }
+
+        let bytes_per_sector = read_u16_le(&boot, 11) as u64;
+        if !matches!(bytes_per_sector, 512 | 1024 | 2048 | 4096) {
+            return Err(EngineError::Ntfs("NTFS 扇区大小无效".to_string()));
+        }
+        // 按 NTFS 规范解析每簇扇区数：1..=128 的 2 的幂为字面值（含 0x80=128 即 64 KiB 簇），
+        // 0xF4..=0xFF（244..=255）表示 2^(256 - raw)，规避 -(-128i8) 溢出。
+        let spc_u8 = boot[13];
+        let sectors_per_cluster = if matches!(spc_u8, 1 | 2 | 4 | 8 | 16 | 32 | 64 | 128) {
+            spc_u8 as u64
+        } else if spc_u8 >= 0xF4 {
+            1u64 << (256u32 - spc_u8 as u32)
+        } else {
+            return Err(EngineError::Ntfs("NTFS 每簇扇区数无效".to_string()));
+        };
+        let cluster_size = bytes_per_sector
+            .checked_mul(sectors_per_cluster)
+            .ok_or_else(|| EngineError::Ntfs("NTFS 簇大小溢出".to_string()))?;
+
+        let mft_lcn = read_u64_le(&boot, 48);
+        let cpmr = boot[64] as i8;
+        // 使用 unsigned_abs 避免 cpmr == i8::MIN (-128) 时取反溢出。
+        let mft_record_size = if cpmr > 0 {
+            (cpmr as u64)
+                .checked_mul(cluster_size)
+                .and_then(|v| usize::try_from(v).ok())
+        } else if cpmr < 0 && cpmr.unsigned_abs() <= 16 {
+            Some(1usize << (cpmr.unsigned_abs() as u32))
+        } else {
+            None
+        }
+        .ok_or_else(|| EngineError::Ntfs("NTFS MFT 记录大小无效".to_string()))?;
+
+        if !(512..=65536).contains(&mft_record_size)
+            || !mft_record_size.is_multiple_of(512)
+        {
+            return Err(EngineError::Ntfs(format!(
+                "NTFS MFT 记录大小不受支持：{mft_record_size}"
+            )));
+        }
+
+        // 自举引导：直接从 `mft_lcn` 读取 0 号 MFT 记录（$MFT）。
+        let mft0_disk_off = partition_base
+            .checked_add(
+                mft_lcn
+                    .checked_mul(cluster_size)
+                    .ok_or_else(|| EngineError::Ntfs("NTFS $MFT 偏移溢出".to_string()))?,
+            )
+            .ok_or_else(|| EngineError::Ntfs("NTFS $MFT 偏移溢出".to_string()))?;
+
+        let mut mft0 = vec![0u8; mft_record_size];
+        media.read_exact_at(mft0_disk_off, &mut mft0)?;
+        apply_usa_fixup(&mut mft0)?;
+
+        let attrs0 = parse_record_attributes(&mft0)?;
+        // 首先在 0 号记录中定位 $MFT 的初始 $DATA 属性并校验其运行段合法性。
+        let has_mft_attr_list = attrs0.iter().any(|a| a.attr_type == ATTR_TYPE_ATTRIBUTE_LIST);
+        let mut initial_runs: Option<(Vec<NtfsDataRun>, u64)> = None;
+        for attr in &attrs0 {
+            if attr.attr_type == ATTR_TYPE_DATA
+                && attr.name_utf16.is_empty()
+                && let ParsedAttrBody::NonResident {
+                    lowest_vcn,
+                    highest_vcn,
+                    data_size,
+                    initialized_size,
+                    runs,
+                    ..
+                } = &attr.body
+            {
+                if (attr.attr_flags & (ATTR_FLAG_COMPRESSED | ATTR_FLAG_ENCRYPTED)) != 0
+                    || *lowest_vcn != 0
+                {
+                    return Err(EngineError::Ntfs("$MFT $DATA 属性不受支持".to_string()));
+                }
+                validate_extent_vcn_bounds(*lowest_vcn, *highest_vcn, runs)?;
+                if !has_mft_attr_list {
+                    validate_non_resident_runs(runs, cluster_size, *data_size, *initialized_size)?;
+                }
+                initial_runs = Some((runs.clone(), *data_size));
+                break;
+            }
+        }
+
+        let (mft_runs, mft_size) = match initial_runs {
+            Some(v) => v,
+            None => {
+                // 罕见情况：$MFT 的 $DATA 仅存在于靠近 $MFT 开头的 `$ATTRIBUTE_LIST` 扩展记录中。
+                // 先使用临时的单段小映射完成自举读取。
+                let provisional_clusters = 16u64;
+                let provisional_size = provisional_clusters
+                    .checked_mul(cluster_size)
+                    .ok_or_else(|| EngineError::Ntfs("NTFS 临时 $MFT 大小溢出".to_string()))?;
+                let temp = Self {
+                    media: Arc::clone(&media),
+                    partition_base,
+                    cluster_size,
+                    mft_record_size,
+                    mft_runs: vec![NtfsDataRun {
+                        vcn: 0,
+                        len_clusters: provisional_clusters,
+                        lcn: Some(mft_lcn),
+                    }],
+                    mft_size: provisional_size,
+                };
+                match temp.resolve_from_record_0_attr_list(&attrs0)? {
+                    NtfsEntryData::NonResident {
+                        data_size, runs, ..
+                    } => (runs, data_size),
+                    _ => return Err(EngineError::Ntfs("无法定位 $MFT 的 $DATA 区间".to_string())),
+                }
+            }
+        };
+
+        let mut volume = Self {
+            media,
+            partition_base,
+            cluster_size,
+            mft_record_size,
+            mft_runs,
+            mft_size,
+        };
+
+        // 若 $MFT 自身包含 $ATTRIBUTE_LIST，则必须成功汇总全部扩展记录的 $DATA 区间，
+        // 禁止吞掉错误导致仅保留首段运行段而静默漏读后续 MFT 记录。
+        if has_mft_attr_list {
+            match volume.resolve_from_record_0_attr_list(&attrs0)? {
+                NtfsEntryData::NonResident {
+                    data_size, runs, ..
+                } if !runs.is_empty() => {
+                    volume.mft_runs = runs;
+                    volume.mft_size = data_size;
+                }
+                _ => {
+                    return Err(EngineError::Ntfs(
+                        "无法通过 $ATTRIBUTE_LIST 完整解析 $MFT 数据区间".to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(volume)
+    }
+
+    fn resolve_from_record_0_attr_list(
+        &self,
+        attrs0: &[ParsedAttribute],
+    ) -> EngineResult<NtfsEntryData> {
+        self.resolve_via_attribute_list(0, attrs0, Some(ATTR_TYPE_DATA), None)
+    }
+
+    fn read_mft_record(&self, mft_num: u64) -> EngineResult<Vec<u8>> {
+        let v_off = mft_num
+            .checked_mul(self.mft_record_size as u64)
+            .ok_or_else(|| EngineError::Ntfs("MFT 记录号溢出".to_string()))?;
+        if v_off
+            .checked_add(self.mft_record_size as u64)
+            .is_none_or(|end| end > self.mft_size)
+        {
+            return Err(EngineError::Ntfs(format!("MFT 记录 {mft_num} 超出 $MFT 范围")));
+        }
+
+        let mut buf = vec![0u8; self.mft_record_size];
+        self.read_from_runs(&self.mft_runs, self.mft_size, v_off, &mut buf, true)?;
+        apply_usa_fixup(&mut buf)?;
+        Ok(buf)
+    }
+
+    fn read_from_runs(
+        &self,
+        runs: &[NtfsDataRun],
+        initialized_size: u64,
+        file_offset: u64,
+        buf: &mut [u8],
+        reject_sparse: bool,
+    ) -> EngineResult<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let mut pos = file_offset;
+        let mut out_pos = 0usize;
+
+        while out_pos < buf.len() {
+            if pos >= initialized_size {
+                if reject_sparse {
+                    return Err(EngineError::Ntfs("读取偏移超出有效初始化长度".to_string()));
+                }
+                buf[out_pos..].fill(0);
+                break;
+            }
+            let want = ((buf.len() - out_pos) as u64).min(initialized_size - pos) as usize;
+            let target_vcn = pos / self.cluster_size;
+            let in_cluster = pos % self.cluster_size;
+
+            let run_idx = runs.partition_point(|r| r.vcn.saturating_add(r.len_clusters) <= target_vcn);
+            let run = runs
+                .get(run_idx)
+                .filter(|r| {
+                    target_vcn >= r.vcn && target_vcn < r.vcn.saturating_add(r.len_clusters)
+                })
+                .ok_or_else(|| EngineError::Ntfs(format!("缺少 VCN {target_vcn} 对应的数据区间")))?;
+
+            let run_byte_off = (target_vcn - run.vcn) * self.cluster_size + in_cluster;
+            let run_total_bytes = run
+                .len_clusters
+                .checked_mul(self.cluster_size)
+                .ok_or_else(|| EngineError::Ntfs("数据区间字节长度溢出".to_string()))?;
+            let take = (want as u64).min(run_total_bytes - run_byte_off) as usize;
+
+            match run.lcn {
+                Some(lcn) => {
+                    let disk_off = self
+                        .partition_base
+                        .checked_add(
+                            lcn.checked_mul(self.cluster_size)
+                                .and_then(|v| v.checked_add(run_byte_off))
+                                .ok_or_else(|| EngineError::Ntfs("NTFS 物理偏移溢出".to_string()))?,
+                        )
+                        .ok_or_else(|| EngineError::Ntfs("NTFS 物理偏移溢出".to_string()))?;
+                    self.media
+                        .read_exact_at(disk_off, &mut buf[out_pos..out_pos + take])?;
+                }
+                None => {
+                    if reject_sparse {
+                        return Err(EngineError::Ntfs("MFT 记录落在稀疏区间内".to_string()));
+                    }
+                    buf[out_pos..out_pos + take].fill(0);
+                }
+            }
+
+            pos += take as u64;
+            out_pos += take;
+        }
+        Ok(())
+    }
+
+    /// 解析 MFT 条目的数据属性（支持现存及已删除的 MFT 记录）。
+    ///
+    /// 若属性已压缩、已加密、缺失、长度不匹配或运行段为空，则返回 `Err`，
+    /// 以便 `VolumeReader` 平滑回退至 `icat`。
+    pub fn resolve_entry(
+        &self,
+        mft_num: u64,
+        attr_type: Option<u32>,
+        attr_id: Option<u16>,
+        expected_size: u64,
+    ) -> EngineResult<NtfsEntryData> {
+        let record = self.read_mft_record(mft_num)?;
+        let attrs = parse_record_attributes(&record)?;
+
+        let data = if attrs.iter().any(|a| a.attr_type == ATTR_TYPE_ATTRIBUTE_LIST) {
+            // 严禁静默回退到 `resolve_direct_attributes`：若多扩展段文件的 `$ATTRIBUTE_LIST`
+            // 或扩展记录已损坏/已压缩，回退后只会暴露基础记录中的 VCN-0 运行段，
+            // 同时仍能匹配完整 `data_size`，从而导致检索漏报。
+            self.resolve_via_attribute_list(mft_num, &attrs, attr_type, attr_id)?
+        } else {
+            self.resolve_direct_attributes(&attrs, attr_type, attr_id)?
+        };
+
+        if data.size() != expected_size {
+            return Err(EngineError::Ntfs(format!(
+                "NTFS 属性长度与清单不符：实际 {}，清单 {}",
+                data.size(),
+                expected_size
+            )));
+        }
+        Ok(data)
+    }
+
+    fn resolve_direct_attributes(
+        &self,
+        attrs: &[ParsedAttribute],
+        target_type: Option<u32>,
+        target_id: Option<u16>,
+    ) -> EngineResult<NtfsEntryData> {
+        let wanted_type = target_type.unwrap_or(ATTR_TYPE_DATA);
+        let matched = attrs.iter().find(|a| {
+            if a.attr_type != wanted_type {
+                return false;
+            }
+            match target_id {
+                Some(id) => a.attr_id == id,
+                None => a.name_utf16.is_empty(),
+            }
+        });
+        let attr = matched.ok_or_else(|| EngineError::Ntfs("未找到目标 NTFS 属性".to_string()))?;
+        self.attr_to_entry_data(attr)
+    }
+
+    fn attr_to_entry_data(&self, attr: &ParsedAttribute) -> EngineResult<NtfsEntryData> {
+        if (attr.attr_flags & (ATTR_FLAG_COMPRESSED | ATTR_FLAG_ENCRYPTED)) != 0 {
+            return Err(EngineError::Ntfs(
+                "压缩或加密 NTFS 属性需回退 icat".to_string(),
+            ));
+        }
+        match &attr.body {
+            ParsedAttrBody::Resident(bytes) => Ok(NtfsEntryData::Resident {
+                bytes: bytes.clone(),
+            }),
+            ParsedAttrBody::NonResident {
+                lowest_vcn,
+                highest_vcn,
+                data_size,
+                initialized_size,
+                compression_unit,
+                runs,
+            } => {
+                if *lowest_vcn != 0
+                    || (*compression_unit != 0 && (attr.attr_flags & ATTR_FLAG_COMPRESSED) != 0)
+                {
+                    return Err(EngineError::Ntfs("非首段或压缩属性需回退 icat".to_string()));
+                }
+                validate_extent_vcn_bounds(*lowest_vcn, *highest_vcn, runs)?;
+                validate_non_resident_runs(runs, self.cluster_size, *data_size, *initialized_size)?;
+                Ok(NtfsEntryData::NonResident {
+                    data_size: *data_size,
+                    initialized_size: *initialized_size,
+                    cluster_size: self.cluster_size,
+                    runs: runs.clone(),
+                })
+            }
+        }
+    }
+
+    fn resolve_via_attribute_list(
+        &self,
+        base_mft_num: u64,
+        base_attrs: &[ParsedAttribute],
+        target_type: Option<u32>,
+        target_id: Option<u16>,
+    ) -> EngineResult<NtfsEntryData> {
+        let list_attr = base_attrs
+            .iter()
+            .find(|a| a.attr_type == ATTR_TYPE_ATTRIBUTE_LIST)
+            .ok_or_else(|| EngineError::Ntfs("缺少 $ATTRIBUTE_LIST".to_string()))?;
+
+        if (list_attr.attr_flags & (ATTR_FLAG_COMPRESSED | ATTR_FLAG_ENCRYPTED)) != 0 {
+            return Err(EngineError::Ntfs(
+                "压缩或加密的 $ATTRIBUTE_LIST 需回退 icat".to_string(),
+            ));
+        }
+
+        let list_bytes = match &list_attr.body {
+            ParsedAttrBody::Resident(b) => b.clone(),
+            ParsedAttrBody::NonResident {
+                lowest_vcn,
+                highest_vcn,
+                data_size,
+                initialized_size,
+                runs,
+                ..
+            } => {
+                if *lowest_vcn != 0 || *data_size > 16 * 1024 * 1024 {
+                    return Err(EngineError::Ntfs("$ATTRIBUTE_LIST 异常或过大".to_string()));
+                }
+                validate_extent_vcn_bounds(*lowest_vcn, *highest_vcn, runs)?;
+                validate_non_resident_runs(runs, self.cluster_size, *data_size, *initialized_size)?;
+                let mut buf = vec![0u8; *data_size as usize];
+                self.read_from_runs(runs, *initialized_size, 0, &mut buf, false)?;
+                buf
+            }
+        };
+
+        let entries = parse_attribute_list(&list_bytes)?;
+        let wanted_type = target_type.unwrap_or(ATTR_TYPE_DATA);
+
+        // 定位匹配 `(wanted_type, target_id 或匿名流)` 的基础属性段（`starting_vcn == 0`）。
+        let base_entry = entries
+            .iter()
+            .find(|e| {
+                e.attr_type == wanted_type
+                    && e.starting_vcn == 0
+                    && match target_id {
+                        Some(id) => e.attr_id == id,
+                        None => e.name_utf16.is_empty(),
+                    }
+            })
+            .ok_or_else(|| EngineError::Ntfs("$ATTRIBUTE_LIST 中未找到目标属性".to_string()))?;
+
+        let target_name = &base_entry.name_utf16;
+        let mut extents: Vec<&AttrListEntry> = entries
+            .iter()
+            .filter(|e| e.attr_type == wanted_type && &e.name_utf16 == target_name)
+            .collect();
+        extents.sort_by_key(|e| e.starting_vcn);
+
+        let mut merged_runs: Vec<NtfsDataRun> = Vec::new();
+        let mut data_size: Option<u64> = None;
+        let mut initialized_size: Option<u64> = None;
+        let mut seen_records: HashSet<u64> = HashSet::new();
+        let mut loaded_records: Vec<(u64, Vec<ParsedAttribute>)> = Vec::new();
+
+        for ext in &extents {
+            if seen_records.insert(ext.mft_record) {
+                if ext.mft_record == base_mft_num {
+                    loaded_records.push((base_mft_num, base_attrs.to_vec()));
+                } else {
+                    let rec_bytes = self.read_mft_record(ext.mft_record)?;
+                    let base_ref = read_u64_le(&rec_bytes, 32) & 0x0000_FFFF_FFFF_FFFF;
+                    if base_ref != base_mft_num {
+                        return Err(EngineError::Ntfs(
+                            "扩展 MFT 记录基础引用不匹配，回退 icat".to_string(),
+                        ));
+                    }
+                    let rec_attrs = parse_record_attributes(&rec_bytes)?;
+                    loaded_records.push((ext.mft_record, rec_attrs));
+                }
+            }
+        }
+
+        let extent_count = extents.len();
+        for ext in extents {
+            let (_, rec_attrs) = loaded_records
+                .iter()
+                .find(|(num, _)| *num == ext.mft_record)
+                .ok_or_else(|| EngineError::Ntfs("扩展记录缺失".to_string()))?;
+
+            let attr = rec_attrs
+                .iter()
+                .find(|a| {
+                    a.attr_type == ext.attr_type
+                        && a.attr_id == ext.attr_id
+                        && a.name_utf16 == ext.name_utf16
+                })
+                .ok_or_else(|| EngineError::Ntfs("扩展 MFT 中未找到对应属性段".to_string()))?;
+
+            if (attr.attr_flags & (ATTR_FLAG_COMPRESSED | ATTR_FLAG_ENCRYPTED)) != 0 {
+                return Err(EngineError::Ntfs(
+                    "压缩或加密 NTFS 属性需回退 icat".to_string(),
+                ));
+            }
+            match &attr.body {
+                ParsedAttrBody::Resident(bytes) => {
+                    if extent_count != 1 {
+                        return Err(EngineError::Ntfs("常驻属性不应包含多个扩展段".to_string()));
+                    }
+                    return Ok(NtfsEntryData::Resident {
+                        bytes: bytes.clone(),
+                    });
+                }
+                ParsedAttrBody::NonResident {
+                    lowest_vcn,
+                    highest_vcn,
+                    data_size: ds,
+                    initialized_size: is,
+                    runs,
+                    ..
+                } => {
+                    if *lowest_vcn != ext.starting_vcn {
+                        return Err(EngineError::Ntfs(
+                            "扩展属性段 lowest_vcn 与 $ATTRIBUTE_LIST 不一致".to_string(),
+                        ));
+                    }
+                    validate_extent_vcn_bounds(*lowest_vcn, *highest_vcn, runs)?;
+                    if *lowest_vcn == 0 {
+                        data_size = Some(*ds);
+                        initialized_size = Some(*is);
+                    }
+                    merged_runs.extend_from_slice(runs);
+                }
+            }
+        }
+
+        merged_runs.sort_by_key(|r| r.vcn);
+        let ds = data_size.ok_or_else(|| EngineError::Ntfs("缺少起始 VCN 0 属性段".to_string()))?;
+        let is = initialized_size.unwrap_or(ds);
+        validate_non_resident_runs(&merged_runs, self.cluster_size, ds, is)?;
+
+        Ok(NtfsEntryData::NonResident {
+            data_size: ds,
+            initialized_size: is,
+            cluster_size: self.cluster_size,
+            runs: merged_runs,
+        })
+    }
+
+    /// 从已解析的 [`NtfsEntryData`] 在 `file_offset` 处精确读取字节。
+    pub fn read_entry_data_at(
+        &self,
+        data: &NtfsEntryData,
+        file_offset: u64,
+        buf: &mut [u8],
+    ) -> EngineResult<()> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let end = file_offset
+            .checked_add(buf.len() as u64)
+            .ok_or_else(|| EngineError::RandomRead("NTFS 读取偏移溢出".to_string()))?;
+        if end > data.size() {
+            return Err(EngineError::RandomRead("原始文件内容短读".to_string()));
+        }
+
+        match data {
+            NtfsEntryData::Resident { bytes } => {
+                let start = file_offset as usize;
+                buf.copy_from_slice(&bytes[start..start + buf.len()]);
+                Ok(())
+            }
+            NtfsEntryData::NonResident {
+                initialized_size,
+                runs,
+                ..
+            } => self.read_from_runs(runs, *initialized_size, file_offset, buf, false),
+        }
+    }
+}
+
+/// 校验单个非常驻属性段的运行段连续覆盖 `[lowest_vcn, highest_vcn]`。
+fn validate_extent_vcn_bounds(
+    lowest_vcn: u64,
+    highest_vcn: u64,
+    runs: &[NtfsDataRun],
+) -> EngineResult<()> {
+    if runs.is_empty() {
+        return Err(EngineError::Ntfs("非常驻属性无数据区间，回退 icat".to_string()));
+    }
+    let expected_end = highest_vcn
+        .checked_add(1)
+        .ok_or_else(|| EngineError::Ntfs("NTFS highest_vcn 溢出".to_string()))?;
+    if lowest_vcn >= expected_end {
+        return Err(EngineError::Ntfs("NTFS 属性段 VCN 范围无效".to_string()));
+    }
+    let mut cur = lowest_vcn;
+    for run in runs {
+        if run.len_clusters == 0 || run.vcn != cur {
+            return Err(EngineError::Ntfs("NTFS 属性段数据区间不连续或重叠".to_string()));
+        }
+        cur = cur
+            .checked_add(run.len_clusters)
+            .ok_or_else(|| EngineError::Ntfs("NTFS 属性段 VCN 累加溢出".to_string()))?;
+    }
+    if cur != expected_end {
+        return Err(EngineError::Ntfs(format!(
+            "NTFS 属性段数据区间结束 VCN ({cur}) 与 highest_vcn+1 ({expected_end}) 不一致"
+        )));
+    }
+    Ok(())
+}
+
+/// 校验合并后的非常驻运行段从 VCN 0 开始、无空洞与重叠，且至少覆盖
+/// `min(initialized_size, data_size)` 字节。
+fn validate_non_resident_runs(
+    runs: &[NtfsDataRun],
+    cluster_size: u64,
+    data_size: u64,
+    initialized_size: u64,
+) -> EngineResult<()> {
+    if runs.is_empty() {
+        return Err(EngineError::Ntfs("非常驻属性无数据区间，回退 icat".to_string()));
+    }
+    let mut expected_vcn: u64 = 0;
+    for run in runs {
+        if run.len_clusters == 0 || run.vcn != expected_vcn {
+            return Err(EngineError::Ntfs(
+                "非常驻属性数据区间存在 VCN 空洞、重叠或未从 0 开始，回退 icat".to_string(),
+            ));
+        }
+        expected_vcn = expected_vcn
+            .checked_add(run.len_clusters)
+            .ok_or_else(|| EngineError::Ntfs("非常驻属性 VCN 总长度溢出".to_string()))?;
+    }
+    let covered_bytes = expected_vcn
+        .checked_mul(cluster_size)
+        .ok_or_else(|| EngineError::Ntfs("非常驻属性覆盖字节数溢出".to_string()))?;
+    let required_bytes = initialized_size.min(data_size);
+    if covered_bytes < required_bytes {
+        return Err(EngineError::Ntfs(format!(
+            "非常驻属性数据区间覆盖不足（覆盖 {covered_bytes} < 需覆盖 {required_bytes}），回退 icat"
+        )));
+    }
+    Ok(())
+}
+
+/// 对原始 MFT 记录缓冲区应用 NTFS 更新序列数组（USA）修复。
+fn apply_usa_fixup(record: &mut [u8]) -> EngineResult<()> {
+    if record.len() < 48 || &record[0..4] != b"FILE" {
+        return Err(EngineError::Ntfs("无效的 MFT 记录魔数".to_string()));
+    }
+    let usa_offset = read_u16_le(record, 4) as usize;
+    let usa_count = read_u16_le(record, 6) as usize;
+    if usa_count < 1 || usa_offset + usa_count * 2 > record.len() {
+        return Err(EngineError::Ntfs("MFT USA 修复数组越界".to_string()));
+    }
+    let usn = [record[usa_offset], record[usa_offset + 1]];
+    let sectors = record.len() / 512;
+    if usa_count - 1 < sectors {
+        return Err(EngineError::Ntfs("MFT USA 扇区修复项不足".to_string()));
+    }
+    for i in 1..=sectors {
+        let sector_end = i * 512 - 2;
+        if record[sector_end] != usn[0] || record[sector_end + 1] != usn[1] {
+            return Err(EngineError::Ntfs("MFT USA 更新序列号校验失败".to_string()));
+        }
+        record[sector_end] = record[usa_offset + i * 2];
+        record[sector_end + 1] = record[usa_offset + i * 2 + 1];
+    }
+    Ok(())
+}
+
+/// 解析已完成 USA 修复的 MFT 记录中的全部属性。
+fn parse_record_attributes(record: &[u8]) -> EngineResult<Vec<ParsedAttribute>> {
+    let first_attr = read_u16_le(record, 20) as usize;
+    let used_size = (read_u32_le(record, 24) as usize).min(record.len());
+    if first_attr < 42 || first_attr >= used_size {
+        return Err(EngineError::Ntfs("MFT 首个属性偏移无效".to_string()));
+    }
+
+    let mut attrs = Vec::new();
+    let mut pos = first_attr;
+    while pos.checked_add(8).is_some_and(|end| end <= used_size) {
+        let attr_type = read_u32_le(record, pos);
+        if attr_type == ATTR_TYPE_END {
+            break;
+        }
+        let attr_len = read_u32_le(record, pos + 4) as usize;
+        if attr_len < 16 || pos.checked_add(attr_len).is_none_or(|end| end > used_size) {
+            return Err(EngineError::Ntfs("MFT 属性长度越界".to_string()));
+        }
+        let non_resident = record[pos + 8] != 0;
+        let name_len = record[pos + 9] as usize;
+        let name_offset = read_u16_le(record, pos + 10) as usize;
+        let attr_flags = read_u16_le(record, pos + 12);
+        let attr_id = read_u16_le(record, pos + 14);
+
+        let mut name_utf16 = Vec::with_capacity(name_len);
+        if name_len > 0 {
+            let name_end = name_offset
+                .checked_add(name_len.saturating_mul(2))
+                .ok_or_else(|| EngineError::Ntfs("MFT 属性名称偏移溢出".to_string()))?;
+            if name_end > attr_len {
+                return Err(EngineError::Ntfs("MFT 属性名称越界".to_string()));
+            }
+            for i in 0..name_len {
+                name_utf16.push(read_u16_le(record, pos + name_offset + i * 2));
+            }
+        }
+
+        let body = if !non_resident {
+            if attr_len < 24 {
+                return Err(EngineError::Ntfs("常驻属性头过短".to_string()));
+            }
+            let value_len = read_u32_le(record, pos + 16) as usize;
+            let value_offset = read_u16_le(record, pos + 20) as usize;
+            if value_offset
+                .checked_add(value_len)
+                .is_none_or(|end| end > attr_len)
+            {
+                return Err(EngineError::Ntfs("常驻属性数据越界".to_string()));
+            }
+            ParsedAttrBody::Resident(
+                record[pos + value_offset..pos + value_offset + value_len].to_vec(),
+            )
+        } else {
+            if attr_len < 64 {
+                return Err(EngineError::Ntfs("非常驻属性头过短".to_string()));
+            }
+            let lowest_vcn = read_u64_le(record, pos + 16);
+            let highest_vcn = read_u64_le(record, pos + 24);
+            let runlist_offset = read_u16_le(record, pos + 32) as usize;
+            let compression_unit = read_u16_le(record, pos + 34);
+            let data_size = read_u64_le(record, pos + 48);
+            let initialized_size = read_u64_le(record, pos + 56);
+            if runlist_offset > attr_len {
+                return Err(EngineError::Ntfs("非常驻属性 runlist 偏移越界".to_string()));
+            }
+            let runs = parse_data_runs(&record[pos + runlist_offset..pos + attr_len], lowest_vcn)?;
+            ParsedAttrBody::NonResident {
+                lowest_vcn,
+                highest_vcn,
+                data_size,
+                initialized_size,
+                compression_unit,
+                runs,
+            }
+        };
+
+        attrs.push(ParsedAttribute {
+            attr_type,
+            attr_id,
+            attr_flags,
+            name_utf16,
+            body,
+        });
+        pos += attr_len;
+    }
+
+    Ok(attrs)
+}
+
+/// 将 NTFS runlist 字节序列解码为 [`NtfsDataRun`] 列表。
+fn parse_data_runs(bytes: &[u8], lowest_vcn: u64) -> EngineResult<Vec<NtfsDataRun>> {
+    let mut runs = Vec::new();
+    let mut pos = 0usize;
+    let mut cur_vcn = lowest_vcn;
+    let mut cur_lcn: i64 = 0;
+
+    while pos < bytes.len() {
+        let header = bytes[pos];
+        if header == 0 {
+            break;
+        }
+        pos += 1;
+        let len_size = (header & 0x0f) as usize;
+        let off_size = ((header >> 4) & 0x0f) as usize;
+        if len_size == 0
+            || len_size > 8
+            || off_size > 8
+            || pos
+                .checked_add(len_size)
+                .and_then(|v| v.checked_add(off_size))
+                .is_none_or(|end| end > bytes.len())
+        {
+            return Err(EngineError::Ntfs("NTFS data run 编码无效".to_string()));
+        }
+
+        let mut run_len: u64 = 0;
+        for i in 0..len_size {
+            run_len |= (bytes[pos + i] as u64) << (i * 8);
+        }
+        pos += len_size;
+
+        let lcn = if off_size == 0 {
+            None
+        } else {
+            let mut delta: i64 = 0;
+            for i in 0..off_size {
+                delta |= (bytes[pos + i] as i64) << (i * 8);
+            }
+            // 若末字节最高位为 1，则执行符号扩展。
+            if off_size < 8 && (bytes[pos + off_size - 1] & 0x80) != 0 {
+                delta |= !0i64 << (off_size * 8);
+            }
+            pos += off_size;
+            cur_lcn = cur_lcn
+                .checked_add(delta)
+                .ok_or_else(|| EngineError::Ntfs("NTFS LCN 累加溢出".to_string()))?;
+            if cur_lcn < 0 {
+                return Err(EngineError::Ntfs("NTFS LCN 出现负值".to_string()));
+            }
+            Some(cur_lcn as u64)
+        };
+
+        if run_len > 0 {
+            runs.push(NtfsDataRun {
+                vcn: cur_vcn,
+                len_clusters: run_len,
+                lcn,
+            });
+            cur_vcn = cur_vcn
+                .checked_add(run_len)
+                .ok_or_else(|| EngineError::Ntfs("NTFS VCN 累加溢出".to_string()))?;
+        }
+    }
+
+    Ok(runs)
+}
+
+fn parse_attribute_list(bytes: &[u8]) -> EngineResult<Vec<AttrListEntry>> {
+    let mut entries = Vec::new();
+    let mut pos = 0usize;
+    while pos.checked_add(26).is_some_and(|end| end <= bytes.len()) {
+        let attr_type = read_u32_le(bytes, pos);
+        let rec_len = read_u16_le(bytes, pos + 4) as usize;
+        if rec_len < 26 || pos.checked_add(rec_len).is_none_or(|end| end > bytes.len()) {
+            return Err(EngineError::Ntfs("$ATTRIBUTE_LIST 项长度越界".to_string()));
+        }
+        let name_len = bytes[pos + 6] as usize;
+        let name_offset = bytes[pos + 7] as usize;
+        let starting_vcn = read_u64_le(bytes, pos + 8);
+        let mft_ref = read_u64_le(bytes, pos + 16);
+        let mft_record = mft_ref & 0x0000_FFFF_FFFF_FFFF;
+        let attr_id = read_u16_le(bytes, pos + 24);
+
+        let mut name_utf16 = Vec::with_capacity(name_len);
+        if name_len > 0 {
+            if name_offset
+                .checked_add(name_len.saturating_mul(2))
+                .is_none_or(|end| end > rec_len)
+            {
+                return Err(EngineError::Ntfs("$ATTRIBUTE_LIST 属性名越界".to_string()));
+            }
+            for i in 0..name_len {
+                name_utf16.push(read_u16_le(bytes, pos + name_offset + i * 2));
+            }
+        }
+
+        entries.push(AttrListEntry {
+            attr_type,
+            attr_id,
+            starting_vcn,
+            mft_record,
+            name_utf16,
+        });
+        pos += rec_len;
+    }
+    Ok(entries)
+}

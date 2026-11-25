@@ -5,6 +5,7 @@ cases/*
 !cases/.gitkeep
 dist/
 
+*.docx
 .venv/
 logs/
 
@@ -25,3 +26,9 @@ Thumbs.db
 
 # The extracted TSK distribution is tracked instead.
 /tools/*.zip
+
+# Rust & Tauri 2 build / frontend dependencies
+target/
+frontend/node_modules/
+frontend/dist/
+src-tauri/gen/

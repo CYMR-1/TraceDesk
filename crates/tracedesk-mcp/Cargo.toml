@@ -1,0 +1,24 @@
+[package]
+name = "tracedesk-mcp"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "tracedesk_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tracedesk-mcp"
+path = "src/main.rs"
+
+[dependencies]
+lru = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracedesk-core = { path = "../tracedesk-core", default-features = false }
+tracedesk-engines = { path = "../tracedesk-engines" }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"

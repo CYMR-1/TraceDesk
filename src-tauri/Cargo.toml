@@ -1,0 +1,29 @@
+[package]
+name = "tracedesk-desktop"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "tracedesk_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tracedesk-core = { path = "../crates/tracedesk-core" }
+tracedesk-engines = { path = "../crates/tracedesk-engines" }
+tracedesk-mcp = { path = "../crates/tracedesk-mcp" }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"

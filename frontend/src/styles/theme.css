@@ -1,0 +1,782 @@
+/* ==========================================================================
+ * TraceDesk 设计系统 — 明净瓷白与晴空蓝
+ * 1:1 设计令牌，对齐 ui-contract.md、theme.py、metrics.py 与 appearance.py
+ * ========================================================================== */
+
+:root {
+  /* 1. 顶部瓷白命令带 */
+  --header-bg: #FFFFFF;
+  --header-border: #DFE7F0;
+  --header-divider: #E2EAF2;
+  --header-text: #1E293B;
+  --header-icon: #3B5570;
+  --header-muted: #5E7288;
+  --header-btn-bg: #F7FAFD;
+  --header-btn-border: #D4DFEB;
+  --header-btn-hover: #EDF5FD;
+  --header-btn-hover-border: #AEC8E4;
+  --header-btn-pressed: #E1EFFC;
+  --header-ghost-hover: #F1F6FB;
+  --header-ghost-hover-border: #DDE7F2;
+  --header-primary-bg: #2674C4;
+  --header-primary-border: #2067B0;
+  --header-primary-hover: #1F66B0;
+  --header-primary-pressed: #185494;
+  --header-primary-disabled-bg: #D6E6F8;
+  --header-primary-disabled-fg: #7FA5CF;
+  --header-primary-disabled-border: #C7DCF4;
+
+  /* 2. 明净瓷白表面 */
+  --canvas-bg: #EFF4F9;            /* 标签带 & 主背景底色 */
+  --chrome-bg: #F7FAFD;            /* 保管栏 / 左侧树 / 顶部子栏 / 底栏 / HEX偏移槽 */
+  --chrome-subtle: #F2F6FB;        /* 侧栏页头与页脚 */
+  --surface-bg: #FFFFFF;           /* 证据工作区 / 表格主底 */
+  --surface-subtle: #FAFCFE;       /* 斑马纹偶行 / 筛选栏 / 卡片底 */
+  --surface-tint: #FCFDFE;         /* 二级提示条 / 原始文本面 */
+  --surface-hover: #EEF5FD;
+  --surface-selected: #E3F0FD;
+  --surface-selected-inactive: #EBF3FC;
+  --surface-selected-text: #144880;
+  --surface-disabled: #F4F7FA;
+  --image-backdrop: #F2F6FA;
+
+  /* 3. 边框与细分割线 */
+  --border-subtle: #E6ECF3;
+  --border-hairline: #E4EBF2;
+  --border-pane: #DFE7F0;
+  --border-default: #D3DDE8;
+  --border-strong: #AEBFD2;
+  --border-focus: #2674C4;
+  --border-soft-rule: #EFF3F8;
+
+  /* 4. 文本层级与十六进制视图 */
+  --text-primary: #1E293B;
+  --text-secondary: #45586E;
+  --text-muted: #60748A;
+  --text-disabled: #99AABF;
+  --hex-offset-fg: #356391;
+  --hex-null-fg: #A8B5C4;          /* 00 空字节弱化色 */
+  --hex-null-selected-fg: #6B8FB8;
+  --hex-char-fg: #334559;
+  --hex-dot-fg: #B2BECA;           /* 不可打印占位符 · 弱化色 */
+
+  /* 5. 主色（晴空蓝） */
+  --accent: #2674C4;
+  --accent-hover: #1E63AC;
+  --accent-pressed: #175291;
+  --accent-soft-bg: #ECF5FF;
+  --accent-soft-border: #BDD9F7;
+  --accent-soft-text: #1B5A9D;
+  --accent-filter-bg: #E5F1FE;     /* 表头激活筛选高亮 */
+  --header-hover-bg: #EBF3FB;
+  --header-cell-fg: #4C6075;
+
+  /* 6. 语义状态与胶囊徽章 */
+  --ok-fg: #157347;
+  --ok-bg: #EAF8F0;
+  --ok-border: #B6E6CB;
+
+  --danger-fg: #B92D22;
+  --danger-bg: #FEF0EF;
+  --danger-border: #F6C6C2;
+
+  --warn-fg: #94540A;
+  --warn-bg: #FFF7E6;
+  --warn-border: #F0D59C;
+
+  --system-fg: #5B40A8;
+  --system-bg: #F4F0FD;
+  --system-border: #D8CBF5;
+
+  --neutral-fg: #485A6E;
+  --neutral-bg: #F1F5F9;
+  --neutral-border: #D6E0EB;
+
+  --step-ref-fg: #C93D31;          /* 帮助文档 ①②③④⑤ 红色标注 */
+
+  /* 7. 尺寸与圆角 (metrics.py) */
+  --header-height: 48px;
+  --custody-min-height: 36px;
+  --tab-bar-height: 38px;
+  --sub-bar-height: 34px;
+  --status-bar-height: 28px;
+  --row-height-table: 28px;
+  --row-height-tree: 26px;
+  --row-height-hex: 22px;
+  --panel-gap: 3px;
+  --control-gap: 8px;
+  --dialog-margin: 20px;
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 8px;
+
+  /* 8. Windows DirectWrite 中英混排与等宽字体栈 */
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-brand: "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", "Consolas", "Microsoft YaHei UI", monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--canvas-bg);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 12.75px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  user-select: none;
+}
+
+input,
+textarea,
+select,
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* 自定义明净瓷白风格滚动条 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #CBD7E5;
+  border: 2px solid transparent;
+  border-radius: 5px;
+  background-clip: padding-box;
+  min-height: 28px;
+  min-width: 28px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #9DB2C9;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: var(--accent);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ---------- 按钮（日间浅色系角色样式） ---------- */
+.td-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--surface-bg);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 4px 12px;
+  min-height: 28px;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.2;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  outline: none;
+}
+
+.td-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.td-btn:active:not(:disabled) {
+  background: var(--surface-selected);
+  border-color: var(--accent);
+}
+
+.td-btn:focus-visible {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px rgba(38, 116, 196, 0.18);
+}
+
+.td-btn:disabled {
+  background: var(--surface-disabled);
+  color: var(--text-disabled);
+  border-color: var(--border-subtle);
+  cursor: not-allowed;
+}
+
+.td-btn--accent {
+  background: var(--accent);
+  color: #FFFFFF;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+.td-btn--accent:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: #FFFFFF;
+}
+
+.td-btn--accent:active:not(:disabled) {
+  background: var(--accent-pressed);
+  border-color: var(--accent-pressed);
+  color: #FFFFFF;
+}
+
+.td-btn--accent:disabled {
+  background: var(--header-primary-disabled-bg);
+  color: var(--header-primary-disabled-fg);
+  border-color: var(--header-primary-disabled-border);
+}
+
+.td-btn--soft {
+  background: var(--accent-soft-bg);
+  color: var(--accent-soft-text);
+  border-color: var(--accent-soft-border);
+  font-weight: 500;
+}
+
+.td-btn--soft:hover:not(:disabled) {
+  background: #DFEEFD;
+  border-color: #9BC4EE;
+  color: var(--accent-soft-text);
+}
+
+.td-btn--soft:active:not(:disabled) {
+  background: #CFE5FC;
+  border-color: var(--accent);
+}
+
+.td-btn--ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border-color: transparent;
+}
+
+.td-btn--ghost:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+  border-color: var(--border-subtle);
+}
+
+.td-btn--ghost:active:not(:disabled) {
+  background: var(--surface-selected);
+  color: var(--surface-selected-text);
+}
+
+.td-btn--ghost:disabled {
+  background: transparent;
+  color: var(--text-disabled);
+  border-color: transparent;
+}
+
+.td-btn--compact {
+  background: var(--surface-bg);
+  color: var(--text-secondary);
+  border-color: var(--border-default);
+  border-radius: 4px;
+  padding: 2px 8px;
+  min-height: 24px;
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.td-btn--compact:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--accent);
+  border-color: var(--accent-soft-border);
+}
+
+.td-btn--pager {
+  background: var(--surface-bg);
+  color: var(--text-secondary);
+  border-color: var(--border-default);
+  border-radius: 4px;
+  padding: 2px 9px;
+  min-height: 24px;
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.td-btn--pager:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--accent);
+  border-color: var(--accent-soft-border);
+}
+
+.td-btn--warning {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  border-color: var(--warn-border);
+  font-weight: 600;
+}
+
+.td-btn--warning:hover:not(:disabled) {
+  background: #FBECC9;
+  border-color: #D8AD60;
+}
+
+.td-btn--warning:active:not(:disabled) {
+  background: #F6DFAD;
+  border-color: #BE8B35;
+}
+
+.td-btn--warningAction {
+  background: #FFFDF7;
+  color: var(--warn-fg);
+  border-color: #DCBA7D;
+  padding: 4px 10px;
+  font-weight: 600;
+}
+
+.td-btn--warningAction:hover:not(:disabled) {
+  background: #FAECDA;
+  border-color: #C49746;
+}
+
+/* ---------- 输入框与下拉选择器 ---------- */
+.td-input,
+.td-select,
+.td-textarea {
+  background: var(--surface-bg);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 4px 9px;
+  min-height: 28px;
+  font-size: 12.5px;
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.td-input:hover:not(:disabled),
+.td-select:hover:not(:disabled),
+.td-textarea:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.td-input:focus,
+.td-select:focus,
+.td-textarea:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px rgba(38, 116, 196, 0.14);
+}
+
+.td-input:disabled,
+.td-select:disabled,
+.td-textarea:disabled {
+  background: var(--surface-disabled);
+  color: var(--text-disabled);
+  border-color: var(--border-subtle);
+  cursor: not-allowed;
+}
+
+.td-input::placeholder,
+.td-textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.td-select {
+  appearance: none;
+  padding-right: 26px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.3 6 7.8 9.5 4.3' fill='none' stroke='%2353687F' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  background-size: 12px 12px;
+  cursor: pointer;
+}
+
+.td-mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 语义胶囊徽章样式 ---------- */
+.td-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0 8px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+/* 胶囊内部文本容器：短文本居中，超长文本从左对齐并优雅显示省略号 */
+.td-pill-label {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.td-pill--ok {
+  color: var(--ok-fg);
+  background: var(--ok-bg);
+  border-color: var(--ok-border);
+}
+
+.td-pill--danger {
+  color: var(--danger-fg);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+}
+
+.td-pill--warn {
+  color: var(--warn-fg);
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+}
+
+.td-pill--system {
+  color: var(--system-fg);
+  background: var(--system-bg);
+  border-color: var(--system-border);
+}
+
+.td-pill--accent {
+  color: var(--accent-soft-text);
+  background: var(--accent-soft-bg);
+  border-color: var(--accent-soft-border);
+}
+
+.td-pill--neutral {
+  color: var(--neutral-fg);
+  background: var(--neutral-bg);
+  border-color: var(--neutral-border);
+}
+
+.td-muted-text {
+  color: var(--text-muted);
+}
+
+.td-subtle-text {
+  color: var(--text-secondary);
+}
+
+/* ---------- 页码徽标（支持双击跳页） ---------- */
+.td-page-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  background: var(--surface-bg);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 2px 8px;
+  min-height: 24px;
+  white-space: nowrap;
+  user-select: text;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.td-page-badge--jumpable {
+  cursor: pointer;
+}
+
+.td-page-badge--jumpable:hover {
+  background: var(--accent-soft-bg);
+  border-color: var(--accent-soft-border);
+  color: var(--accent-soft-text);
+}
+
+/* ---------- 提示横幅与状态徽标 ---------- */
+.td-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 12.5px;
+}
+
+.td-banner--warning {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+  color: var(--warn-fg);
+}
+
+.td-banner--ok {
+  background: var(--ok-bg);
+  border-color: var(--ok-border);
+  color: var(--ok-fg);
+}
+
+.td-banner--error {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+  color: var(--danger-fg);
+}
+
+.td-status-bar-pill {
+  padding: 6px 10px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  font-size: 12.5px;
+  user-select: text;
+}
+
+.td-status-bar-pill--running {
+  background: var(--ok-bg);
+  color: var(--ok-fg);
+  border-color: var(--ok-border);
+  font-weight: 600;
+}
+
+.td-status-bar-pill--stopped {
+  background: var(--neutral-bg);
+  color: var(--neutral-fg);
+  border-color: var(--neutral-border);
+}
+
+.td-status-bar-pill--warning {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  border-color: var(--warn-border);
+  font-weight: 600;
+}
+
+.td-status-bar-pill--error {
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  border-color: var(--danger-border);
+  font-weight: 600;
+}
+
+/* ---------- 取证档案详情样式 (DOSSIER_CSS) ---------- */
+.td-dossier {
+  padding: 14px 16px;
+  background: var(--surface-bg);
+  color: var(--text-primary);
+  font-size: 13px;
+  overflow: auto;
+  user-select: text;
+  height: 100%;
+}
+
+/* 可关闭底部详情面板吸顶标题栏 */
+.td-dossier-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.td-dossier-header--closable {
+  position: sticky;
+  top: -14px;
+  z-index: 2;
+  margin: -14px -16px 10px -16px;
+  padding: 12px 16px 8px 16px;
+  background: var(--surface-bg);
+}
+
+.td-dossier-header--bordered {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.td-dossier-heading {
+  min-width: 0;
+  flex: 1;
+}
+
+.td-dossier-header--closable .td-dossier-subtitle {
+  margin-bottom: 0;
+}
+
+.td-dossier-close {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  background: var(--chrome-bg);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.td-dossier-close:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.td-dossier-close:active {
+  background: var(--surface-selected);
+  border-color: var(--accent);
+}
+
+.td-dossier-close:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px rgba(38, 116, 196, 0.18);
+}
+
+.td-dossier-close-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.td-dossier h2 {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 3px 0;
+}
+
+.td-dossier .td-dossier-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0 0 10px 0;
+}
+
+.td-dossier hr {
+  border: 0;
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 4px 0 10px 0;
+}
+
+.td-dossier h3 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  margin: 12px 0 5px 0;
+}
+
+.td-dossier table {
+  border-collapse: collapse;
+  width: 100%;
+  border: 1px solid var(--border-pane);
+  margin: 0 0 8px 0;
+  table-layout: fixed;
+}
+
+.td-dossier td {
+  background: var(--surface-bg);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  padding: 6px 10px;
+  vertical-align: top;
+  word-break: break-word;
+}
+
+.td-dossier td.td-dossier-key {
+  width: 168px;
+  background: var(--chrome-bg);
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.td-dossier td.td-dossier-val {
+  background: var(--surface-bg);
+  color: var(--text-primary);
+}
+
+.td-dossier .td-dossier-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: #243952;
+}
+
+/* ---------- 操作指南正文样式 (GUIDE_CSS) ---------- */
+.td-guide-article {
+  font-size: 13.5px;
+  color: var(--text-primary);
+  line-height: 1.65;
+  user-select: text;
+}
+
+.td-guide-article p {
+  margin: 4px 0 9px 0;
+}
+
+.td-guide-article ol,
+.td-guide-article ul {
+  margin: 4px 0 10px 0;
+  padding-left: 22px;
+}
+
+.td-guide-article li {
+  margin: 5px 0 7px 0;
+}
+
+.td-guide-article strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.td-guide-article code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--accent-soft-bg);
+  color: var(--accent-soft-text);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+.td-guide-article pre {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--chrome-bg);
+  color: var(--text-primary);
+  border: 1px solid var(--border-pane);
+  border-radius: 4px;
+  padding: 9px 12px;
+  margin: 8px 0 10px 0;
+  overflow-x: auto;
+}
+
+.td-guide-article .td-guide-callout {
+  background: var(--accent-soft-bg);
+  border: 1px solid var(--accent-soft-border);
+  border-radius: 5px;
+  color: var(--text-primary);
+  padding: 8px 12px;
+  margin: 10px 0;
+}
+
+.td-step-ref {
+  color: var(--step-ref-fg);
+  font-weight: 700;
+}
