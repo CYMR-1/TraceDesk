@@ -154,6 +154,10 @@ const TimelineModuleInner: React.FC<TimelineModuleProps> = ({ snapshot, busy }) 
     void fetchPage();
   }, [fetchPage]);
 
+  const handleCloseDetail = useCallback(() => {
+    setDetailOpen(false);
+  }, []);
+
   const selectedRow = useMemo(
     () => rows.find((r) => r.number === selectedNum) ?? null,
     [rows, selectedNum]
@@ -298,9 +302,15 @@ const TimelineModuleInner: React.FC<TimelineModuleProps> = ({ snapshot, busy }) 
                   ],
                 },
               ]}
+              onClose={handleCloseDetail}
             />
           ) : (
-            <DossierView title="选择一条记录查看详情" subtitle={`当前页显示 ${rows.length} 条`} sections={[]} />
+            <DossierView
+              title="选择一条记录查看详情"
+              subtitle={`当前页显示 ${rows.length} 条`}
+              sections={[]}
+              onClose={handleCloseDetail}
+            />
           )
         }
       />

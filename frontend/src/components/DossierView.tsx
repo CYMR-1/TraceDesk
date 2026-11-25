@@ -71,11 +71,34 @@ export const DossierView: React.FC<{
   title: string;
   subtitle?: string;
   sections: DossierSection[];
-}> = ({ title, subtitle, sections }) => (
+  /** 可选关闭回调：传入时在顶部栏右侧展示“关闭”按钮（用于底部可收起详情分栏） */
+  onClose?: () => void;
+}> = ({ title, subtitle, sections, onClose }) => (
   <div className="td-dossier">
-    <h2>{title}</h2>
-    {subtitle && <p className="td-dossier-subtitle">{subtitle}</p>}
-    {sections.length > 0 && <hr />}
+    {onClose ? (
+      <div className={`td-dossier-header td-dossier-header--closable${sections.length > 0 ? ' td-dossier-header--bordered' : ''}`}>
+        <div className="td-dossier-heading">
+          <h2>{title}</h2>
+          {subtitle && <p className="td-dossier-subtitle">{subtitle}</p>}
+        </div>
+        <button
+          type="button"
+          className="td-dossier-close"
+          onClick={onClose}
+          title="关闭详情面板"
+          aria-label="关闭详情面板"
+        >
+          <span className="td-dossier-close-icon" aria-hidden="true">×</span>
+          <span>关闭</span>
+        </button>
+      </div>
+    ) : (
+      <>
+        <h2>{title}</h2>
+        {subtitle && <p className="td-dossier-subtitle">{subtitle}</p>}
+        {sections.length > 0 && <hr />}
+      </>
+    )}
     {sections.map((section, sIdx) => (
       <div key={`${section.title}-${sIdx}`}>
         <h3>{section.title}</h3>

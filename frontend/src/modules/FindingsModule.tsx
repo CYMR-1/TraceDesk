@@ -117,6 +117,10 @@ const FindingsModuleInner: React.FC<FindingsModuleProps> = ({
     void loadFindings();
   }, [loadFindings, refreshToken]);
 
+  const handleCloseDetail = useCallback(() => {
+    setDetailOpen(false);
+  }, []);
+
   const selectedGroup = useMemo(
     () => groups.find((g) => g.groupKey === selectedKey) ?? null,
     [groups, selectedKey]
@@ -293,9 +297,15 @@ const FindingsModuleInner: React.FC<FindingsModuleProps> = ({
               title={selectedGroup.subject}
               subtitle="取证记录 · 笔记 / 摘要 / 副本比对"
               sections={detailSections}
+              onClose={handleCloseDetail}
             />
           ) : (
-            <DossierView title="选择一条记录查看详情" subtitle={`当前显示 ${groups.length} 条`} sections={[]} />
+            <DossierView
+              title="选择一条记录查看详情"
+              subtitle={`当前显示 ${groups.length} 条`}
+              sections={[]}
+              onClose={handleCloseDetail}
+            />
           )
         }
       />

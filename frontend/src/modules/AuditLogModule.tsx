@@ -121,6 +121,10 @@ const AuditLogModuleInner: React.FC<AuditLogModuleProps> = ({ snapshot, refreshT
     void loadAudit();
   }, [loadAudit, refreshToken]);
 
+  const handleCloseDetail = useCallback(() => {
+    setDetailOpen(false);
+  }, []);
+
   const selectedRecord = useMemo(
     () => records.find((r) => r.seq === selectedSeq) ?? null,
     [records, selectedSeq]
@@ -290,9 +294,15 @@ const AuditLogModuleInner: React.FC<AuditLogModuleProps> = ({ snapshot, refreshT
               title={`#${selectedRecord.seq} · [${selectedRecord.originLabel || (selectedRecord.origin === 'mcp' ? 'MCP' : '人工')}] ${selectedRecord.actionTitle || AUDIT_ACTION_TITLES[selectedRecord.action] || selectedRecord.action}`}
               subtitle="审计日志 · UTC+8"
               sections={detailSections}
+              onClose={handleCloseDetail}
             />
           ) : (
-            <DossierView title="选择一条记录查看详情" subtitle={`当前显示 ${records.length} 条`} sections={[]} />
+            <DossierView
+              title="选择一条记录查看详情"
+              subtitle={`当前显示 ${records.length} 条`}
+              sections={[]}
+              onClose={handleCloseDetail}
+            />
           )
         }
       />
