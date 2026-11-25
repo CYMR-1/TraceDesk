@@ -1587,7 +1587,7 @@ fn build_tool_definitions() -> Vec<McpToolDefinition> {
                 "examiner": { "type": "string", "minLength": 1, "maxLength": 80, "description": "取证人员姓名或工号" },
                 "target": { "type": "string", "minLength": 1, "maxLength": 200, "description": "取证对象说明，例如 FAT16 演示镜像" },
                 "cases_root": { "type": ["string", "null"], "default": null, "description": "可选案件库根目录，省略时使用项目默认 cases 目录" },
-                "folder_name": { "type": ["string", "null"], "maxLength": 180, "default": null, "description": "可选自定义案件目录名，省略时自动按“编号-人员-对象”生成" },
+                "folder_name": { "type": ["string", "null"], "maxLength": 180, "default": null, "description": "可选自定义案件目录名，省略时自动按“编号_人员_对象”生成" },
                 "actor": { "type": ["string", "null"], "maxLength": 80, "default": null, "description": "可选操作人员标识（默认使用取证人员，审计来源固定标记为 MCP）" },
                 "response_format": { "type": "string", "enum": ["markdown", "json"], "default": "markdown", "description": "输出格式：markdown 或 json" }
             }),

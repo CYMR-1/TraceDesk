@@ -209,7 +209,7 @@ export const NewCaseDialog: React.FC<NewCaseDialogProps> = ({
             id="td-newcase-folder"
             className="td-input td-mono"
             style={{ fontSize: 12 }}
-            placeholder="自动按编号-人员-对象生成，可手动修改"
+            placeholder="自动按编号_人员_对象生成，可手动修改"
             value={folderName}
             onChange={(e) => {
               setFolderCustomized(true);

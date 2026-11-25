@@ -137,10 +137,12 @@ fn formatting_windows_filenames_and_stack_timestamps() {
     assert_eq!(windows_filename(emoji_name, 2), "a");
     assert_eq!(windows_filename(emoji_name, 3), "a😀");
 
-    // 超长案件目录名（>255 个 UTF-16 单元）每个字段截断至 <=84 个单元。
+    // 默认案件目录名使用 `_` 连接编号、人员与对象，超长时（>255 个 UTF-16 单元）每个字段截断至 <=84 个单元。
+    assert_eq!(case_folder_name("XCB", "GJR", "SDGFGH"), "XCB_GJR_SDGFGH");
     let long = "案".repeat(120);
     let folder = case_folder_name(&long, &long, &long);
     assert!(folder.chars().map(char::len_utf16).sum::<usize>() <= 255);
+    assert_eq!(folder.matches('_').count(), 2);
 
     // 零分配栈上 UTC+8 格式化器在边界日期与闰年上与 chrono 结果一致。
     for ts in [

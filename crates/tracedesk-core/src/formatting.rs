@@ -246,16 +246,16 @@ pub fn export_filename(source_path: &str) -> String {
     windows_filename(leaf, 255)
 }
 
-/// 根据 `(number, examiner, target)` 派生默认案件目录名（对应 `core-contract.md` §3.1）。
+/// 根据 `(number, examiner, target)` 派生默认案件目录名（以 `_` 分隔编号、人员与对象）。
 pub fn case_folder_name(number: &str, examiner: &str, target: &str) -> String {
     let parts = [number.trim(), examiner.trim(), target.trim()];
-    let mut joined = parts.join("-");
+    let mut joined = parts.join("_");
     if utf16_unit_len(&joined) > 255 {
         joined = parts
             .iter()
             .map(|p| truncate_utf16_units(p, 84))
             .collect::<Vec<_>>()
-            .join("-");
+            .join("_");
     }
     windows_filename(&joined, 255)
 }

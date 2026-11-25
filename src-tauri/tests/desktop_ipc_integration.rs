@@ -108,12 +108,12 @@ fn full_desktop_ipc_workflow_and_json_contract_with_demo_dd() {
     )
     .expect("suggest_case_dir");
     let sugg_json = serde_json::to_value(&suggested).expect("serialize SuggestCaseDirResponse");
-    assert_eq!(sugg_json["folderName"], "DEMO-IPC-01-测试员-FAT16镜像");
+    assert_eq!(sugg_json["folderName"], "DEMO-IPC-01_测试员_FAT16镜像");
     assert!(
         sugg_json["suggestedPath"]
             .as_str()
             .unwrap()
-            .ends_with("DEMO-IPC-01-测试员-FAT16镜像")
+            .ends_with("DEMO-IPC-01_测试员_FAT16镜像")
     );
 
     let guides = cmd_get_guide_pages().expect("get_guide_pages");

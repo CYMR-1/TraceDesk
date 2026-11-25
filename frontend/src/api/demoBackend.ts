@@ -887,7 +887,7 @@ export const demoBackend = {
 
   async suggest_case_dir(args: { number: string; examiner: string; target: string; parentDir?: string }): Promise<SuggestCaseDirResponse> {
     const parent = args.parentDir || 'C:\\TraceDesk\\cases';
-    const safe = `${args.number}-${args.examiner}-${args.target}`.replace(/[<>:"/\\|?*]+/g, '_');
+    const safe = `${args.number}_${args.examiner}_${args.target}`.replace(/[<>:"/\\|?*]+/g, '_');
     return {
       folderName: safe,
       suggestedPath: `${parent.replace(/[\\/]+$/, '')}\\${safe}`,
@@ -895,7 +895,7 @@ export const demoBackend = {
   },
 
   async create_case(args: { parentDir: string; number: string; examiner: string; target: string; folderName?: string }): Promise<CaseSnapshot> {
-    const folder = args.folderName || `${args.number}-${args.examiner}-${args.target}`;
+    const folder = args.folderName || `${args.number}_${args.examiner}_${args.target}`;
     const snap: CaseSnapshot = {
       caseDir: `${args.parentDir.replace(/[\\/]+$/, '')}\\${folder}`,
       id: `demo-${Date.now()}`,

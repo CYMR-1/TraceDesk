@@ -1375,7 +1375,7 @@ fn test_mcp_caller_identity_stdio_http_headers_and_actor_combination() {
             "params": {
                 "name": "tracedesk_load_image",
                 "arguments": {
-                    "case_dir": "WHO-STDIO-001-张取证-stdio调用方测试",
+                    "case_dir": "WHO-STDIO-001_张取证_stdio调用方测试",
                     "image_path": image_path.to_string_lossy(),
                     "scan_all": true,
                     "actor": "张三",
