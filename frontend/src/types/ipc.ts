@@ -579,3 +579,117 @@ export interface SearchFinishedEvent {
   reportName?: string;
   snapshot?: CaseSnapshot;
 }
+
+/* ---------- Phase 2 新增 IPC 契约：HTML 报告 / 复核包核验 / 文件魔数检测 ---------- */
+
+/** 生成离线自包含 HTML 取证报告返回结果 */
+export interface GenerateHtmlReportResponse {
+  path: string;
+  sha256: string;
+  bytes: number;
+  generatedAt: string;
+}
+
+/** 复核包逐成员哈希核对条目 */
+export interface ReviewBundleMemberVerifyDto {
+  path: string;
+  category: string;
+  status: string;
+  expectedSha256: string | null;
+  actualSha256: string | null;
+  size: number | null;
+  message: string;
+}
+
+/** 复核包跨文件审计链交叉核对条目 */
+export interface ReviewBundleCrossCheckDto {
+  name: string;
+  status: string;
+  message: string;
+}
+
+/** 一键复核包完整性与防篡改核验结果 */
+export interface VerifyReviewBundleResponse {
+  ok: boolean;
+  bundlePath: string;
+  bundleSha256: string;
+  expectedSha256: string | null;
+  sha256Source: 'manual' | 'sidecar' | 'none';
+  sha256Matched: boolean | null;
+  auditValid: boolean;
+  auditCount: number;
+  auditHead: string;
+  auditError: string | null;
+  manifestValid: boolean;
+  members: ReviewBundleMemberVerifyDto[];
+  crossChecks: ReviewBundleCrossCheckDto[];
+  errors: string[];
+}
+
+/** 魔数扫描检出类型聚合统计 */
+export interface MagicTypeCountDto {
+  detectedType: string;
+  detectedFamily: string;
+  label: string;
+  count: number;
+}
+
+/** 单条文件魔数与扩展名伪装检出条目 */
+export interface MagicMismatchItemDto {
+  entryKey: string;
+  offset: number;
+  inode: string;
+  path: string;
+  deleted: boolean;
+  size: number;
+  extension: string;
+  detectedType: string;
+  detectedFamily: string;
+  detectedLabel: string;
+  severity: 'high' | 'medium';
+  reason: string;
+  magicHex: string;
+}
+
+/** 全案魔数伪装检测汇总结果 */
+export interface ScanMagicMismatchesResponse {
+  scannedCount: number;
+  skippedCount: number;
+  mismatchCount: number;
+  elapsedMs: number;
+  cancelled: boolean;
+  typeCounts: MagicTypeCountDto[];
+  mismatches: MagicMismatchItemDto[];
+}
+
+/** 单文件魔数与前 16 字节文件头探测结果 */
+export interface InspectEntryMagicResponse {
+  detectedType: string | null;
+  detectedFamily: string | null;
+  detectedLabel: string | null;
+  extension: string;
+  mismatch: boolean;
+  severity: 'high' | 'medium' | 'none';
+  reason: string;
+  magicHex: string;
+}
+
+/** 跨模块“一键跳转定位原文件”统一请求载荷 */
+export interface LocateEntryRequest {
+  /** 单调递增请求序号，保证重复定位同一文件不同字节偏移时仍能触发响应 */
+  requestId?: number;
+  /** 可选直接条目标识（如内容搜索命中携带的 entryId） */
+  entryId?: string | null;
+  /** 分区起始扇区偏移 */
+  offset: number;
+  /** 文件 inode / 元数据地址 */
+  inode: string;
+  /** 镜像内路径 */
+  path: string;
+  /** 是否为已删除条目 */
+  deleted?: boolean;
+  /** 可选目标字节偏移（非空时自动切换至十六进制视图并跳页滚动） */
+  byteOffset?: number | null;
+  /** 可选精确高亮字节长度（与 byteOffset 配合使用） */
+  highlightLength?: number | null;
+}

@@ -1,10 +1,10 @@
 /**
- * 导出结果弹窗 (ExportResultDialog 1:1)：支持打开文件、打开所在文件夹及单文件导出后快捷记为取证发现
+ * 导出结果弹窗 (ExportResultDialog 1:1)：支持打开文件、打开所在目录、复制路径、SHA-256/大小展示及单文件导出后快捷记为取证发现
  */
 import React, { useState } from 'react';
 import { tauriApi } from '../../api/tauri';
 import type { EntryView } from '../../types/ipc';
-import { formatError } from '../../utils/assets';
+import { copyToClipboard, formatBytes, formatError } from '../../utils/assets';
 import { UiIcon } from '../Icons';
 import { Modal } from './Modal';
 
@@ -12,6 +12,12 @@ export interface ExportResultInfo {
   title: string;
   path: string;
   note?: string;
+  /** 可选输出文件 SHA-256 摘要（如 HTML 报告生成结果） */
+  sha256?: string;
+  /** 可选输出文件字节大小 */
+  bytes?: number;
+  /** 可选生成时间（UTC+8） */
+  generatedAt?: string;
   /** 单文件导出时附带原镜像条目，供弹窗快捷打开“记录取证发现” */
   entry?: EntryView;
 }
@@ -28,12 +34,17 @@ export const ExportResultDialog: React.FC<ExportResultDialogProps> = ({
   title,
   path,
   note,
+  sha256,
+  bytes,
+  generatedAt,
   entry,
   onRecordNote,
   noteIcon = 'note',
   onClose,
 }) => {
   const [openErr, setOpenErr] = useState<string | null>(null);
+  const [copiedPath, setCopiedPath] = useState(false);
+  const [copiedSha, setCopiedSha] = useState(false);
   const isPartial = title === '部分导出';
   const showRecordNote = Boolean(entry && onRecordNote);
 
@@ -49,18 +60,39 @@ export const ExportResultDialog: React.FC<ExportResultDialogProps> = ({
     }
   };
 
+  const handleCopyPath = async () => {
+    const ok = await copyToClipboard(path);
+    if (ok) {
+      setCopiedPath(true);
+      window.setTimeout(() => setCopiedPath(false), 1800);
+    }
+  };
+
+  const handleCopySha = async () => {
+    if (!sha256) return;
+    const ok = await copyToClipboard(sha256);
+    if (ok) {
+      setCopiedSha(true);
+      window.setTimeout(() => setCopiedSha(false), 1800);
+    }
+  };
+
   return (
     <Modal
       title={title}
-      width={showRecordNote ? 580 : 560}
+      width={showRecordNote || sha256 ? 620 : 560}
       onClose={onClose}
       footer={
         <>
+          <button type="button" className="td-btn" onClick={() => void handleCopyPath()}>
+            <UiIcon name={copiedPath ? 'check_circle' : 'copy'} size={13} color={copiedPath ? 'var(--ok-fg)' : 'var(--text-secondary)'} />
+            {copiedPath ? '已复制路径' : '复制路径'}
+          </button>
           <button type="button" className="td-btn" onClick={() => void handleOpen(false)}>
             打开文件
           </button>
           <button type="button" className="td-btn" onClick={() => void handleOpen(true)}>
-            打开文件所在文件夹
+            打开所在目录
           </button>
           <div className="td-modal-footer-spacer" />
           {entry && onRecordNote && (
@@ -101,10 +133,46 @@ export const ExportResultDialog: React.FC<ExportResultDialogProps> = ({
               color: 'var(--text-primary)',
               wordBreak: 'break-all',
               userSelect: 'text',
+              padding: '6px 9px',
+              background: 'var(--chrome-bg)',
+              border: '1px solid var(--border-subtle)',
+              borderRadius: 5,
             }}
           >
             {path}
           </div>
+          {(sha256 || bytes !== undefined || generatedAt) && (
+            <div className="td-export-meta-box">
+              {sha256 && (
+                <div className="td-export-meta-row">
+                  <span className="td-export-meta-key">SHA-256</span>
+                  <span className="td-export-meta-val td-mono">{sha256}</span>
+                  <button
+                    type="button"
+                    className="td-btn td-btn--compact"
+                    onClick={() => void handleCopySha()}
+                  >
+                    {copiedSha ? '已复制' : '复制'}
+                  </button>
+                </div>
+              )}
+              {bytes !== undefined && (
+                <div className="td-export-meta-row">
+                  <span className="td-export-meta-key">文件大小</span>
+                  <span className="td-export-meta-val td-mono">
+                    {formatBytes(bytes)} 字节
+                    {bytes >= 1024 ? `（${(bytes / 1024).toFixed(1)} KiB）` : ''}
+                  </span>
+                </div>
+              )}
+              {generatedAt && (
+                <div className="td-export-meta-row">
+                  <span className="td-export-meta-key">生成时间</span>
+                  <span className="td-export-meta-val td-mono">{generatedAt}</span>
+                </div>
+              )}
+            </div>
+          )}
           {note && (
             <div
               style={{

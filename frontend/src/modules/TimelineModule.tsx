@@ -11,7 +11,7 @@ import { UiIcon } from '../components/Icons';
 import { Pagination } from '../components/Pagination';
 import { SplitPane } from '../components/SplitPane';
 import { VirtualTable, type VirtualColumn } from '../components/VirtualTable';
-import type { CaseSnapshot, TimelineRowDto } from '../types/ipc';
+import type { CaseSnapshot, LocateEntryRequest, TimelineRowDto } from '../types/ipc';
 import { formatError } from '../utils/assets';
 
 const PAGE_SIZE = 100;
@@ -20,9 +20,11 @@ const LARGE_INVENTORY_THRESHOLD = 1000;
 interface TimelineModuleProps {
   snapshot: CaseSnapshot | null;
   busy: boolean;
+  /** 跨模块一键跳转定位原文件回调 */
+  onLocateEntry?: (req: LocateEntryRequest) => void;
 }
 
-const TimelineModuleInner: React.FC<TimelineModuleProps> = ({ snapshot, busy }) => {
+const TimelineModuleInner: React.FC<TimelineModuleProps> = ({ snapshot, busy, onLocateEntry }) => {
   const [built, setBuilt] = useState(false);
   const [building, setBuilding] = useState(false);
   const [hint, setHint] = useState('尚未打开案件');
@@ -203,6 +205,26 @@ const TimelineModuleInner: React.FC<TimelineModuleProps> = ({ snapshot, busy }) 
           </button>
         )}
 
+        {selectedRow && onLocateEntry && (
+          <button
+            type="button"
+            className="td-btn td-btn--soft td-btn--compact"
+            disabled={busy}
+            title="跳转到「文件浏览」定位当前选中时间线事件对应的原文件"
+            onClick={() =>
+              onLocateEntry({
+                offset: selectedRow.offset,
+                inode: selectedRow.inode,
+                path: selectedRow.path,
+                deleted: selectedRow.status.includes('已删除'),
+              })
+            }
+          >
+            <UiIcon name="locate" size={12} color="var(--accent-soft-text)" />
+            定位原文件
+          </button>
+        )}
+
         <Pagination
           page={page}
           totalPages={totalPages}
@@ -289,6 +311,27 @@ const TimelineModuleInner: React.FC<TimelineModuleProps> = ({ snapshot, busy }) 
             <DossierView
               title={selectedRow.path}
               subtitle="文件系统时间 · UTC+8"
+              headerActions={
+                onLocateEntry ? (
+                  <button
+                    type="button"
+                    className="td-btn td-btn--soft td-btn--compact"
+                    disabled={busy}
+                    title="跳转到「文件浏览」定位此时间线事件对应的原文件"
+                    onClick={() =>
+                      onLocateEntry({
+                        offset: selectedRow.offset,
+                        inode: selectedRow.inode,
+                        path: selectedRow.path,
+                        deleted: selectedRow.status.includes('已删除'),
+                      })
+                    }
+                  >
+                    <UiIcon name="locate" size={12} color="var(--accent-soft-text)" />
+                    定位原文件
+                  </button>
+                ) : undefined
+              }
               sections={[
                 {
                   title: '事件详情',

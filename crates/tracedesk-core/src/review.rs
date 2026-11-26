@@ -1,8 +1,9 @@
 //! 可核验复核包构建器（`reports/report_<12hex>.zip` + `.zip.sha256`）
-//! 与原生 Rust 复核包校验器（`verify_bundle`），与 `scripts/verify_bundle.py`
-//! 保持 100% 兼容（对应 `core-contract.md` §2.5）。
+//! 与原生 Rust 复核包校验器（`verify_bundle` / `verify_bundle_detailed`），
+//! 与内嵌 `verify_bundle.py` 保持 100% 兼容（对应 `core-contract.md` §2.5）。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -17,7 +18,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 use crate::case::{Case, ExportRecord, GENESIS_HASH};
 use crate::coverage::source_status;
 use crate::error::{CoreError, CoreResult};
-use crate::findings::operation_title;
+use crate::findings::{AuditRecord, operation_title};
 use crate::formatting::{canonical_json_value, format_commas, hex_lower, sha256_hex};
 use crate::paths::{is_within, resolve_clean, strip_verbatim_prefix};
 
@@ -83,6 +84,161 @@ pub struct BuildBundleResult {
     pub included_searches: usize,
     pub omitted_searches: usize,
     pub missing_searches: usize,
+}
+
+/// 复核包单个成员的核验明细（供桌面端可视化核验面板展示）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundleMemberCheck {
+    /// ZIP 内成员路径（如 `report.md`、`report.html`、`exports/1/CASE.TXT`）。
+    pub path: String,
+    /// 成员类别：`report` / `export` / `search` / `audit` / `manifest` / `script` / `doc` / `other`。
+    pub category: String,
+    /// 校验状态：`ok` / `mismatch` / `missing` / `extra`。
+    pub status: String,
+    /// `SHA256SUMS.json` 中记录的期望 SHA-256（多余成员时为 `None`）。
+    pub expected_sha256: Option<String>,
+    /// 实际解压计算得到的 SHA-256（缺失或不可读时为 `None`）。
+    pub actual_sha256: Option<String>,
+    /// 实际解压字节数（缺失或不可读时为 `None`）。
+    pub size: Option<u64>,
+    /// 面向用户的中文校验说明。
+    pub message: String,
+}
+
+/// 复核包跨文件审计链交叉核对单项结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundleCrossCheck {
+    /// 交叉校验项名称。
+    pub name: String,
+    /// 校验状态：`ok` / `mismatch` / `skipped`。
+    pub status: String,
+    /// 面向用户的中文校验说明。
+    pub message: String,
+}
+
+/// 面向桌面端可视化核验面板的完整复核包校验结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundleVerificationDetail {
+    /// 整体验签是否通过（所有外部摘要、成员摘要、审计链、清单与交叉校验均无错误）。
+    pub ok: bool,
+    /// 被核验的复核包路径。
+    pub bundle_path: String,
+    /// 复核包 ZIP 整体 SHA-256。
+    pub bundle_sha256: String,
+    /// 参与比对的期望外部 SHA-256（手动输入或自动读取伴随 `.sha256` 文件）。
+    pub expected_sha256: Option<String>,
+    /// 期望外部 SHA-256 来源：`"manual"` / `"sidecar"` / `"none"`。
+    pub sha256_source: String,
+    /// 外部 SHA-256 比对是否一致（当 `sha256_source == "none"` 时为 `None`）。
+    pub sha256_matched: Option<bool>,
+    /// `audit.jsonl` 哈希链及 `audit.head` 尾部锚点是否全部通过。
+    pub audit_valid: bool,
+    /// `audit.jsonl` 解析到的记录总数。
+    pub audit_count: usize,
+    /// `audit.jsonl` 计算得到的最终链尾哈希。
+    pub audit_head: String,
+    /// 审计链失败时的精确错误说明（正常时为 `None`）。
+    pub audit_error: Option<String>,
+    /// `manifest.json` 结构、链尾锚点及导出/发现一致性校验是否通过。
+    pub manifest_valid: bool,
+    /// 复核包内各成员的逐项哈希与结构核验明细。
+    pub members: Vec<BundleMemberCheck>,
+    /// 跨文件审计链交叉核对明细。
+    pub cross_checks: Vec<BundleCrossCheck>,
+    /// 汇总后的全部错误列表（`ok == true` 时为空）。
+    pub errors: Vec<String>,
+}
+
+/// 打包时检测到的可选离线 HTML 报告信息。
+struct HtmlReportBundleCandidate {
+    path: PathBuf,
+    expected_sha256: Option<String>,
+}
+
+/// 判断 `REPORT_GENERATE` 审计记录是否对应 HTML 格式报告。
+fn is_html_report_audit_record(subject: &str, details: &Map<String, Value>) -> bool {
+    if let Some(fmt) = details.get("format").and_then(Value::as_str)
+        && fmt.trim().eq_ignore_ascii_case("html")
+    {
+        return true;
+    }
+    subject.trim().to_ascii_lowercase().ends_with(".html")
+}
+
+/// 在 `<case_dir>/reports/` 下定位最新生成的 HTML 报告（`report_*.html`）。
+///
+/// 优先匹配审计链中最新一条成功的 HTML `REPORT_GENERATE` 记录（附带审计摘要供强校验）；
+/// 若无审计记录（例如手工放置的历史报告），则回退扫描 `reports/report_*.html`。
+fn find_latest_html_report(
+    case: &Case,
+    records: &[AuditRecord],
+) -> CoreResult<Option<HtmlReportBundleCandidate>> {
+    let reports_root = resolve_clean(&case.folder().join("reports"));
+
+    for rec in records.iter().rev() {
+        if rec.action != "REPORT_GENERATE" || rec.result != "成功" {
+            continue;
+        }
+        if !is_html_report_audit_record(&rec.subject, &rec.details) {
+            continue;
+        }
+        let Some(file_name) = Path::new(&rec.subject).file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let lower = file_name.to_ascii_lowercase();
+        if !lower.starts_with("report_") || !lower.ends_with(".html") {
+            continue;
+        }
+        let candidate = resolve_clean(&reports_root.join(file_name));
+        if is_within(&candidate, &reports_root) && candidate.is_file() {
+            let expected_sha256 = rec
+                .details
+                .get("sha256")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_ascii_lowercase());
+            return Ok(Some(HtmlReportBundleCandidate {
+                path: candidate,
+                expected_sha256,
+            }));
+        }
+    }
+
+    // 回退扫描 `reports/` 下的 `report_*.html`，按修改时间降序、文件名降序取最新文件。
+    let Ok(read_dir) = fs::read_dir(&reports_root) else {
+        return Ok(None);
+    };
+    let mut candidates: Vec<(std::time::SystemTime, String, PathBuf)> = Vec::new();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let lower = name.to_ascii_lowercase();
+        if !lower.starts_with("report_") || !lower.ends_with(".html") {
+            continue;
+        }
+        let resolved = resolve_clean(&path);
+        if !is_within(&resolved, &reports_root) {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        candidates.push((modified, name.to_string(), resolved));
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    Ok(candidates.into_iter().next().map(|(_, _, path)| {
+        HtmlReportBundleCandidate {
+            path,
+            expected_sha256: None,
+        }
+    }))
 }
 
 /// 解析导出记录在 `<case_dir>/exports/` 下的本地文件路径，即使案件目录曾被整体移动仍可定位。
@@ -250,6 +406,9 @@ pub fn format_missing_materials(
 
 /// 构建可核验 ZIP64 复核包（`reports/report_<12hex>.zip`）及配套 `.zip.sha256` 摘要文件，
 /// 并追加 `REVIEW_EXPORT` 审计记录（对应 `core-contract.md` §2.5）。
+///
+/// 若案件 `reports/` 下存在最新生成的 HTML 取证报告（`report_*.html`），
+/// 将一并打包为 `report.html` 并纳入 `SHA256SUMS.json` 与 `manifest.json` 保护。
 pub fn build_bundle(
     case: &mut Case,
     options: &BuildBundleOptions,
@@ -342,10 +501,11 @@ pub fn build_bundle(
                 && r.subject == report_path_str.as_ref()
         })
         .or_else(|| {
-            records
-                .iter()
-                .rev()
-                .find(|r| r.action == "REPORT_GENERATE" && r.result == "成功")
+            records.iter().rev().find(|r| {
+                r.action == "REPORT_GENERATE"
+                    && r.result == "成功"
+                    && !is_html_report_audit_record(&r.subject, &r.details)
+            })
         })
         .ok_or_else(|| CoreError::Other("无法获取最新报告的审计摘要".to_string()))?;
     let report_sha256 = report_record
@@ -358,6 +518,9 @@ pub fn build_bundle(
         .last()
         .map(|r| r.hash.clone())
         .ok_or_else(|| CoreError::Other("审计链为空".to_string()))?;
+
+    // 检查是否存在最新离线 HTML 报告（存在则一并打包，不存在时保持完全向后兼容）。
+    let html_candidate = find_latest_html_report(case, &records)?;
 
     let discovered;
     let tool = match tsk {
@@ -382,6 +545,7 @@ pub fn build_bundle(
     let mut omitted_searches_manifest: Vec<Value> = Vec::new();
     let mut missing_exports_count = 0usize;
     let mut missing_searches_count = 0usize;
+    let mut bundled_html_meta: Option<(String, u64)> = None;
 
     let write_outcome = (|| -> CoreResult<()> {
         let temp_file = OpenOptions::new()
@@ -403,16 +567,17 @@ pub fn build_bundle(
             Ok(())
         };
 
-        let copy_verified = |archive: &mut ZipWriter<BufWriter<File>>,
-                             checksums: &mut BTreeMap<String, String>,
-                             buf: &mut [u8],
-                             src_path: &Path,
-                             member_name: &str,
-                             expected_sha256: &str|
-         -> CoreResult<()> {
+        let copy_streaming = |archive: &mut ZipWriter<BufWriter<File>>,
+                              checksums: &mut BTreeMap<String, String>,
+                              buf: &mut [u8],
+                              src_path: &Path,
+                              member_name: &str,
+                              expected_sha256: Option<&str>|
+         -> CoreResult<(String, u64)> {
             let mut source = File::open(src_path)?;
             archive.start_file(member_name, zip_options)?;
             let mut hasher = Sha256::new();
+            let mut total = 0u64;
             loop {
                 let n = source.read(buf)?;
                 if n == 0 {
@@ -420,9 +585,12 @@ pub fn build_bundle(
                 }
                 archive.write_all(&buf[..n])?;
                 hasher.update(&buf[..n]);
+                total = total.saturating_add(n as u64);
             }
             let actual = hex_lower(&hasher.finalize());
-            if actual != expected_sha256 {
+            if let Some(expected) = expected_sha256
+                && actual != expected
+            {
                 let fname = src_path
                     .file_name()
                     .map(|s| s.to_string_lossy().into_owned())
@@ -431,19 +599,32 @@ pub fn build_bundle(
                     "材料摘要不一致：{fname}"
                 )));
             }
-            checksums.insert(member_name.to_string(), expected_sha256.to_string());
-            Ok(())
+            checksums.insert(member_name.to_string(), actual.clone());
+            Ok((actual, total))
         };
 
         // 1. report.md
-        copy_verified(
+        copy_streaming(
             &mut archive,
             &mut checksums,
             &mut copy_buf,
             &report_path,
             "report.md",
-            &report_sha256,
+            Some(&report_sha256),
         )?;
+
+        // 1b. 可选 report.html（若存在最新离线 HTML 报告则一并打包并纳入哈希保护）
+        if let Some(ref html_cand) = html_candidate {
+            let (html_sha, html_len) = copy_streaming(
+                &mut archive,
+                &mut checksums,
+                &mut copy_buf,
+                &html_cand.path,
+                "report.html",
+                html_cand.expected_sha256.as_deref(),
+            )?;
+            bundled_html_meta = Some((html_sha, html_len));
+        }
 
         // 2. exports/<index>/<filename>
         for row in &export_rows {
@@ -481,13 +662,13 @@ pub fn build_bundle(
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let member = format!("exports/{}/{fname}", row.index);
-            copy_verified(
+            copy_streaming(
                 &mut archive,
                 &mut checksums,
                 &mut copy_buf,
                 &row.path,
                 &member,
-                &row.item.sha256,
+                Some(&row.item.sha256),
             )?;
             let mut val = serde_json::to_value(&row.item)?;
             if let Some(m) = val.as_object_mut() {
@@ -536,13 +717,13 @@ pub fn build_bundle(
                 continue;
             }
             let member = format!("searches/{}", row.name);
-            copy_verified(
+            copy_streaming(
                 &mut archive,
                 &mut checksums,
                 &mut copy_buf,
                 &row.path,
                 &member,
-                &row.sha256,
+                Some(&row.sha256),
             )?;
             included_searches += 1;
         }
@@ -566,7 +747,7 @@ pub fn build_bundle(
             EMBEDDED_VERIFY_BUNDLE_PY,
         )?;
 
-        // 7. manifest.json
+        // 7. manifest.json（保持 format_version=1 向后兼容；仅在存在 HTML 报告时附加 html_report 字段）
         let data = case.data();
         let evidence = data
             .evidence
@@ -578,7 +759,7 @@ pub fn build_bundle(
             .cloned()
             .collect();
 
-        let manifest = serde_json::json!({
+        let mut manifest = serde_json::json!({
             "format_version": 1,
             "case_id": data.id,
             "number": data.number,
@@ -595,6 +776,18 @@ pub fn build_bundle(
             "findings": findings,
             "audit_head": audit_head,
         });
+        if let Some((ref html_sha, html_len)) = bundled_html_meta
+            && let Some(obj) = manifest.as_object_mut()
+        {
+            obj.insert(
+                "html_report".to_string(),
+                serde_json::json!({
+                    "member": "report.html",
+                    "sha256": html_sha,
+                    "size": html_len,
+                }),
+            );
+        }
         let manifest_json = serde_json::to_string_pretty(&manifest)?;
         put_bytes(
             &mut archive,
@@ -683,6 +876,9 @@ pub fn build_bundle(
         "missing_searches".to_string(),
         Value::from(missing_searches_count as u64),
     );
+    if bundled_html_meta.is_some() {
+        log_details.insert("included_html_report".to_string(), Value::Bool(true));
+    }
     case.log("REVIEW_EXPORT", &target_name, "成功", log_details)?;
 
     Ok(BuildBundleResult {
@@ -712,8 +908,820 @@ fn sha256_and_len_with_buf<R: Read>(mut reader: R, buf: &mut [u8]) -> CoreResult
     Ok((hex_lower(&hasher.finalize()), total))
 }
 
+fn is_hex64(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// 构造伴随摘要文件路径（`<bundle_path>.sha256`）并尝试解析其中的 64 位十六进制 SHA-256。
+pub fn read_sidecar_sha256(bundle_path: &Path) -> Option<String> {
+    let mut os: OsString = bundle_path.as_os_str().to_os_string();
+    os.push(".sha256");
+    let sidecar = PathBuf::from(os);
+    if !sidecar.is_file() {
+        return None;
+    }
+    let raw = fs::read_to_string(&sidecar).ok()?;
+    let trimmed = raw.trim_start_matches('\u{feff}').trim();
+    let token = trimmed.split_whitespace().next()?;
+    if is_hex64(token) {
+        Some(token.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn classify_member(path: &str) -> &'static str {
+    if path == "report.md" || path == "report.html" {
+        "report"
+    } else if path.starts_with("exports/") {
+        "export"
+    } else if path.starts_with("searches/") {
+        "search"
+    } else if path == "audit.jsonl" || path == "audit.head" {
+        "audit"
+    } else if path == "manifest.json" || path == "SHA256SUMS.json" {
+        "manifest"
+    } else if path == "verify_bundle.py" {
+        "script"
+    } else if path == "复核说明.txt" {
+        "doc"
+    } else {
+        "other"
+    }
+}
+
+/// 从已验链的审计记录中提取跨文件交叉校验所需的摘要索引。
+struct AuditCrossIndex {
+    last_md_report_sha: Option<String>,
+    last_html_report_sha: Option<String>,
+    search_digests: HashMap<String, String>,
+    search_subjects: HashSet<String>,
+    findings: Vec<Value>,
+}
+
+fn build_audit_cross_index(records: &[Value]) -> AuditCrossIndex {
+    let mut last_md_report_sha = None;
+    let mut last_html_report_sha = None;
+    let mut search_digests = HashMap::new();
+    let mut search_subjects = HashSet::new();
+    let mut findings = Vec::new();
+
+    for rec in records {
+        let action = rec.get("action").and_then(Value::as_str).unwrap_or("");
+        let result = rec.get("result").and_then(Value::as_str).unwrap_or("");
+        let subject = rec.get("subject").and_then(Value::as_str).unwrap_or("");
+        let details = rec.get("details").and_then(Value::as_object);
+        let sha = details
+            .and_then(|d| d.get("sha256"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        if action == "REPORT_GENERATE" && result == "成功" {
+            if let Some(digest) = sha {
+                let is_html = details
+                    .map(|d| is_html_report_audit_record(subject, d))
+                    .unwrap_or_else(|| subject.to_ascii_lowercase().ends_with(".html"));
+                if is_html {
+                    last_html_report_sha = Some(digest.to_ascii_lowercase());
+                } else {
+                    last_md_report_sha = Some(digest.to_ascii_lowercase());
+                }
+            }
+        } else if action == "CONTENT_SEARCH" && !subject.is_empty() {
+            search_subjects.insert(subject.to_string());
+            if let Some(digest) = sha {
+                search_digests.insert(subject.to_string(), digest.to_ascii_lowercase());
+            }
+        } else if operation_title(action).is_some() {
+            findings.push(rec.clone());
+        }
+    }
+
+    AuditCrossIndex {
+        last_md_report_sha,
+        last_html_report_sha,
+        search_digests,
+        search_subjects,
+        findings,
+    }
+}
+
+/// 面向桌面端可视化核验面板的独立复核包全量核验入口。
+///
+/// - 若 `expected_sha256` 为 `None` 或空串，将自动探测并读取伴随 `<bundle_path>.sha256` 中的 64 位摘要；
+/// - 即使检测到成员篡改、审计断链或交叉不一致，仍尽可能完成其余核验步骤并返回完整定位明细（`ok == false`）；
+/// - 仅在复核包文件不存在或无法打开时返回 `Err(...)`。
+pub fn verify_bundle_detailed(
+    bundle_path: &Path,
+    expected_sha256: Option<&str>,
+) -> CoreResult<BundleVerificationDetail> {
+    if !bundle_path.is_file() {
+        return Err(CoreError::NotFound(format!(
+            "复核包文件不存在：{}",
+            bundle_path.display()
+        )));
+    }
+
+    let mut io_buf = vec![0u8; 1024 * 1024];
+    let (bundle_sha256, _) = sha256_and_len_with_buf(File::open(bundle_path)?, &mut io_buf)?;
+
+    let (resolved_expected, sha256_source) = match expected_sha256.map(str::trim).filter(|s| !s.is_empty())
+    {
+        Some(manual) => (Some(manual.to_ascii_lowercase()), "manual".to_string()),
+        None => match read_sidecar_sha256(bundle_path) {
+            Some(sidecar) => (Some(sidecar), "sidecar".to_string()),
+            None => (None, "none".to_string()),
+        },
+    };
+
+    let mut errors: Vec<String> = Vec::new();
+    let sha256_matched = match resolved_expected.as_deref() {
+        Some(exp) => {
+            let matched = bundle_sha256 == exp;
+            if !matched {
+                errors.push("复核包外部 SHA-256 不匹配".to_string());
+            }
+            Some(matched)
+        }
+        None => None,
+    };
+
+    let mut detail = BundleVerificationDetail {
+        ok: false,
+        bundle_path: strip_verbatim_prefix(bundle_path)
+            .to_string_lossy()
+            .into_owned(),
+        bundle_sha256,
+        expected_sha256: resolved_expected,
+        sha256_source,
+        sha256_matched,
+        audit_valid: false,
+        audit_count: 0,
+        audit_head: String::new(),
+        audit_error: None,
+        manifest_valid: false,
+        members: Vec::new(),
+        cross_checks: Vec::new(),
+        errors,
+    };
+
+    let file = File::open(bundle_path)?;
+    let mut archive = match ZipArchive::new(BufReader::with_capacity(256 * 1024, file)) {
+        Ok(zip) => zip,
+        Err(err) => {
+            detail.errors.push(format!("无法解析 ZIP 复核包结构：{err}"));
+            return Ok(detail);
+        }
+    };
+
+    // 1. 枚举全部 ZIP 成员并检测重复项。
+    let mut name_counts: HashMap<String, usize> = HashMap::with_capacity(archive.len());
+    let mut duplicate_names: HashSet<String> = HashSet::new();
+    for i in 0..archive.len() {
+        match archive.by_index(i) {
+            Ok(entry) => {
+                let name = entry.name().to_string();
+                let count = name_counts.entry(name.clone()).or_insert(0);
+                *count += 1;
+                if *count > 1 {
+                    duplicate_names.insert(name);
+                }
+            }
+            Err(err) => {
+                detail.errors.push(format!("读取 ZIP 成员索引 #{i} 失败：{err}"));
+            }
+        }
+    }
+    if !duplicate_names.is_empty() {
+        let mut dup_list: Vec<String> = duplicate_names.iter().cloned().collect();
+        dup_list.sort();
+        detail.errors.push(format!(
+            "成员重复或与清单不一致（重复成员：{}）",
+            dup_list.join(", ")
+        ));
+    }
+
+    // 2. 读取并解析 SHA256SUMS.json。
+    let checks: Option<BTreeMap<String, String>> = match archive.by_name("SHA256SUMS.json") {
+        Ok(mut entry) => {
+            let mut raw = String::new();
+            match entry.read_to_string(&mut raw) {
+                Ok(_) => match serde_json::from_str::<BTreeMap<String, String>>(&raw) {
+                    Ok(map) => Some(map),
+                    Err(err) => {
+                        detail
+                            .errors
+                            .push(format!("SHA256SUMS.json 解析失败：{err}"));
+                        None
+                    }
+                },
+                Err(err) => {
+                    detail
+                        .errors
+                        .push(format!("读取 SHA256SUMS.json 失败：{err}"));
+                    None
+                }
+            }
+        }
+        Err(_) => {
+            detail.errors.push("复核包缺少 SHA256SUMS.json".to_string());
+            None
+        }
+    };
+
+    // 3. 逐项核对清单内成员与多余/缺失成员，记录实际哈希与解压大小供后续交叉校验复用。
+    let mut actual_hashes: HashMap<String, String> = HashMap::new();
+    let mut actual_sizes: HashMap<String, u64> = HashMap::new();
+
+    if let Some(ref checks_map) = checks {
+        for (member_name, expected_digest) in checks_map {
+            let category = classify_member(member_name).to_string();
+            if !name_counts.contains_key(member_name) {
+                detail.errors.push(format!("成员缺失：{member_name}"));
+                detail.members.push(BundleMemberCheck {
+                    path: member_name.clone(),
+                    category,
+                    status: "missing".to_string(),
+                    expected_sha256: Some(expected_digest.clone()),
+                    actual_sha256: None,
+                    size: None,
+                    message: "SHA256SUMS.json 中登记的成员在复核包中缺失".to_string(),
+                });
+                continue;
+            }
+            match archive.by_name(member_name) {
+                Ok(entry) => {
+                    let header_size = entry.size();
+                    match sha256_and_len_with_buf(entry, &mut io_buf) {
+                        Ok((actual_sha, actual_len)) => {
+                            actual_hashes.insert(member_name.clone(), actual_sha.clone());
+                            actual_sizes.insert(member_name.clone(), actual_len);
+                            let hash_ok = actual_sha == *expected_digest;
+                            let size_ok = actual_len == header_size;
+                            let dup = duplicate_names.contains(member_name);
+                            if hash_ok && size_ok && !dup {
+                                detail.members.push(BundleMemberCheck {
+                                    path: member_name.clone(),
+                                    category,
+                                    status: "ok".to_string(),
+                                    expected_sha256: Some(expected_digest.clone()),
+                                    actual_sha256: Some(actual_sha),
+                                    size: Some(actual_len),
+                                    message: "成员 SHA-256 与解压长度均一致".to_string(),
+                                });
+                            } else {
+                                let msg = if !hash_ok {
+                                    format!("成员摘要不匹配：{member_name}")
+                                } else if !size_ok {
+                                    format!("成员解压长度与 ZIP 头声明不一致：{member_name}")
+                                } else {
+                                    format!("ZIP 中存在重复同名成员：{member_name}")
+                                };
+                                detail.errors.push(msg.clone());
+                                detail.members.push(BundleMemberCheck {
+                                    path: member_name.clone(),
+                                    category,
+                                    status: "mismatch".to_string(),
+                                    expected_sha256: Some(expected_digest.clone()),
+                                    actual_sha256: Some(actual_sha),
+                                    size: Some(actual_len),
+                                    message: msg,
+                                });
+                            }
+                        }
+                        Err(err) => {
+                            let msg = format!("读取成员失败（{member_name}）：{err}");
+                            detail.errors.push(msg.clone());
+                            detail.members.push(BundleMemberCheck {
+                                path: member_name.clone(),
+                                category,
+                                status: "mismatch".to_string(),
+                                expected_sha256: Some(expected_digest.clone()),
+                                actual_sha256: None,
+                                size: None,
+                                message: msg,
+                            });
+                        }
+                    }
+                }
+                Err(err) => {
+                    let msg = format!("打开成员失败（{member_name}）：{err}");
+                    detail.errors.push(msg.clone());
+                    detail.members.push(BundleMemberCheck {
+                        path: member_name.clone(),
+                        category,
+                        status: "missing".to_string(),
+                        expected_sha256: Some(expected_digest.clone()),
+                        actual_sha256: None,
+                        size: None,
+                        message: msg,
+                    });
+                }
+            }
+        }
+
+        // 检测未在 SHA256SUMS.json 中登记的多余成员（排除 SHA256SUMS.json 本身）。
+        let mut extra_names: Vec<String> = name_counts
+            .keys()
+            .filter(|name| name.as_str() != "SHA256SUMS.json" && !checks_map.contains_key(*name))
+            .cloned()
+            .collect();
+        extra_names.sort();
+        for extra in extra_names {
+            let (actual_sha, actual_len) = archive
+                .by_name(&extra)
+                .ok()
+                .and_then(|entry| sha256_and_len_with_buf(entry, &mut io_buf).ok())
+                .map(|(h, l)| (Some(h), Some(l)))
+                .unwrap_or((None, None));
+            let msg = format!("成员重复或与清单不一致（未登记多余成员：{extra}）");
+            detail.errors.push(msg.clone());
+            detail.members.push(BundleMemberCheck {
+                path: extra.clone(),
+                category: classify_member(&extra).to_string(),
+                status: "extra".to_string(),
+                expected_sha256: None,
+                actual_sha256: actual_sha,
+                size: actual_len,
+                message: "该成员未登记在 SHA256SUMS.json 中".to_string(),
+            });
+        }
+    }
+    detail.members.sort_by(|a, b| a.path.cmp(&b.path));
+
+    // 4. 校验 `audit.jsonl` 完整 SHA-256 哈希链并收集记录用于跨文件交叉核对。
+    let mut parsed_audit_records: Vec<Value> = Vec::new();
+    let mut chain_ok = true;
+    let mut computed_head = GENESIS_HASH.to_string();
+    match archive.by_name("audit.jsonl") {
+        Ok(entry) => {
+            let reader = BufReader::new(entry);
+            for (idx, line_res) in reader.lines().enumerate() {
+                let seq_expected = (idx + 1) as u64;
+                detail.audit_count = idx + 1;
+                let line = match line_res {
+                    Ok(l) => l,
+                    Err(err) => {
+                        chain_ok = false;
+                        let msg = format!("读取 audit.jsonl 第 {seq_expected} 行失败：{err}");
+                        detail.audit_error = Some(msg.clone());
+                        detail.errors.push(msg);
+                        break;
+                    }
+                };
+                let mut obj: Map<String, Value> = match serde_json::from_str(&line) {
+                    Ok(o) => o,
+                    Err(_) => {
+                        chain_ok = false;
+                        let msg = format!("审计链不一致：{seq_expected}");
+                        detail.audit_error = Some(msg.clone());
+                        detail.errors.push(msg);
+                        break;
+                    }
+                };
+                let Some(Value::String(recorded)) = obj.remove("hash") else {
+                    chain_ok = false;
+                    let msg = format!("审计链不一致：{seq_expected}");
+                    detail.audit_error = Some(msg.clone());
+                    detail.errors.push(msg);
+                    break;
+                };
+                let seq_ok = obj.get("seq").and_then(Value::as_u64) == Some(seq_expected);
+                let prev_ok =
+                    obj.get("previous").and_then(Value::as_str) == Some(computed_head.as_str());
+                let canonical = match canonical_json_value(&Value::Object(obj.clone())) {
+                    Ok(c) => c,
+                    Err(err) => {
+                        chain_ok = false;
+                        let msg = format!("审计链规范化失败（#{seq_expected}）：{err}");
+                        detail.audit_error = Some(msg.clone());
+                        detail.errors.push(msg);
+                        break;
+                    }
+                };
+                let computed = sha256_hex(canonical.as_bytes());
+                if !seq_ok || !prev_ok || computed != recorded {
+                    chain_ok = false;
+                    let msg = format!("审计链不一致：{seq_expected}");
+                    detail.audit_error = Some(msg.clone());
+                    detail.errors.push(msg);
+                    break;
+                }
+                obj.insert("hash".to_string(), Value::String(recorded.clone()));
+                parsed_audit_records.push(Value::Object(obj));
+                computed_head = recorded;
+            }
+        }
+        Err(_) => {
+            chain_ok = false;
+            let msg = "复核包缺少 audit.jsonl".to_string();
+            detail.audit_error = Some(msg.clone());
+            detail.errors.push(msg);
+        }
+    }
+    detail.audit_head = computed_head.clone();
+
+    // 5. 严格校验 `audit.head`（不去除空白）与 `manifest.json`。
+    let audit_head_raw = match archive.by_name("audit.head") {
+        Ok(mut entry) => {
+            let mut s = String::new();
+            match entry.read_to_string(&mut s) {
+                Ok(_) => Some(s),
+                Err(err) => {
+                    chain_ok = false;
+                    let msg = format!("读取 audit.head 失败：{err}");
+                    detail.audit_error.get_or_insert_with(|| msg.clone());
+                    detail.errors.push(msg);
+                    None
+                }
+            }
+        }
+        Err(_) => {
+            chain_ok = false;
+            let msg = "复核包缺少 audit.head".to_string();
+            detail.audit_error.get_or_insert_with(|| msg.clone());
+            detail.errors.push(msg);
+            None
+        }
+    };
+
+    let manifest_val: Option<Value> = match archive.by_name("manifest.json") {
+        Ok(mut entry) => {
+            let mut s = String::new();
+            match entry.read_to_string(&mut s) {
+                Ok(_) => match serde_json::from_str::<Value>(&s) {
+                    Ok(v) => Some(v),
+                    Err(err) => {
+                        detail.errors.push(format!("manifest.json 解析失败：{err}"));
+                        None
+                    }
+                },
+                Err(err) => {
+                    detail.errors.push(format!("读取 manifest.json 失败：{err}"));
+                    None
+                }
+            }
+        }
+        Err(_) => {
+            detail.errors.push("复核包缺少 manifest.json".to_string());
+            None
+        }
+    };
+
+    let mut manifest_ok = manifest_val.is_some();
+    if let Some(ref head_raw) = audit_head_raw
+        && chain_ok
+        && head_raw != &computed_head
+    {
+        chain_ok = false;
+        let msg = "审计链尾不匹配".to_string();
+        detail.audit_error.get_or_insert_with(|| msg.clone());
+        detail.errors.push(msg);
+    }
+    if let Some(ref manifest) = manifest_val {
+        let manifest_head = manifest
+            .get("audit_head")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if chain_ok && manifest_head != computed_head {
+            chain_ok = false;
+            manifest_ok = false;
+            let msg = "审计链尾不匹配".to_string();
+            detail.audit_error.get_or_insert_with(|| msg.clone());
+            detail.errors.push(msg);
+        }
+    }
+    detail.audit_valid = chain_ok;
+
+    // 6. 跨文件审计链交叉核对。
+    let cross_idx = build_audit_cross_index(&parsed_audit_records);
+
+    // 6a. `manifest.exports` 与 ZIP 内 `exports/*` 成员一致性核对
+    if let Some(ref manifest) = manifest_val {
+        match manifest.get("exports").and_then(Value::as_array) {
+            Some(exports) => {
+                let mut export_errors = Vec::new();
+                let mut manifest_export_members = HashSet::new();
+                for item in exports {
+                    let Some(member) = item.get("member").and_then(Value::as_str) else {
+                        export_errors.push("导出记录缺少 member 字段".to_string());
+                        continue;
+                    };
+                    manifest_export_members.insert(member.to_string());
+                    let expected_sha = item.get("sha256").and_then(Value::as_str).unwrap_or("");
+                    let expected_size = item.get("size").and_then(Value::as_u64).unwrap_or(u64::MAX);
+                    let actual_sha = actual_hashes.get(member).map(String::as_str);
+                    let zip_size = actual_sizes.get(member).copied();
+                    if actual_sha != Some(expected_sha) || zip_size != Some(expected_size) {
+                        export_errors.push(format!("导出记录不匹配：{member}"));
+                    }
+                }
+                for member in actual_hashes.keys() {
+                    if member.starts_with("exports/") && !manifest_export_members.contains(member) {
+                        export_errors.push(format!("导出成员未在 manifest.json 中登记：{member}"));
+                    }
+                }
+                if export_errors.is_empty() {
+                    detail.cross_checks.push(BundleCrossCheck {
+                        name: "导出副本清单核对".to_string(),
+                        status: "ok".to_string(),
+                        message: format!(
+                            "已核对 {} 个导出副本成员的 SHA-256 与字节长度，全部一致",
+                            exports.len()
+                        ),
+                    });
+                } else {
+                    manifest_ok = false;
+                    let summary = export_errors.join("；");
+                    for e in export_errors {
+                        detail.errors.push(e);
+                    }
+                    detail.cross_checks.push(BundleCrossCheck {
+                        name: "导出副本清单核对".to_string(),
+                        status: "mismatch".to_string(),
+                        message: summary,
+                    });
+                }
+            }
+            None => {
+                manifest_ok = false;
+                let msg = "manifest.json 缺少 exports 列表".to_string();
+                detail.errors.push(msg.clone());
+                detail.cross_checks.push(BundleCrossCheck {
+                    name: "导出副本清单核对".to_string(),
+                    status: "mismatch".to_string(),
+                    message: msg,
+                });
+            }
+        }
+    }
+
+    // 6b. `report.md` 与 `audit.jsonl` 中 Markdown `REPORT_GENERATE` 交叉核对
+    match actual_hashes.get("report.md") {
+        Some(actual_md_sha) => match cross_idx.last_md_report_sha.as_deref() {
+            Some(expected_md_sha) if actual_md_sha == expected_md_sha => {
+                detail.cross_checks.push(BundleCrossCheck {
+                    name: "Markdown 报告审计摘要核对".to_string(),
+                    status: "ok".to_string(),
+                    message: "report.md 摘要与审计链最新 REPORT_GENERATE 记录一致".to_string(),
+                });
+            }
+            Some(_) => {
+                let msg = "报告摘要不匹配：report.md 与审计链记录不一致".to_string();
+                detail.errors.push(msg.clone());
+                detail.cross_checks.push(BundleCrossCheck {
+                    name: "Markdown 报告审计摘要核对".to_string(),
+                    status: "mismatch".to_string(),
+                    message: msg,
+                });
+            }
+            None => {
+                detail.cross_checks.push(BundleCrossCheck {
+                    name: "Markdown 报告审计摘要核对".to_string(),
+                    status: "skipped".to_string(),
+                    message: "审计链未含 Markdown REPORT_GENERATE 摘要记录（兼容历史复核包）"
+                        .to_string(),
+                });
+            }
+        },
+        None => {
+            let msg = "复核包缺少取证报告 report.md".to_string();
+            detail.errors.push(msg.clone());
+            detail.cross_checks.push(BundleCrossCheck {
+                name: "Markdown 报告审计摘要核对".to_string(),
+                status: "mismatch".to_string(),
+                message: msg,
+            });
+        }
+    }
+
+    // 6c. 可选 `report.html` 与 `manifest.html_report` 及审计链 HTML `REPORT_GENERATE` 交叉核对
+    let manifest_html_meta = manifest_val
+        .as_ref()
+        .and_then(|m| m.get("html_report"))
+        .and_then(Value::as_object);
+    if let Some(actual_html_sha) = actual_hashes.get("report.html") {
+        let mut html_errors = Vec::new();
+        if let Some(meta) = manifest_html_meta {
+            let meta_sha = meta.get("sha256").and_then(Value::as_str);
+            let meta_size = meta.get("size").and_then(Value::as_u64);
+            if let Some(ms) = meta_sha
+                && ms != actual_html_sha
+            {
+                html_errors.push("HTML 报告清单摘要不匹配：report.html".to_string());
+            }
+            if let Some(ml) = meta_size
+                && actual_sizes.get("report.html").copied() != Some(ml)
+            {
+                html_errors.push("HTML 报告字节长度不匹配：report.html".to_string());
+            }
+        }
+        if let Some(expected_html_sha) = cross_idx.last_html_report_sha.as_deref()
+            && actual_html_sha != expected_html_sha
+        {
+            html_errors.push("HTML 报告摘要不匹配：report.html 与审计链记录不一致".to_string());
+        }
+        if html_errors.is_empty() {
+            let msg = if cross_idx.last_html_report_sha.is_some() {
+                "report.html 摘要与清单及审计链 HTML REPORT_GENERATE 记录一致".to_string()
+            } else {
+                "report.html 已通过成员摘要核验（审计链无对应 HTML REPORT_GENERATE 记录）"
+                    .to_string()
+            };
+            detail.cross_checks.push(BundleCrossCheck {
+                name: "HTML 报告审计摘要核对".to_string(),
+                status: "ok".to_string(),
+                message: msg,
+            });
+        } else {
+            manifest_ok = false;
+            let summary = html_errors.join("；");
+            for e in html_errors {
+                detail.errors.push(e);
+            }
+            detail.cross_checks.push(BundleCrossCheck {
+                name: "HTML 报告审计摘要核对".to_string(),
+                status: "mismatch".to_string(),
+                message: summary,
+            });
+        }
+    } else if manifest_html_meta.is_some() {
+        manifest_ok = false;
+        let msg = "HTML 报告成员缺失：manifest.json 声明了 report.html 但包内不存在".to_string();
+        detail.errors.push(msg.clone());
+        detail.cross_checks.push(BundleCrossCheck {
+            name: "HTML 报告审计摘要核对".to_string(),
+            status: "mismatch".to_string(),
+            message: msg,
+        });
+    } else {
+        detail.cross_checks.push(BundleCrossCheck {
+            name: "HTML 报告审计摘要核对".to_string(),
+            status: "skipped".to_string(),
+            message: "复核包未包含离线 HTML 报告（兼容不含 report.html 的复核包）".to_string(),
+        });
+    }
+
+    // 6d. `searches/*.json` 与 `audit.jsonl` 中 `CONTENT_SEARCH.details.sha256` 及 `omitted_searches` 交叉核对
+    let mut omitted_search_names: HashSet<String> = HashSet::new();
+    if let Some(omitted) = manifest_val
+        .as_ref()
+        .and_then(|m| m.get("omitted_searches"))
+        .and_then(Value::as_array)
+    {
+        for item in omitted {
+            if let Some(name) = item.get("name").and_then(Value::as_str) {
+                omitted_search_names.insert(name.to_string());
+            }
+        }
+    }
+    let search_members: Vec<(&String, &String)> = actual_hashes
+        .iter()
+        .filter(|(k, _)| k.starts_with("searches/"))
+        .collect();
+    if search_members.is_empty() && cross_idx.search_digests.is_empty() {
+        detail.cross_checks.push(BundleCrossCheck {
+            name: "搜索记录交叉核对".to_string(),
+            status: "skipped".to_string(),
+            message: "复核包与审计链均不含带摘要的内容搜索记录".to_string(),
+        });
+    } else {
+        let mut search_errors = Vec::new();
+        for (member, actual_sha) in &search_members {
+            if let Some(name) = member.strip_prefix("searches/") {
+                if let Some(expected_sha) = cross_idx.search_digests.get(name) {
+                    if *actual_sha != expected_sha {
+                        search_errors.push(format!("搜索记录不匹配：{member}"));
+                    }
+                } else if !cross_idx.search_subjects.contains(name) {
+                    search_errors.push(format!("搜索记录未在审计链中登记：{member}"));
+                }
+            }
+        }
+        for (name, expected_sha) in &cross_idx.search_digests {
+            let member = format!("searches/{name}");
+            if let Some(actual_sha) = actual_hashes.get(&member) {
+                if actual_sha != expected_sha {
+                    let msg = format!("搜索记录不匹配：{member}");
+                    if !search_errors.contains(&msg) {
+                        search_errors.push(msg);
+                    }
+                }
+            } else if !omitted_search_names.contains(name) {
+                search_errors.push(format!(
+                    "搜索记录缺失且未在 omitted_searches 登记：{member}"
+                ));
+            }
+        }
+        if search_errors.is_empty() {
+            detail.cross_checks.push(BundleCrossCheck {
+                name: "搜索记录交叉核对".to_string(),
+                status: "ok".to_string(),
+                message: format!(
+                    "已核对 {} 份搜索结果文件与 {} 条省略登记，均与审计链一致",
+                    search_members.len(),
+                    omitted_search_names.len()
+                ),
+            });
+        } else {
+            let summary = search_errors.join("；");
+            for e in search_errors {
+                detail.errors.push(e);
+            }
+            detail.cross_checks.push(BundleCrossCheck {
+                name: "搜索记录交叉核对".to_string(),
+                status: "mismatch".to_string(),
+                message: summary,
+            });
+        }
+    }
+
+    // 6e. `manifest.findings` 与 `audit.jsonl` 取证发现记录一致性核对
+    if let Some(ref manifest) = manifest_val {
+        match manifest.get("findings") {
+            None => {
+                detail.cross_checks.push(BundleCrossCheck {
+                    name: "取证发现一致性核对".to_string(),
+                    status: "skipped".to_string(),
+                    message: "manifest.json 未包含 findings 字段（兼容旧版复核包）".to_string(),
+                });
+            }
+            Some(Value::Array(manifest_findings)) => {
+                let mut finding_err: Option<String> = None;
+                if manifest_findings.len() != cross_idx.findings.len() {
+                    finding_err = Some(format!(
+                        "取证发现不一致：manifest.json 含 {} 条 findings，audit.jsonl 含 {} 条",
+                        manifest_findings.len(),
+                        cross_idx.findings.len()
+                    ));
+                } else {
+                    for (mf, af) in manifest_findings.iter().zip(cross_idx.findings.iter()) {
+                        let seq_match = mf.get("seq") == af.get("seq");
+                        let action_match = mf.get("action") == af.get("action");
+                        let subject_match = mf.get("subject") == af.get("subject");
+                        let result_match = mf.get("result") == af.get("result");
+                        let hash_match = match mf.get("hash") {
+                            Some(mh) => Some(mh) == af.get("hash"),
+                            None => true,
+                        };
+                        if !(seq_match && action_match && subject_match && result_match && hash_match)
+                        {
+                            let seq_str = mf
+                                .get("seq")
+                                .and_then(Value::as_u64)
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|| "?".to_string());
+                            finding_err = Some(format!(
+                                "取证发现不一致：manifest.json 中的 findings（seq={seq_str}）与 audit.jsonl 不匹配"
+                            ));
+                            break;
+                        }
+                    }
+                }
+                if let Some(err) = finding_err {
+                    manifest_ok = false;
+                    detail.errors.push(err.clone());
+                    detail.cross_checks.push(BundleCrossCheck {
+                        name: "取证发现一致性核对".to_string(),
+                        status: "mismatch".to_string(),
+                        message: err,
+                    });
+                } else {
+                    detail.cross_checks.push(BundleCrossCheck {
+                        name: "取证发现一致性核对".to_string(),
+                        status: "ok".to_string(),
+                        message: format!(
+                            "manifest.json 与 audit.jsonl 的 {} 条取证发现记录完全一致",
+                            manifest_findings.len()
+                        ),
+                    });
+                }
+            }
+            Some(_) => {
+                manifest_ok = false;
+                let msg = "manifest.json 中的 findings 字段格式无效".to_string();
+                detail.errors.push(msg.clone());
+                detail.cross_checks.push(BundleCrossCheck {
+                    name: "取证发现一致性核对".to_string(),
+                    status: "mismatch".to_string(),
+                    message: msg,
+                });
+            }
+        }
+    }
+
+    detail.manifest_valid = manifest_ok;
+    detail.ok = detail.errors.is_empty()
+        && detail.audit_valid
+        && detail.manifest_valid
+        && detail.sha256_matched != Some(false);
+
+    Ok(detail)
+}
+
 /// 原生 Rust 独立复核包校验器（对应 `core-contract.md` §2.5），
-/// 与 `scripts/verify_bundle.py::verify_bundle` 语义完全一致。
+/// 与 `verify_bundle.py::verify_bundle` 语义完全一致并内置跨文件审计链交叉核对。
 ///
 /// 返回 `SHA256SUMS.json` 中通过校验的材料成员总数。
 pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResult<usize> {
@@ -735,17 +1743,15 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
     let mut archive = ZipArchive::new(BufReader::with_capacity(256 * 1024, file))?;
 
     // 1. 收集所有成员名称并拒绝重复成员。
-    let mut names: Vec<String> = Vec::with_capacity(archive.len());
     let mut name_set: HashSet<String> = HashSet::with_capacity(archive.len());
     for i in 0..archive.len() {
         let entry = archive.by_index(i)?;
         let name = entry.name().to_string();
-        if !name_set.insert(name.clone()) {
+        if !name_set.insert(name) {
             return Err(CoreError::IntegrityFailed(
                 "成员重复或与清单不一致".to_string(),
             ));
         }
-        names.push(name);
     }
 
     // 2. 解析 SHA256SUMS.json 并强制要求成员集合完全一致。
@@ -766,7 +1772,7 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
         ));
     }
 
-    // 3. 重新计算清单中每个成员的 SHA-256，同时记录实际解压字节数供第 6 步核对。
+    // 3. 重新计算清单中每个成员的 SHA-256，同时记录实际解压字节数供后续核对。
     let mut actual_sizes: HashMap<&str, u64> = HashMap::with_capacity(checks.len());
     for (member_name, expected_digest) in &checks {
         let entry = archive.by_name(member_name)?;
@@ -781,6 +1787,7 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
     }
 
     // 4. 校验 `audit.jsonl` 内完整的 SHA-256 审计哈希链。
+    let mut audit_records: Vec<Value> = Vec::new();
     let previous = {
         let entry = archive.by_name("audit.jsonl")?;
         let reader = BufReader::new(entry);
@@ -798,19 +1805,21 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
             };
             let seq_ok = obj.get("seq").and_then(Value::as_u64) == Some(seq_expected);
             let prev_ok = obj.get("previous").and_then(Value::as_str) == Some(prev.as_str());
-            let canonical = canonical_json_value(&Value::Object(obj))?;
+            let canonical = canonical_json_value(&Value::Object(obj.clone()))?;
             let computed = sha256_hex(canonical.as_bytes());
             if !seq_ok || !prev_ok || computed != recorded {
                 return Err(CoreError::AuditTampered(format!(
                     "审计链不一致：{seq_expected}"
                 )));
             }
+            obj.insert("hash".to_string(), Value::String(recorded.clone()));
+            audit_records.push(Value::Object(obj));
             prev = recorded;
         }
         prev
     };
 
-    // 5. 严格校验 `audit.head`（不去除空白，与 `scripts/verify_bundle.py:41` 一致）与 `manifest.json`。
+    // 5. 严格校验 `audit.head`（不去除空白，与 `verify_bundle.py` 一致）与 `manifest.json`。
     let audit_head_raw = {
         let mut entry = archive.by_name("audit.head")?;
         let mut s = String::new();
@@ -836,15 +1845,14 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
         .get("exports")
         .and_then(Value::as_array)
         .ok_or_else(|| CoreError::IntegrityFailed("manifest.json 缺少 exports 列表".to_string()))?;
+    let mut manifest_export_members: HashSet<&str> = HashSet::with_capacity(exports.len());
     for item in exports {
         let member = item
             .get("member")
             .and_then(Value::as_str)
             .ok_or_else(|| CoreError::IntegrityFailed("导出记录缺少 member 字段".to_string()))?;
-        let expected_sha = item
-            .get("sha256")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        manifest_export_members.insert(member);
+        let expected_sha = item.get("sha256").and_then(Value::as_str).unwrap_or("");
         let expected_size = item
             .get("size")
             .and_then(Value::as_u64)
@@ -858,6 +1866,383 @@ pub fn verify_bundle(zip_path: &Path, expected_sha256: Option<&str>) -> CoreResu
             )));
         }
     }
+    for member in checks.keys() {
+        if member.starts_with("exports/") && !manifest_export_members.contains(member.as_str()) {
+            return Err(CoreError::IntegrityFailed(format!(
+                "导出成员未在 manifest.json 中登记：{member}"
+            )));
+        }
+    }
+
+    // 7. 跨文件审计链交叉核对（对历史未含对应明细的旧版复核包保持温和兼容）。
+    let cross_idx = build_audit_cross_index(&audit_records);
+
+    if !checks.contains_key("report.md") {
+        return Err(CoreError::IntegrityFailed(
+            "复核包缺少取证报告 report.md".to_string(),
+        ));
+    }
+    if let Some(ref expected_md_sha) = cross_idx.last_md_report_sha
+        && checks.get("report.md") != Some(expected_md_sha)
+    {
+        return Err(CoreError::IntegrityFailed(
+            "报告摘要不匹配：report.md 与审计链记录不一致".to_string(),
+        ));
+    }
+
+    if let Some(html_meta) = manifest.get("html_report").and_then(Value::as_object) {
+        let html_member = html_meta
+            .get("member")
+            .and_then(Value::as_str)
+            .unwrap_or("report.html");
+        let Some(actual_html_sha) = checks.get(html_member) else {
+            return Err(CoreError::IntegrityFailed(format!(
+                "HTML 报告成员缺失：{html_member}"
+            )));
+        };
+        if let Some(exp_sha) = html_meta.get("sha256").and_then(Value::as_str)
+            && actual_html_sha != exp_sha
+        {
+            return Err(CoreError::IntegrityFailed(format!(
+                "HTML 报告清单摘要不匹配：{html_member}"
+            )));
+        }
+        if let Some(exp_size) = html_meta.get("size").and_then(Value::as_u64)
+            && actual_sizes.get(html_member).copied() != Some(exp_size)
+        {
+            return Err(CoreError::IntegrityFailed(format!(
+                "HTML 报告长度不匹配：{html_member}"
+            )));
+        }
+    }
+    if let Some(actual_html_sha) = checks.get("report.html")
+        && let Some(ref expected_html_sha) = cross_idx.last_html_report_sha
+        && actual_html_sha != expected_html_sha
+    {
+        return Err(CoreError::IntegrityFailed(
+            "HTML 报告摘要不匹配：report.html 与审计链记录不一致".to_string(),
+        ));
+    }
+
+    let mut omitted_search_names: HashSet<String> = HashSet::new();
+    if let Some(omitted) = manifest.get("omitted_searches").and_then(Value::as_array) {
+        for item in omitted {
+            if let Some(name) = item.get("name").and_then(Value::as_str) {
+                omitted_search_names.insert(name.to_string());
+            }
+        }
+    }
+    for (member, actual_sha) in &checks {
+        if let Some(search_name) = member.strip_prefix("searches/") {
+            if let Some(expected_sha) = cross_idx.search_digests.get(search_name) {
+                if actual_sha != expected_sha {
+                    return Err(CoreError::IntegrityFailed(format!(
+                        "搜索记录不匹配：{member}"
+                    )));
+                }
+            } else if !cross_idx.search_subjects.contains(search_name) {
+                return Err(CoreError::IntegrityFailed(format!(
+                    "搜索记录未在审计链中登记：{member}"
+                )));
+            }
+        }
+    }
+    for (search_name, expected_sha) in &cross_idx.search_digests {
+        let member = format!("searches/{search_name}");
+        if let Some(actual_sha) = checks.get(&member) {
+            if actual_sha != expected_sha {
+                return Err(CoreError::IntegrityFailed(format!(
+                    "搜索记录不匹配：{member}"
+                )));
+            }
+        } else if !omitted_search_names.contains(search_name) {
+            return Err(CoreError::IntegrityFailed(format!(
+                "搜索记录缺失且未在 omitted_searches 登记：{member}"
+            )));
+        }
+    }
+
+    if let Some(findings_val) = manifest.get("findings") {
+        let manifest_findings = findings_val.as_array().ok_or_else(|| {
+            CoreError::IntegrityFailed("manifest.json 中的 findings 字段格式无效".to_string())
+        })?;
+        if manifest_findings.len() != cross_idx.findings.len() {
+            return Err(CoreError::IntegrityFailed(
+                "取证发现不一致：manifest.json 中的 findings 与 audit.jsonl 数量不匹配".to_string(),
+            ));
+        }
+        for (mf, af) in manifest_findings.iter().zip(cross_idx.findings.iter()) {
+            let seq_match = mf.get("seq") == af.get("seq");
+            let action_match = mf.get("action") == af.get("action");
+            let subject_match = mf.get("subject") == af.get("subject");
+            let result_match = mf.get("result") == af.get("result");
+            let hash_match = match mf.get("hash") {
+                Some(mh) => Some(mh) == af.get("hash"),
+                None => true,
+            };
+            if !(seq_match && action_match && subject_match && result_match && hash_match) {
+                return Err(CoreError::IntegrityFailed(
+                    "取证发现不一致：manifest.json 中的 findings 与 audit.jsonl 不匹配".to_string(),
+                ));
+            }
+        }
+    }
 
     Ok(checks.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::file_tools::record_note;
+    use crate::findings::AuditOrigin;
+    use crate::paths::AppPaths;
+
+    /// 重打包 ZIP 并对指定成员内容应用替换函数（可选择同步更新 SHA256SUMS.json 以测试跨文件核验）。
+    fn repack_zip_with_edit<F>(
+        src_zip: &Path,
+        dst_zip: &Path,
+        target_member: &str,
+        update_sums: bool,
+        mut edit: F,
+    ) where
+        F: FnMut(&mut Vec<u8>),
+    {
+        let mut src = ZipArchive::new(File::open(src_zip).expect("open src zip")).expect("zip");
+        let mut entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(src.len());
+        for i in 0..src.len() {
+            let mut e = src.by_index(i).expect("entry");
+            let name = e.name().to_string();
+            let mut buf = Vec::new();
+            e.read_to_end(&mut buf).expect("read entry");
+            if name == target_member {
+                edit(&mut buf);
+            }
+            entries.push((name, buf));
+        }
+        if update_sums {
+            let mut sums: BTreeMap<String, String> = BTreeMap::new();
+            for (name, bytes) in &entries {
+                if name != "SHA256SUMS.json" {
+                    sums.insert(name.clone(), sha256_hex(bytes));
+                }
+            }
+            let sums_bytes = serde_json::to_string_pretty(&sums).unwrap().into_bytes();
+            for (name, bytes) in &mut entries {
+                if name == "SHA256SUMS.json" {
+                    *bytes = sums_bytes.clone();
+                }
+            }
+        }
+        let mut dst = ZipWriter::new(File::create(dst_zip).expect("create dst zip"));
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        for (name, bytes) in entries {
+            dst.start_file(name, opts).expect("start file");
+            dst.write_all(&bytes).expect("write bytes");
+        }
+        dst.finish().expect("finish zip");
+    }
+
+    #[test]
+    fn bundle_packs_html_report_reads_sidecar_and_pinpoints_tampering() {
+        let paths = AppPaths::discover();
+        let demo_dd = paths.evidence_dir.join("demo.dd");
+        assert!(demo_dd.is_file(), "缺少 demo.dd 测试镜像");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut case = Case::create(
+            tmp.path(),
+            "P2-REVIEW-001",
+            "复核测试员",
+            "HTML报告与复核包交叉核验",
+            None,
+            None,
+            AuditOrigin::Manual,
+        )
+        .expect("create case");
+        case.load_image(&demo_dd, None, None, None).expect("load demo");
+        let inventory = case
+            .scan_partitions(None, None, None)
+            .expect("scan partitions");
+        let target_entry = inventory
+            .iter()
+            .find(|e| e.path == "DOCS/CASE.TXT" && !e.deleted)
+            .cloned()
+            .expect("find CASE.TXT");
+        record_note(&mut case, &target_entry, "关键取证发现笔记").expect("record note");
+
+        // 1. 生成离线 HTML 报告并验证审计日志含 format="html" 与 sha256
+        let html_res = case
+            .generate_html_report(None)
+            .expect("generate html report");
+        assert!(html_res.path.is_file());
+        assert!(html_res.bytes > 1000);
+        let records_after_html = case.check_audit().expect("audit after html");
+        assert!(records_after_html.iter().any(|r| {
+            r.action == "REPORT_GENERATE"
+                && r.result == "成功"
+                && r.details.get("format").and_then(Value::as_str) == Some("html")
+                && r.details.get("sha256").and_then(Value::as_str) == Some(html_res.sha256.as_str())
+        }));
+
+        // 2. 构建复核包：应自动打包 report.html
+        let bundle = build_bundle(&mut case, &BuildBundleOptions::default(), None)
+            .expect("build bundle with html");
+        case.close();
+
+        // 3. 伴随 .zip.sha256 自动读取与完整可视化核验均应通过
+        assert_eq!(
+            read_sidecar_sha256(&bundle.bundle_path).as_deref(),
+            Some(bundle.sha256.as_str())
+        );
+        let detail = verify_bundle_detailed(&bundle.bundle_path, None).expect("detailed verify");
+        assert!(detail.ok, "detail errors: {:?}", detail.errors);
+        assert_eq!(detail.sha256_source, "sidecar");
+        assert_eq!(detail.sha256_matched, Some(true));
+        assert!(detail.audit_valid);
+        assert!(detail.manifest_valid);
+        assert!(
+            detail
+                .members
+                .iter()
+                .any(|m| m.path == "report.html" && m.status == "ok" && m.category == "report")
+        );
+        assert!(
+            detail
+                .cross_checks
+                .iter()
+                .any(|c| c.name == "HTML 报告审计摘要核对" && c.status == "ok")
+        );
+        assert!(
+            detail
+                .cross_checks
+                .iter()
+                .any(|c| c.name == "取证发现一致性核对" && c.status == "ok")
+        );
+        verify_bundle(&bundle.bundle_path, Some(&bundle.sha256)).expect("verify_bundle passes");
+
+        // 4. 修改 report.html 单字节（不更新 SHA256SUMS.json）：应精确定位成员摘要不匹配
+        let tamper_html_1byte = tmp.path().join("tamper_html_1byte.zip");
+        repack_zip_with_edit(
+            &bundle.bundle_path,
+            &tamper_html_1byte,
+            "report.html",
+            false,
+            |bytes| {
+                if let Some(first) = bytes.first_mut() {
+                    *first ^= 0x01;
+                }
+            },
+        );
+        let d_tamper = verify_bundle_detailed(&tamper_html_1byte, None).expect("detailed tamper");
+        assert!(!d_tamper.ok);
+        assert_eq!(d_tamper.sha256_source, "none");
+        assert!(
+            d_tamper
+                .members
+                .iter()
+                .any(|m| m.path == "report.html" && m.status == "mismatch")
+        );
+
+        // 5. 修改 report.html 并同步重算 SHA256SUMS.json：成员哈希虽过，但必须被跨文件审计链核对拦下
+        let tamper_html_cross = tmp.path().join("tamper_html_cross.zip");
+        repack_zip_with_edit(
+            &bundle.bundle_path,
+            &tamper_html_cross,
+            "report.html",
+            true,
+            |bytes| bytes.extend_from_slice(b"<!-- tampered -->"),
+        );
+        let d_cross = verify_bundle_detailed(&tamper_html_cross, None).expect("detailed cross");
+        assert!(!d_cross.ok);
+        assert!(
+            d_cross
+                .cross_checks
+                .iter()
+                .any(|c| c.name == "HTML 报告审计摘要核对" && c.status == "mismatch")
+        );
+        assert!(verify_bundle(&tamper_html_cross, None).is_err());
+
+        // 6. 篡改 audit.jsonl 中第 2 条记录并同步重算 SHA256SUMS.json：应精确定位断链序号
+        let tamper_audit = tmp.path().join("tamper_audit.zip");
+        repack_zip_with_edit(
+            &bundle.bundle_path,
+            &tamper_audit,
+            "audit.jsonl",
+            true,
+            |bytes| {
+                let text = String::from_utf8(bytes.clone()).unwrap();
+                let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+                let mut rec: Value = serde_json::from_str(&lines[1]).unwrap();
+                rec["result"] = Value::String("已篡改结果".to_string());
+                lines[1] = serde_json::to_string(&rec).unwrap();
+                *bytes = format!("{}\n", lines.join("\n")).into_bytes();
+            },
+        );
+        let d_audit = verify_bundle_detailed(&tamper_audit, None).expect("detailed audit tamper");
+        assert!(!d_audit.ok);
+        assert!(!d_audit.audit_valid);
+        assert!(
+            d_audit
+                .audit_error
+                .as_deref()
+                .is_some_and(|e| e.contains("审计链不一致：2"))
+        );
+
+        // 6b. 手动传入错误外部 SHA-256：应标注 sha256_source="manual" 且 sha256_matched=Some(false)
+        let d_bad_manual = verify_bundle_detailed(&bundle.bundle_path, Some(&"0".repeat(64)))
+            .expect("detailed manual sha mismatch");
+        assert!(!d_bad_manual.ok);
+        assert_eq!(d_bad_manual.sha256_source, "manual");
+        assert_eq!(d_bad_manual.sha256_matched, Some(false));
+        assert!(d_bad_manual.audit_valid);
+
+        // 7. 篡改 manifest.json 的 findings 并同步重算 SHA256SUMS.json：应被取证发现一致性核对拦下
+        let tamper_findings = tmp.path().join("tamper_findings.zip");
+        repack_zip_with_edit(
+            &bundle.bundle_path,
+            &tamper_findings,
+            "manifest.json",
+            true,
+            |bytes| {
+                let mut v: Value = serde_json::from_slice(bytes).unwrap();
+                v["findings"] = Value::Array(Vec::new());
+                *bytes = serde_json::to_string_pretty(&v).unwrap().into_bytes();
+            },
+        );
+        let d_findings =
+            verify_bundle_detailed(&tamper_findings, None).expect("detailed findings tamper");
+        assert!(!d_findings.ok);
+        assert!(!d_findings.manifest_valid);
+        assert!(
+            d_findings
+                .cross_checks
+                .iter()
+                .any(|c| c.name == "取证发现一致性核对" && c.status == "mismatch")
+        );
+        assert!(verify_bundle(&tamper_findings, None).is_err());
+
+        // 8. 若本机有 Python，验证更新后的内嵌 verify_bundle.py 对含 report.html 的复核包通过，对篡改包拦截
+        let py_script = tmp.path().join("verify_bundle.py");
+        fs::write(&py_script, EMBEDDED_VERIFY_BUNDLE_PY).expect("write verify_bundle.py");
+        let venv_py = paths.root.join(".venv").join("Scripts").join("python.exe");
+        if venv_py.is_file() {
+            let ok_out = std::process::Command::new(&venv_py)
+                .arg(&py_script)
+                .arg(&bundle.bundle_path)
+                .output()
+                .expect("run verify_bundle.py ok");
+            assert!(
+                ok_out.status.success(),
+                "verify_bundle.py failed: {}",
+                String::from_utf8_lossy(&ok_out.stderr)
+            );
+            let bad_out = std::process::Command::new(&venv_py)
+                .arg(&py_script)
+                .arg(&tamper_findings)
+                .output()
+                .expect("run verify_bundle.py tamper");
+            assert!(!bad_out.status.success(), "verify_bundle.py 应拦截 findings 篡改");
+        }
+    }
 }

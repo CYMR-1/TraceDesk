@@ -622,6 +622,58 @@ pub struct BundleMaterialsResponse {
     pub missing_text: String,
 }
 
+/// 生成离线单文件 HTML 取证报告的 IPC 响应。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlReportDto {
+    pub path: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub generated_at: String,
+}
+
+/// 复核包逐成员哈希与结构核验结果 DTO。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleMemberCheckDto {
+    pub path: String,
+    pub category: String,
+    pub status: String,
+    pub expected_sha256: Option<String>,
+    pub actual_sha256: Option<String>,
+    pub size: Option<u64>,
+    pub message: String,
+}
+
+/// 复核包跨文件审计链交叉核对单项结果 DTO。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleCrossCheckDto {
+    pub name: String,
+    pub status: String,
+    pub message: String,
+}
+
+/// 面向桌面端复核包可视化核验面板的完整核验结果 DTO。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleVerificationDetailDto {
+    pub ok: bool,
+    pub bundle_path: String,
+    pub bundle_sha256: String,
+    pub expected_sha256: Option<String>,
+    pub sha256_source: String,
+    pub sha256_matched: Option<bool>,
+    pub audit_valid: bool,
+    pub audit_count: usize,
+    pub audit_head: String,
+    pub audit_error: Option<String>,
+    pub manifest_valid: bool,
+    pub members: Vec<BundleMemberCheckDto>,
+    pub cross_checks: Vec<BundleCrossCheckDto>,
+    pub errors: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCatalogItem {
@@ -1360,7 +1412,8 @@ impl ViewCache {
     }
 
     /// 根据 `entryId` 字符串解析对应的 [`InventoryEntry`] 及其在 `BrowserIndex` 中的 0 起始索引。
-    /// 支持 `"0"`（0 起始规范索引）或 `"offset:inode:deleted"` / `"offset:inode:deleted:path"` 格式。
+    /// 支持 `"0"`（0 起始规范索引）、`"offset:inode:deleted"`、`"offset:inode:deleted:path"`
+    /// 以及 `"offset:inode:path"` / `"offset:inode::path"`（跨模块定位时忽略删除标志或路径斜杠差异）。
     pub fn resolve_entry(&self, entry_id: &str) -> Option<(usize, InventoryEntry)> {
         let trimmed = entry_id.trim();
         if let Ok(idx) = trimmed.parse::<usize>()
@@ -1372,16 +1425,67 @@ impl ViewCache {
         if parts.len() >= 3
             && let Ok(offset) = parts[0].parse::<u64>()
         {
-            let inode = parts[1];
-            let deleted = matches!(parts[2], "1" | "true");
-            let path_opt = parts.get(3).copied();
-            for (idx, row) in self.browser_index.ordered().iter().enumerate() {
+            let inode = parts[1].trim();
+            let (deleted_opt, path_opt) = if parts.len() == 4 {
+                let deleted_opt = match parts[2].trim().to_ascii_lowercase().as_str() {
+                    "1" | "true" => Some(true),
+                    "0" | "false" => Some(false),
+                    "" | "*" | "any" => None,
+                    _ => Some(false),
+                };
+                (deleted_opt, Some(parts[3]))
+            } else {
+                match parts[2].trim().to_ascii_lowercase().as_str() {
+                    "1" | "true" => (Some(true), None),
+                    "0" | "false" => (Some(false), None),
+                    "" | "*" | "any" => (None, None),
+                    _ => (None, Some(parts[2])),
+                }
+            };
+
+            let ordered = self.browser_index.ordered();
+
+            // 1. 优先精确匹配 `(offset, inode, deleted, path)`。
+            for (idx, row) in ordered.iter().enumerate() {
                 if row.offset == offset
-                    && row.inode == inode
-                    && row.deleted == deleted
+                    && (inode.is_empty() || row.inode == inode)
+                    && deleted_opt.is_none_or(|d| row.deleted == d)
                     && path_opt.is_none_or(|p| row.path == p)
                 {
                     return Some((idx, row.clone()));
+                }
+            }
+
+            // 2. 若精确匹配未命中且携带路径，则对路径做斜杠归一化回退匹配（兼容时间线/发现等跨模块跳转）。
+            if let Some(raw_path) = path_opt {
+                let norm_target = tracedesk_core::browser_index::normalize_scope_path(raw_path);
+                if !norm_target.is_empty() {
+                    let mut best: Option<(u8, usize)> = None;
+                    for (idx, row) in ordered.iter().enumerate() {
+                        if row.offset != offset {
+                            continue;
+                        }
+                        if tracedesk_core::browser_index::normalize_scope_path(&row.path)
+                            != norm_target
+                        {
+                            continue;
+                        }
+                        let mut score = 1u8;
+                        if !inode.is_empty() && row.inode == inode {
+                            score += 4;
+                        }
+                        if deleted_opt.is_some_and(|d| row.deleted == d) {
+                            score += 2;
+                        }
+                        if best.is_none_or(|(best_score, _)| score > best_score) {
+                            best = Some((score, idx));
+                        }
+                    }
+                    if let Some((_, idx)) = best
+                        && let Some(row) = ordered.get(idx)
+                    {
+                        return Some((idx, row.clone()));
+                    }
                 }
             }
         }

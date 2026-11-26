@@ -11,7 +11,7 @@ import { UiIcon } from '../components/Icons';
 import { SplitPane } from '../components/SplitPane';
 import { VirtualTable, type VirtualColumn } from '../components/VirtualTable';
 import { FINDING_OPERATIONS } from '../features/registry';
-import type { CaseSnapshot, FindingGroupDto } from '../types/ipc';
+import type { CaseSnapshot, FindingGroupDto, LocateEntryRequest } from '../types/ipc';
 import { formatError } from '../utils/assets';
 
 interface FindingsModuleProps {
@@ -19,6 +19,8 @@ interface FindingsModuleProps {
   busy: boolean;
   refreshToken: number;
   onExportFindings: (groupKeys: string[]) => void;
+  /** 跨模块一键跳转定位原文件回调 */
+  onLocateEntry?: (req: LocateEntryRequest) => void;
 }
 
 const DETAIL_FIELD_LABELS: readonly [string, string][] = [
@@ -39,6 +41,7 @@ const FindingsModuleInner: React.FC<FindingsModuleProps> = ({
   busy,
   refreshToken,
   onExportFindings,
+  onLocateEntry,
 }) => {
   const [keyword, setKeyword] = useState('');
   // 对搜索关键词做防抖处理，避免逐字输入高频触发后端 IPC 查询与审计扫描
@@ -158,8 +161,39 @@ const FindingsModuleInner: React.FC<FindingsModuleProps> = ({
         sortable: true,
         getText: (g) => g.latestTime,
       },
+      ...(onLocateEntry
+        ? [
+            {
+              key: 'actions',
+              label: '操作',
+              width: 106,
+              align: 'center' as const,
+              getText: () => '定位原文件',
+              renderCell: (g: FindingGroupDto) => (
+                <button
+                  type="button"
+                  className="td-btn td-btn--compact td-table-row-action"
+                  disabled={busy}
+                  title={`跳转到「文件浏览」定位 ${g.subject}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onLocateEntry({
+                      offset: g.offset,
+                      inode: g.inode,
+                      path: g.subject,
+                      deleted: g.deleted,
+                    });
+                  }}
+                >
+                  <UiIcon name="locate" size={11} color="var(--accent-soft-text)" />
+                  定位原文件
+                </button>
+              ),
+            },
+          ]
+        : []),
     ],
-    []
+    [onLocateEntry, busy]
   );
 
   const detailSections = useMemo<DossierSection[]>(() => {
@@ -208,6 +242,25 @@ const FindingsModuleInner: React.FC<FindingsModuleProps> = ({
         <span className="td-section-title" style={{ flex: 1 }}>
           {statusText}
         </span>
+        {selectedGroup && onLocateEntry && (
+          <button
+            type="button"
+            className="td-btn td-btn--soft"
+            disabled={busy || !snapshot?.evidence}
+            title="跳转到「文件浏览」定位当前选中取证发现分组的原文件"
+            onClick={() =>
+              onLocateEntry({
+                offset: selectedGroup.offset,
+                inode: selectedGroup.inode,
+                path: selectedGroup.subject,
+                deleted: selectedGroup.deleted,
+              })
+            }
+          >
+            <UiIcon name="locate" size={14} color="var(--accent-soft-text)" />
+            定位原文件
+          </button>
+        )}
         <button
           type="button"
           className="td-btn td-btn--soft"
@@ -296,6 +349,27 @@ const FindingsModuleInner: React.FC<FindingsModuleProps> = ({
             <DossierView
               title={selectedGroup.subject}
               subtitle="取证记录 · 笔记 / 摘要 / 副本比对"
+              headerActions={
+                onLocateEntry ? (
+                  <button
+                    type="button"
+                    className="td-btn td-btn--soft td-btn--compact"
+                    disabled={busy || !snapshot?.evidence}
+                    title="跳转到「文件浏览」定位此取证发现对应的原文件"
+                    onClick={() =>
+                      onLocateEntry({
+                        offset: selectedGroup.offset,
+                        inode: selectedGroup.inode,
+                        path: selectedGroup.subject,
+                        deleted: selectedGroup.deleted,
+                      })
+                    }
+                  >
+                    <UiIcon name="locate" size={12} color="var(--accent-soft-text)" />
+                    定位原文件
+                  </button>
+                ) : undefined
+              }
               sections={detailSections}
               onClose={handleCloseDetail}
             />

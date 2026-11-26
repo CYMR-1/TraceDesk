@@ -32,6 +32,9 @@ export type UiIconName =
   | 'settings'
   | 'list'
   | 'arrow_right'
+  | 'locate'
+  | 'html_report'
+  | 'magic'
   | 'note';
 
 export type EntryIconKind = 'folder' | 'disk' | 'file' | 'image' | 'table' | 'system';
@@ -280,6 +283,36 @@ export const UiIcon: React.FC<UiIconProps> = ({
           <>
             <line x1="3.0" y1="8.0" x2="12.6" y2="8.0" />
             <polyline points="9.2,4.6 12.8,8.0 9.2,11.4" fill="none" />
+          </>
+        );
+      case 'locate':
+        // 跨模块跳转定位原文件（十字准星靶标图标）
+        return (
+          <>
+            <circle cx="8" cy="8" r="4.2" fill="none" />
+            <circle cx="8" cy="8" r="1.2" fill={color} stroke="none" />
+            <line x1="8" y1="1.8" x2="8" y2="3.8" />
+            <line x1="8" y1="12.2" x2="8" y2="14.2" />
+            <line x1="1.8" y1="8" x2="3.8" y2="8" />
+            <line x1="12.2" y1="8" x2="14.2" y2="8" />
+          </>
+        );
+      case 'html_report':
+        // 离线 HTML 报告图标（文档外框 + 代码尖括号）
+        return (
+          <>
+            <rect x="2.6" y="1.8" width="10.8" height="12.4" rx="1.6" fill="none" />
+            <polyline points="6.6,6.2 4.8,8.0 6.6,9.8" fill="none" />
+            <polyline points="9.4,6.2 11.2,8.0 9.4,9.8" fill="none" />
+          </>
+        );
+      case 'magic':
+        // 文件魔数伪装检测图标（放大镜/盾牌指纹探测）
+        return (
+          <>
+            <path d="M8 1.9 L13.0 3.8 L13.0 7.6 C13.0 10.6 10.8 12.7 8 14.0 C5.2 12.7 3.0 10.6 3.0 7.6 L3.0 3.8 Z" fill="none" />
+            <circle cx="7.6" cy="7.5" r="2.0" fill="none" />
+            <line x1="9.2" y1="9.1" x2="10.7" y2="10.6" />
           </>
         );
       case 'note':

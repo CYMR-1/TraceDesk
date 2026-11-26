@@ -16,8 +16,10 @@ import type {
   ExamineFileResponse,
   ExportFileResponse,
   ExportFindingsResponse,
+  GenerateHtmlReportResponse,
   HashFinishedEvent,
   HashProgressEvent,
+  InspectEntryMagicResponse,
   ListAuditLogResponse,
   ListFindingsResponse,
   ListMcpActivitiesParams,
@@ -32,6 +34,7 @@ import type {
   QueryFilesPageResponse,
   QueryTimelinePageResponse,
   RecentCaseDto,
+  ScanMagicMismatchesResponse,
   SearchEncoding,
   SearchFinishedEvent,
   SearchHitDto,
@@ -41,6 +44,7 @@ import type {
   SuggestCaseDirResponse,
   TaskProgressEvent,
   TreeChildrenResponse,
+  VerifyReviewBundleResponse,
 } from '../types/ipc';
 
 type DemoBackendModule = typeof import('./demoBackend');
@@ -300,6 +304,11 @@ export const tauriApi = {
     return callCommand<{ path: string; snapshot: CaseSnapshot }>('generate_report', {});
   },
 
+  /** 生成离线自包含 HTML 取证报告 */
+  generateHtmlReport(): Promise<GenerateHtmlReportResponse> {
+    return callCommand<GenerateHtmlReportResponse>('generate_html_report', {});
+  },
+
   inspectBundleMaterials(): Promise<BundleMaterialsResponse> {
     return callCommand<BundleMaterialsResponse>('inspect_bundle_materials', {});
   },
@@ -309,6 +318,27 @@ export const tauriApi = {
     selectedSearchIndices?: number[];
   }): Promise<{ path: string; snapshot: CaseSnapshot }> {
     return callCommand<{ path: string; snapshot: CaseSnapshot }>('build_review_bundle', params);
+  },
+
+  /** 离线核验复核包 ZIP 完整性、审计哈希链、清单结构与逐成员摘要（无需打开案件） */
+  verifyReviewBundle(params: {
+    bundlePath: string;
+    expectedSha256?: string | null;
+  }): Promise<VerifyReviewBundleResponse> {
+    return callCommand<VerifyReviewBundleResponse>('verify_review_bundle', {
+      bundlePath: params.bundlePath,
+      expectedSha256: params.expectedSha256 ?? null,
+    });
+  },
+
+  /** 全案扫描文件魔数（Magic Bytes）与扩展名伪装不匹配项 */
+  scanMagicMismatches(): Promise<ScanMagicMismatchesResponse> {
+    return callCommand<ScanMagicMismatchesResponse>('scan_magic_mismatches', {});
+  },
+
+  /** 探测单个文件条目的真实文件头魔数与前 16B HEX */
+  inspectEntryMagic(params: { entryKey: string }): Promise<InspectEntryMagicResponse> {
+    return callCommand<InspectEntryMagicResponse>('inspect_entry_magic', params);
   },
 
   /* ---------- 3.5 MCP 托管与系统工具命令 ---------- */

@@ -71,26 +71,37 @@ export const DossierView: React.FC<{
   title: string;
   subtitle?: string;
   sections: DossierSection[];
+  /** 可选顶部标题栏右侧扩展操作按钮（如「定位原文件」） */
+  headerActions?: React.ReactNode;
   /** 可选关闭回调：传入时在顶部栏右侧展示“关闭”按钮（用于底部可收起详情分栏） */
   onClose?: () => void;
-}> = ({ title, subtitle, sections, onClose }) => (
+}> = ({ title, subtitle, sections, headerActions, onClose }) => (
   <div className="td-dossier">
-    {onClose ? (
-      <div className={`td-dossier-header td-dossier-header--closable${sections.length > 0 ? ' td-dossier-header--bordered' : ''}`}>
+    {onClose || headerActions ? (
+      <div
+        className={`td-dossier-header ${onClose ? 'td-dossier-header--closable' : ''}${
+          sections.length > 0 ? ' td-dossier-header--bordered' : ''
+        }`}
+      >
         <div className="td-dossier-heading">
           <h2>{title}</h2>
           {subtitle && <p className="td-dossier-subtitle">{subtitle}</p>}
         </div>
-        <button
-          type="button"
-          className="td-dossier-close"
-          onClick={onClose}
-          title="关闭详情面板"
-          aria-label="关闭详情面板"
-        >
-          <span className="td-dossier-close-icon" aria-hidden="true">×</span>
-          <span>关闭</span>
-        </button>
+        <div className="td-dossier-header-actions">
+          {headerActions}
+          {onClose && (
+            <button
+              type="button"
+              className="td-dossier-close"
+              onClick={onClose}
+              title="关闭详情面板"
+              aria-label="关闭详情面板"
+            >
+              <span className="td-dossier-close-icon" aria-hidden="true">×</span>
+              <span>关闭</span>
+            </button>
+          )}
+        </div>
       </div>
     ) : (
       <>

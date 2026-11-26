@@ -15,14 +15,15 @@ use tracedesk_desktop_lib::commands::{
     cmd_bookmark_search_hits, cmd_browse_directory, cmd_build_review_bundle, cmd_build_timeline,
     cmd_cancel_content_search, cmd_cancel_scan_partitions, cmd_cancel_verify_integrity,
     cmd_check_busy_before_close, cmd_clear_mcp_activities, cmd_close_case, cmd_create_case,
-    cmd_examine_file, cmd_export_file, cmd_export_findings, cmd_export_fsstat, cmd_generate_report,
-    cmd_get_app_paths, cmd_get_case_snapshot, cmd_get_guide_pages, cmd_get_mcp_status,
-    cmd_get_tree_children, cmd_inspect_bundle_materials, cmd_list_audit_log, cmd_list_findings,
-    cmd_list_mcp_activities, cmd_list_recent_cases, cmd_load_image, cmd_load_search_record,
-    cmd_locate_file_in_scope, cmd_open_case, cmd_preview_file_image, cmd_preview_file_page,
-    cmd_query_files_page, cmd_query_timeline_page, cmd_record_finding_note, cmd_register_source,
-    cmd_scan_all_partitions, cmd_start_content_search, cmd_start_mcp_http, cmd_stop_mcp_http,
-    cmd_suggest_case_dir, cmd_verify_integrity,
+    cmd_examine_file, cmd_export_file, cmd_export_findings, cmd_export_fsstat,
+    cmd_generate_html_report, cmd_generate_report, cmd_get_app_paths, cmd_get_case_snapshot,
+    cmd_get_guide_pages, cmd_get_mcp_status, cmd_get_tree_children, cmd_inspect_bundle_materials,
+    cmd_inspect_entry_magic, cmd_list_audit_log, cmd_list_findings, cmd_list_mcp_activities,
+    cmd_list_recent_cases, cmd_load_image, cmd_load_search_record, cmd_locate_file_in_scope,
+    cmd_open_case, cmd_preview_file_image, cmd_preview_file_page, cmd_query_files_page,
+    cmd_query_timeline_page, cmd_record_finding_note, cmd_register_source, cmd_scan_all_partitions,
+    cmd_scan_magic_mismatches, cmd_start_content_search, cmd_start_mcp_http, cmd_stop_mcp_http,
+    cmd_suggest_case_dir, cmd_verify_integrity, cmd_verify_review_bundle,
 };
 
 fn repo_root() -> PathBuf {
@@ -1956,6 +1957,406 @@ fn detached_content_search_updates_snapshot_records_and_supports_replay_bookmark
     let verified = verify_audit_chain_at(Path::new(&snap.case_dir)).expect("audit chain valid");
     assert!(verified.iter().any(|r| r.action == "CONTENT_SEARCH"));
     assert!(verified.iter().any(|r| r.action == "FILE_NOTE"));
+
+    state.shutdown_all();
+}
+
+/// 在 ZIP 原始字节流中定位指定成员（本地文件头 `PK\x03\x04`）并翻转其压缩数据区首字节，用于模拟单字节篡改。
+fn flip_single_byte_in_zip_member(zip_bytes: &mut [u8], member_name: &str) -> bool {
+    let target = member_name.as_bytes();
+    let mut i = 0usize;
+    while i + 30 <= zip_bytes.len() {
+        if &zip_bytes[i..i + 4] == b"PK\x03\x04" {
+            let name_len = u16::from_le_bytes([zip_bytes[i + 26], zip_bytes[i + 27]]) as usize;
+            let extra_len = u16::from_le_bytes([zip_bytes[i + 28], zip_bytes[i + 29]]) as usize;
+            let name_start = i + 30;
+            let data_start = name_start + name_len + extra_len;
+            if data_start < zip_bytes.len() && &zip_bytes[name_start..name_start + name_len] == target
+            {
+                zip_bytes[data_start] ^= 0xFF;
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Phase 2 集成测试：离线 HTML 报告生成、无打开案件时的复核包详细核验（正常通过 + 单字节篡改精确定位）。
+#[test]
+fn html_report_and_review_bundle_detailed_verification_and_tamper_detection() {
+    use tracedesk_core::verify_audit_chain_at;
+
+    let tmp = tempdir().expect("create tempdir");
+    let cases_dir = tmp.path().join("cases");
+    std::fs::create_dir_all(&cases_dir).expect("mkdir cases");
+    let state = make_test_state(cases_dir.clone());
+    let demo_dd = demo_image_path();
+
+    // 1. 建案、加载演示镜像、全盘扫描并生成 Markdown 与离线单文件 HTML 报告。
+    let snap = cmd_create_case(
+        &state,
+        &cases_dir.to_string_lossy(),
+        "P2-REPORT-01",
+        "答辩核验员",
+        "HTML报告与复核包核验",
+        None,
+    )
+    .expect("create_case");
+    cmd_load_image(&state, &demo_dd.to_string_lossy(), None).expect("load_image");
+    cmd_scan_all_partitions(&state, None).expect("scan_all_partitions");
+
+    let page = cmd_query_files_page(&state, None, None, ".txt", "CASE", "active", 0, 50, Some(false))
+        .expect("query CASE.TXT");
+    assert!(!page.items.is_empty());
+    cmd_record_finding_note(&state, &page.items[0].entry_id, "Phase 2 HTML 报告联调笔记")
+        .expect("record_finding_note");
+
+    let md_report = cmd_generate_report(&state).expect("generate_report");
+    assert!(PathBuf::from(&md_report.path).is_file());
+
+    let html_report = cmd_generate_html_report(&state).expect("generate_html_report");
+    let html_json = serde_json::to_value(&html_report).expect("serialize HtmlReportDto");
+    assert!(html_json.get("path").and_then(Value::as_str).is_some());
+    assert_eq!(
+        html_json
+            .get("sha256")
+            .and_then(Value::as_str)
+            .map(str::len),
+        Some(64)
+    );
+    assert!(html_json.get("bytes").and_then(Value::as_u64).unwrap_or(0) > 100);
+    assert!(
+        html_json
+            .get("generatedAt")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+    );
+
+    let html_path = PathBuf::from(&html_report.path);
+    assert!(html_path.is_file(), "HTML 报告文件应已落盘");
+    let html_raw = std::fs::read(&html_path).expect("read html report");
+    assert_eq!(html_raw.len() as u64, html_report.bytes);
+    let html_text = String::from_utf8(html_raw).expect("valid utf-8 html");
+    assert!(html_text.starts_with("<!DOCTYPE html>"));
+    assert!(html_text.contains("P2-REPORT-01"));
+
+    // 确认 HTML 报告生成已写入 REPORT_GENERATE 审计记录且不残留 case.lock。
+    let audit_records =
+        verify_audit_chain_at(Path::new(&snap.case_dir)).expect("audit chain valid");
+    assert!(
+        audit_records
+            .iter()
+            .any(|r| r.action == "REPORT_GENERATE" && r.details.get("format").and_then(Value::as_str) == Some("html")),
+        "审计链中应记录 HTML 格式的 REPORT_GENERATE"
+    );
+    {
+        let cg = state.case_lock.lock().expect("case_lock");
+        assert!(
+            !cg.as_ref().expect("case open").has_lock(),
+            "生成 HTML 报告后不得残留常驻 case.lock"
+        );
+    }
+
+    // 2. 构建复核包并关闭案件，验证 `cmd_verify_review_bundle` 无需打开案件即可独立核验。
+    let bundle_res = cmd_build_review_bundle(&state, None, None).expect("build_review_bundle");
+    let bundle_path = PathBuf::from(&bundle_res.path);
+    assert!(bundle_path.is_file());
+    assert!(cmd_close_case(&state).expect("close_case").closed);
+    assert!(cmd_get_case_snapshot(&state).expect("snapshot none").is_none());
+
+    // 2a. 未传 expected_sha256 时自动读取同目录 `.zip.sha256` 并全部核验通过。
+    let detail =
+        cmd_verify_review_bundle(&bundle_res.path, None).expect("verify_review_bundle intact");
+    assert!(detail.ok, "完整复核包核验应通过，错误：{:?}", detail.errors);
+    assert_eq!(detail.sha256_source, "sidecar");
+    assert_eq!(detail.sha256_matched, Some(true));
+    assert!(detail.audit_valid);
+    assert!(detail.audit_count >= 5);
+    assert_eq!(detail.audit_head.len(), 64);
+    assert!(detail.audit_error.is_none());
+    assert!(detail.manifest_valid);
+    assert!(detail.errors.is_empty());
+    assert!(detail.members.iter().any(|m| m.path == "report.md" && m.status == "ok"));
+    assert!(detail.members.iter().any(|m| m.path == "report.html" && m.status == "ok"));
+    assert!(!detail.cross_checks.is_empty());
+    assert!(detail.cross_checks.iter().all(|c| c.status != "mismatch"));
+
+    // 严格核对前后端约定 camelCase JSON 键名。
+    let detail_json = serde_json::to_value(&detail).expect("serialize BundleVerificationDetailDto");
+    for key in [
+        "ok",
+        "bundlePath",
+        "bundleSha256",
+        "expectedSha256",
+        "sha256Source",
+        "sha256Matched",
+        "auditValid",
+        "auditCount",
+        "auditHead",
+        "auditError",
+        "manifestValid",
+        "members",
+        "crossChecks",
+        "errors",
+    ] {
+        assert!(
+            detail_json.get(key).is_some(),
+            "BundleVerificationDetailDto 缺少约定 JSON 键：{key}"
+        );
+    }
+    let first_member = &detail_json["members"][0];
+    for key in [
+        "path",
+        "category",
+        "status",
+        "expectedSha256",
+        "actualSha256",
+        "size",
+        "message",
+    ] {
+        assert!(
+            first_member.get(key).is_some(),
+            "BundleMemberCheckDto 缺少约定 JSON 键：{key}"
+        );
+    }
+    let first_cc = &detail_json["crossChecks"][0];
+    for key in ["name", "status", "message"] {
+        assert!(
+            first_cc.get(key).is_some(),
+            "BundleCrossCheckDto 缺少约定 JSON 键：{key}"
+        );
+    }
+
+    // 2b. 手工传入错误期望 SHA-256 -> 应精确报出手工摘要不匹配。
+    let wrong_sha = "f".repeat(64);
+    let mismatch_sha = cmd_verify_review_bundle(&bundle_res.path, Some(&wrong_sha))
+        .expect("verify_review_bundle manual mismatch");
+    assert!(!mismatch_sha.ok);
+    assert_eq!(mismatch_sha.sha256_source, "manual");
+    assert_eq!(mismatch_sha.sha256_matched, Some(false));
+    assert!(!mismatch_sha.errors.is_empty());
+
+    // 2c. 复制复核包与伴随 `.sha256`，仅翻转 `report.md` 压缩流中的 1 个字节 -> 检出篡改并定位受损成员。
+    let tampered_zip = tmp.path().join("tampered_bundle.zip");
+    let tampered_sha = tmp.path().join("tampered_bundle.zip.sha256");
+    let orig_sha_path = PathBuf::from(format!("{}.sha256", bundle_path.display()));
+    let mut zip_bytes = std::fs::read(&bundle_path).expect("read original bundle");
+    assert!(
+        flip_single_byte_in_zip_member(&mut zip_bytes, "report.md"),
+        "应能在复核包 ZIP 中定位到 report.md 成员数据区"
+    );
+    std::fs::write(&tampered_zip, &zip_bytes).expect("write tampered zip");
+    std::fs::copy(&orig_sha_path, &tampered_sha).expect("copy sidecar sha256");
+
+    let tampered_with_sidecar =
+        cmd_verify_review_bundle(&tampered_zip.to_string_lossy(), None)
+            .expect("verify tampered bundle with sidecar");
+    assert!(!tampered_with_sidecar.ok, "单字节篡改复核包必须检出失败");
+    assert_eq!(tampered_with_sidecar.sha256_source, "sidecar");
+    assert_eq!(tampered_with_sidecar.sha256_matched, Some(false));
+    assert!(
+        tampered_with_sidecar
+            .members
+            .iter()
+            .any(|m| m.path == "report.md" && m.status == "mismatch"),
+        "逐成员核验应精确定位被篡改的 report.md"
+    );
+
+    // 移除伴随 `.sha256` 后再次核验，确认包内哈希与结构校验仍独立拦截篡改。
+    std::fs::remove_file(&tampered_sha).expect("remove sidecar sha256");
+    let tampered_no_sidecar = cmd_verify_review_bundle(&tampered_zip.to_string_lossy(), None)
+        .expect("verify tampered bundle without sidecar");
+    assert!(!tampered_no_sidecar.ok);
+    assert_eq!(tampered_no_sidecar.sha256_source, "none");
+    assert_eq!(tampered_no_sidecar.sha256_matched, None);
+    assert!(
+        tampered_no_sidecar
+            .members
+            .iter()
+            .any(|m| m.path == "report.md" && m.status == "mismatch"),
+        "无伴随 .sha256 时逐成员核验仍须精确定位被篡改的 report.md"
+    );
+
+    state.shutdown_all();
+}
+
+/// Phase 2 集成测试：无锁魔数批量伪装检测、单条目魔数识别与跨模块精确定位（含根目录与子目录）。
+#[test]
+fn magic_scan_single_entry_inspection_and_cross_module_locate() {
+    let tmp = tempdir().expect("create tempdir");
+    let cases_dir = tmp.path().join("cases");
+    std::fs::create_dir_all(&cases_dir).expect("mkdir cases");
+    let state = make_test_state(cases_dir.clone());
+
+    // 在临时目录复制 demo.dd 并将 DOCS/CASE.TXT 内容头替换为 PNG 魔数，制造真实 `.txt` 伪装 PNG 样本。
+    let mut img_bytes = std::fs::read(demo_image_path()).expect("read demo.dd");
+    let marker = b"Case note inside a nested directory.";
+    let pos = img_bytes
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .expect("locate DOCS/CASE.TXT payload in demo.dd");
+    let png_header: [u8; 16] = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52,
+    ];
+    img_bytes[pos..pos + png_header.len()].copy_from_slice(&png_header);
+    let patched_img = tmp.path().join("demo_magic_spoof.dd");
+    std::fs::write(&patched_img, &img_bytes).expect("write patched image");
+
+    cmd_create_case(
+        &state,
+        &cases_dir.to_string_lossy(),
+        "P2-MAGIC-01",
+        "答辩核验员",
+        "魔数伪装检测与定位",
+        None,
+    )
+    .expect("create_case");
+    cmd_load_image(&state, &patched_img.to_string_lossy(), None).expect("load_image");
+    cmd_scan_all_partitions(&state, None).expect("scan_all_partitions");
+
+    // 1. 全案魔数伪装扫描（无锁执行，返回 camelCase MagicScanReport）。
+    let report = cmd_scan_magic_mismatches(&state).expect("scan_magic_mismatches");
+    assert!(report.scanned_count > 0);
+    assert!(!report.cancelled);
+    assert!(report.mismatch_count >= 1);
+
+    let report_json = serde_json::to_value(&report).expect("serialize MagicScanReport");
+    for key in [
+        "scannedCount",
+        "skippedCount",
+        "mismatchCount",
+        "elapsedMs",
+        "cancelled",
+        "typeCounts",
+        "mismatches",
+    ] {
+        assert!(
+            report_json.get(key).is_some(),
+            "MagicScanReport 缺少约定 JSON 键：{key}"
+        );
+    }
+
+    let spoof = report
+        .mismatches
+        .iter()
+        .find(|m| m.path == "DOCS/CASE.TXT")
+        .expect("应检出 DOCS/CASE.TXT 伪装为 PNG 图像");
+    assert_eq!(spoof.detected_type, "PNG");
+    assert_eq!(spoof.detected_family, "IMAGE");
+    assert_eq!(spoof.extension, ".txt");
+    assert_eq!(spoof.severity, "medium");
+    assert!(spoof.magic_hex.starts_with("89 50 4E 47"));
+
+    // 2. 使用扫描产出的 `entryKey` 调用单条目魔数识别。
+    let item = cmd_inspect_entry_magic(&state, &spoof.entry_key).expect("inspect_entry_magic");
+    assert!(item.mismatch);
+    assert_eq!(item.detected_type.as_deref(), Some("PNG"));
+    assert_eq!(item.detected_family.as_deref(), Some("IMAGE"));
+    assert_eq!(item.extension, ".txt");
+    assert_eq!(item.severity, "medium");
+    assert!(item.magic_hex.starts_with("89 50 4E 47"));
+
+    let item_json = serde_json::to_value(&item).expect("serialize MagicCheckItem");
+    for key in [
+        "detectedType",
+        "detectedFamily",
+        "detectedLabel",
+        "extension",
+        "mismatch",
+        "severity",
+        "reason",
+        "magicHex",
+    ] {
+        assert!(
+            item_json.get(key).is_some(),
+            "MagicCheckItem 缺少约定 JSON 键：{key}"
+        );
+    }
+
+    // 3. 验证跨模块精确定位 `cmd_locate_file_in_scope`（子目录文件与分区根目录文件均准确命中）。
+    // 3a. 子目录文件：支持 `offset:inode:deleted:path`、`offset:inode::path` 与 `offset:inode:path`。
+    let loc_full = cmd_locate_file_in_scope(&state, &spoof.entry_key).expect("locate by entryKey");
+    let loc_wildcard = cmd_locate_file_in_scope(
+        &state,
+        &format!("{}:{}::{}", spoof.offset, spoof.inode, spoof.path),
+    )
+    .expect("locate by wildcard deleted");
+    let loc_triple = cmd_locate_file_in_scope(
+        &state,
+        &format!("{}:{}:{}", spoof.offset, spoof.inode, spoof.path),
+    )
+    .expect("locate by offset:inode:path");
+    assert_eq!(loc_full, loc_wildcard);
+    assert_eq!(loc_full, loc_triple);
+    assert_eq!(loc_full.scope_offset, spoof.offset);
+    assert_eq!(loc_full.scope_path, "DOCS");
+
+    let docs_page = cmd_query_files_page(
+        &state,
+        Some(loc_full.scope_offset),
+        Some(loc_full.scope_path.clone()),
+        "",
+        "",
+        "all",
+        loc_full.page,
+        100,
+        Some(false),
+    )
+    .expect("query DOCS page");
+    assert_eq!(docs_page.items[loc_full.index_in_page].path, "DOCS/CASE.TXT");
+
+    // 3b. 分区根目录文件定位与普通文本单条目魔数识别（无误报）。
+    let root_page = cmd_query_files_page(
+        &state,
+        Some(spoof.offset),
+        Some(String::new()),
+        "",
+        "",
+        "active",
+        0,
+        100,
+        Some(false),
+    )
+    .expect("query root files");
+    let root_file = root_page
+        .items
+        .iter()
+        .find(|e| !e.directory && !e.path.contains('/'))
+        .expect("分区根目录应存在现存普通文件");
+    let root_key = format!(
+        "{}:{}:{}:{}",
+        root_file.offset,
+        root_file.inode,
+        if root_file.deleted { 1 } else { 0 },
+        root_file.path
+    );
+    let loc_root = cmd_locate_file_in_scope(&state, &root_key).expect("locate root file");
+    assert_eq!(loc_root.scope_offset, root_file.offset);
+    assert_eq!(loc_root.scope_path, "");
+
+    let root_all_page = cmd_query_files_page(
+        &state,
+        Some(loc_root.scope_offset),
+        Some(String::new()),
+        "",
+        "",
+        "all",
+        loc_root.page,
+        100,
+        Some(false),
+    )
+    .expect("query root all page");
+    assert_eq!(
+        root_all_page.items[loc_root.index_in_page].path,
+        root_file.path
+    );
+
+    let normal_magic =
+        cmd_inspect_entry_magic(&state, &root_key).expect("inspect normal root file magic");
+    assert!(!normal_magic.mismatch);
+    assert_eq!(normal_magic.severity, "none");
 
     state.shutdown_all();
 }

@@ -9,12 +9,19 @@ import { Modal } from './Modal';
 
 interface FindingNoteDialogProps {
   entry: EntryView;
+  /** 可选预填取证分析笔记（例如从魔数伪装检测告警一键带入） */
+  initialNote?: string;
   onSaved: (snapshot: CaseSnapshot) => void;
   onClose: () => void;
 }
 
-export const FindingNoteDialog: React.FC<FindingNoteDialogProps> = ({ entry, onSaved, onClose }) => {
-  const [note, setNote] = useState('');
+export const FindingNoteDialog: React.FC<FindingNoteDialogProps> = ({
+  entry,
+  initialNote = '',
+  onSaved,
+  onClose,
+}) => {
+  const [note, setNote] = useState(initialNote);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

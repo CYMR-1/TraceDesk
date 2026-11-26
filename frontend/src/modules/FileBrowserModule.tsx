@@ -14,7 +14,14 @@ import { PreviewPane } from '../components/PreviewPane';
 import { SplitPane } from '../components/SplitPane';
 import { VirtualTable, type VirtualColumn } from '../components/VirtualTable';
 import { canExportEntry, type FeatureRegistry } from '../features/registry';
-import type { CaseSnapshot, EntryView, TreeNodeDto } from '../types/ipc';
+import type {
+  CaseSnapshot,
+  EntryView,
+  LocateEntryRequest,
+  MagicMismatchItemDto,
+  ScanMagicMismatchesResponse,
+  TreeNodeDto,
+} from '../types/ipc';
 import { assetUrl, formatBytes, formatError } from '../utils/assets';
 
 const PAGE_SIZE = 100;
@@ -33,6 +40,8 @@ interface FileBrowserModuleProps {
   busy: boolean;
   scanningPartitions: boolean;
   selectedEntry: EntryView | null;
+  /** 跨模块一键跳转定位原文件目标请求 */
+  locateTarget?: LocateEntryRequest | null;
   onSelectEntry: (entry: EntryView | null) => void;
   onDetailChange: (detail: string) => void;
   onScanPartitions: () => void;
@@ -41,7 +50,7 @@ interface FileBrowserModuleProps {
   onCancelScan: () => void;
   onBrowseDirectory: (offset: number, inode: string | null, path: string) => Promise<EntryView[] | null>;
   onExportEntry: (entry: EntryView) => void;
-  onRecordNote: (entry: EntryView) => void;
+  onRecordNote: (entry: EntryView, prefillNote?: string) => void;
   onHashEntry: (entry: EntryView) => void;
   onCompareEntry: (entry: EntryView) => void;
   onSearchInFile: (entry: EntryView) => void;
@@ -53,6 +62,7 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
   busy,
   scanningPartitions,
   selectedEntry,
+  locateTarget = null,
   onSelectEntry,
   onDetailChange,
   onScanPartitions,
@@ -80,6 +90,19 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
   const [totalPages, setTotalPages] = useState(1);
   const [items, setItems] = useState<EntryView[]>([]);
   const [loadingList, setLoadingList] = useState(false);
+  const [scrollToRowIndex, setScrollToRowIndex] = useState<number | null>(null);
+
+  // 文件魔数伪装检测缓存与筛选状态（切换案件/镜像时自动清空）
+  const [magicScanResult, setMagicScanResult] = useState<ScanMagicMismatchesResponse | null>(null);
+  const [scanningMagic, setScanningMagic] = useState(false);
+  const [onlyMagicMismatch, setOnlyMagicMismatch] = useState(false);
+
+  // 跨模块定位附带的十六进制精确字节高亮目标
+  const [previewLocateSpec, setPreviewLocateSpec] = useState<{
+    byteOffset: number;
+    highlightLength?: number | null;
+    token: number;
+  } | null>(null);
 
   // 左侧懒加载目录树状态
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set(['__image__']));
@@ -100,8 +123,19 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
   const loadingBranchesRef = useRef<Set<string>>(new Set());
   const selectedEntryRef = useRef<EntryView | null>(selectedEntry);
   selectedEntryRef.current = selectedEntry;
-  /** 点击左侧树中的文件时登记待选中条目，待统一分页查询返回后自动高亮，避免并发双发 queryFilesPage */
-  const pendingSelectRef = useRef<{ entryId: string; fallbackIndex?: number } | null>(null);
+  /** 左侧树点击或跨模块跳转时登记待选中条目，待统一分页查询返回后自动高亮定位 */
+  const pendingSelectRef = useRef<{
+    entryId: string;
+    fallbackIndex?: number;
+    offset?: number;
+    inode?: string;
+    path?: string;
+    deleted?: boolean;
+    byteOffset?: number | null;
+    highlightLength?: number | null;
+    locateToken?: number;
+  } | null>(null);
+  const lastLocateRequestIdRef = useRef<number>(0);
   const lastQuickLocKeyRef = useRef<string>('');
 
   const evidence = snapshot?.evidence ?? null;
@@ -216,7 +250,12 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
     setAppliedKeyword('');
     setStatusFilter('all');
     setPage(0);
+    setScrollToRowIndex(null);
     setSelectedTreeId('__image__');
+    setMagicScanResult(null);
+    setScanningMagic(false);
+    setOnlyMagicMismatch(false);
+    setPreviewLocateSpec(null);
 
     const initialExpanded = new Set<string>(['__image__']);
     for (const part of partitions) {
@@ -251,7 +290,10 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
   }, [snapshot?.quickLocation]);
 
   const handleSelectRow = useCallback(
-    (entry: EntryView) => {
+    (entry: EntryView, preserveLocate = false) => {
+      if (!preserveLocate) {
+        setPreviewLocateSpec(null);
+      }
       onSelectEntry(entry);
       onDetailChange(
         `${entry.path}  ·  ${entry.status}  ·  inode ${entry.inode || '—'}  ·  ${entry.size} 字节  ·  分区偏移 ${entry.offset}`
@@ -259,6 +301,166 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
     },
     [onSelectEntry, onDetailChange]
   );
+
+  // 建立魔数伪装条目多维索引（同时兼容 entryKey、四元组与三元组精确匹配）
+  const magicLookup = useMemo(() => {
+    const byKey = new Map<string, MagicMismatchItemDto>();
+    const byFull = new Map<string, MagicMismatchItemDto>();
+    const byTri = new Map<string, MagicMismatchItemDto>();
+    for (const m of magicScanResult?.mismatches ?? []) {
+      byKey.set(m.entryKey, m);
+      byFull.set(`${m.offset}|${m.inode}|${m.deleted ? 1 : 0}|${m.path}`, m);
+      byTri.set(`${m.offset}|${m.inode}|${m.deleted ? 1 : 0}`, m);
+    }
+    return { byKey, byFull, byTri };
+  }, [magicScanResult]);
+
+  const findMagicMismatch = useCallback(
+    (entry: EntryView): MagicMismatchItemDto | undefined => {
+      if (!magicScanResult || magicScanResult.mismatches.length === 0) return undefined;
+      return (
+        magicLookup.byKey.get(entry.entryId) ??
+        magicLookup.byFull.get(`${entry.offset}|${entry.inode}|${entry.deleted ? 1 : 0}|${entry.path}`) ??
+        magicLookup.byTri.get(`${entry.offset}|${entry.inode}|${entry.deleted ? 1 : 0}`)
+      );
+    },
+    [magicScanResult, magicLookup]
+  );
+
+  /** 触发全案文件魔数与扩展名伪装扫描 */
+  const handleScanMagicMismatches = useCallback(async () => {
+    if (!evidence || busy || scanningMagic) return;
+    const gen = caseGenRef.current;
+    setScanningMagic(true);
+    onDetailChange('正在扫描文件头魔数（Magic Bytes）与扩展名伪装…');
+    try {
+      const res = await tauriApi.scanMagicMismatches();
+      if (gen !== caseGenRef.current) return;
+      setMagicScanResult(res);
+      setOnlyMagicMismatch(false);
+      onDetailChange(
+        `魔数伪装检测完成：已扫描 ${res.scannedCount} 项（跳过 ${res.skippedCount} 项），发现 ${res.mismatchCount} 处疑似伪装（耗时 ${res.elapsedMs} ms）`
+      );
+    } catch (err) {
+      if (gen !== caseGenRef.current) return;
+      onDetailChange(`魔数伪装检测失败：${formatError(err)}`);
+    } finally {
+      if (gen === caseGenRef.current) {
+        setScanningMagic(false);
+      }
+    }
+  }, [evidence, busy, scanningMagic, onDetailChange]);
+
+  // 响应来自 MACB 时间线 / 取证发现 / 内容搜索的“一键跳转定位原文件”
+  useEffect(() => {
+    if (!locateTarget || !locateTarget.requestId) return;
+    if (lastLocateRequestIdRef.current === locateTarget.requestId) return;
+    lastLocateRequestIdRef.current = locateTarget.requestId;
+
+    if (!snapshot || !evidence) {
+      onDetailChange('尚未加载镜像，无法定位原文件。');
+      return;
+    }
+
+    const gen = caseGenRef.current;
+    // 自动清除可能阻塞定位的筛选条件
+    setOnlyMagicMismatch(false);
+    setSuffix('');
+    setKeyword('');
+    setAppliedSuffix('');
+    setAppliedKeyword('');
+    setStatusFilter('all');
+
+    const normalizedDeleted = Boolean(locateTarget.deleted);
+    const cleanPath = locateTarget.path.replace(/^\/+|\/+$/g, '');
+    const candidates: string[] = [];
+    if (locateTarget.entryId && locateTarget.entryId.trim()) {
+      candidates.push(locateTarget.entryId.trim());
+    }
+    candidates.push(`${locateTarget.offset}:${locateTarget.inode}:${normalizedDeleted ? 1 : 0}:${cleanPath}`);
+    candidates.push(`${locateTarget.offset}:${locateTarget.inode}:${normalizedDeleted ? 1 : 0}`);
+
+    void (async () => {
+      if (isQuickMode) {
+        const lastSlash = cleanPath.lastIndexOf('/');
+        const parentPath = lastSlash >= 0 ? cleanPath.slice(0, lastSlash) : '';
+        const parentInode = ancestors[`${locateTarget.offset}:${parentPath}`] ?? null;
+        const browsed = await onBrowseDirectory(locateTarget.offset, parentInode, parentPath);
+        if (gen !== caseGenRef.current || !browsed) return;
+        const matchedIdx = browsed.findIndex(
+          (e) =>
+            (locateTarget.entryId && e.entryId === locateTarget.entryId) ||
+            (e.offset === locateTarget.offset &&
+              e.inode === locateTarget.inode &&
+              e.deleted === normalizedDeleted &&
+              e.path.replace(/^\/+|\/+$/g, '') === cleanPath)
+        );
+        if (matchedIdx >= 0) {
+          const matched = browsed[matchedIdx];
+          if (locateTarget.byteOffset != null && locateTarget.byteOffset >= 0) {
+            setPreviewLocateSpec({
+              byteOffset: locateTarget.byteOffset,
+              highlightLength: locateTarget.highlightLength ?? 1,
+              token: locateTarget.requestId ?? Date.now(),
+            });
+          } else {
+            setPreviewLocateSpec(null);
+          }
+          setScrollToRowIndex(matchedIdx);
+          handleSelectRow(matched, true);
+          onDetailChange(`已定位原文件：${matched.path}`);
+        } else {
+          onDetailChange(`未在当前目录中找到目标文件：${locateTarget.path}`);
+        }
+        return;
+      }
+
+      let located: { scopeOffset: number; scopePath: string; page: number; indexInPage: number } | null = null;
+      let resolvedId = candidates[0];
+      for (const cid of candidates) {
+        try {
+          located = await tauriApi.locateFileInScope({ entryId: cid });
+          resolvedId = cid;
+          break;
+        } catch {
+          // 继续尝试下一个候选标识格式
+        }
+      }
+      if (gen !== caseGenRef.current) return;
+      if (!located) {
+        onDetailChange(`未在当前文件清单中找到目标条目：${locateTarget.path}（请先确认已扫描对应分区）`);
+        return;
+      }
+
+      pendingSelectRef.current = {
+        entryId: resolvedId,
+        fallbackIndex: located.indexInPage,
+        offset: locateTarget.offset,
+        inode: locateTarget.inode,
+        path: cleanPath,
+        deleted: normalizedDeleted,
+        byteOffset: locateTarget.byteOffset ?? null,
+        highlightLength: locateTarget.highlightLength ?? null,
+        locateToken: locateTarget.requestId,
+      };
+      setScopeOffset(located.scopeOffset);
+      setScopePath(located.scopePath);
+      const targetDirId = `dir:${located.scopeOffset}:${located.scopePath}`;
+      setSelectedTreeId(targetDirId);
+      setExpandedIds((prev) => {
+        const next = new Set(prev);
+        next.add('__image__');
+        next.add(`part:${located.scopeOffset}`);
+        next.add(`dir:${located.scopeOffset}:`);
+        if (located.scopePath) {
+          next.add(targetDirId);
+        }
+        return next;
+      });
+      setPage(located.page);
+      setFilterSeq((n) => n + 1);
+    })();
+  }, [locateTarget, snapshot, evidence, isQuickMode, ancestors, onBrowseDirectory, handleSelectRow, onDetailChange]);
 
   const quickLocOffset = snapshot?.quickLocation?.offset ?? null;
   const quickLocPath = snapshot?.quickLocation?.path ?? null;
@@ -296,20 +498,50 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
         setPage(res.page);
         setTotalPages(Math.max(1, res.totalPages));
 
-        // 优先处理来自左侧树文件点击的待选中条目，避免与当前分页查询竞态清空选中态
+        // 优先处理来自左侧树文件点击或跨模块跳转的待选中条目，避免与当前分页查询竞态清空选中态
         const pendingSel = pendingSelectRef.current;
         if (pendingSel) {
           pendingSelectRef.current = null;
-          const found =
-            res.items.find((i) => i.entryId === pendingSel.entryId) ??
-            (pendingSel.fallbackIndex !== undefined ? res.items[pendingSel.fallbackIndex] : undefined);
-          if (found) {
-            handleSelectRow(found);
+          let foundIdx = res.items.findIndex((i) => i.entryId === pendingSel.entryId);
+          if (foundIdx < 0 && pendingSel.offset !== undefined && pendingSel.inode !== undefined) {
+            foundIdx = res.items.findIndex(
+              (i) =>
+                i.offset === pendingSel.offset &&
+                i.inode === pendingSel.inode &&
+                (pendingSel.deleted === undefined || i.deleted === pendingSel.deleted) &&
+                (!pendingSel.path || i.path.replace(/^\/+|\/+$/g, '') === pendingSel.path)
+            );
+          }
+          if (foundIdx < 0 && pendingSel.fallbackIndex !== undefined && res.items[pendingSel.fallbackIndex]) {
+            foundIdx = pendingSel.fallbackIndex;
+          }
+          if (foundIdx >= 0) {
+            const found = res.items[foundIdx];
+            if (pendingSel.byteOffset != null && pendingSel.byteOffset >= 0) {
+              setPreviewLocateSpec({
+                byteOffset: pendingSel.byteOffset,
+                highlightLength: pendingSel.highlightLength ?? 1,
+                token: pendingSel.locateToken ?? Date.now(),
+              });
+            } else {
+              setPreviewLocateSpec(null);
+            }
+            setScrollToRowIndex(foundIdx);
+            handleSelectRow(found, true);
+            if (pendingSel.locateToken) {
+              const offsetNote =
+                pendingSel.byteOffset != null
+                  ? ` · HEX 偏移 0x${pendingSel.byteOffset.toString(16).toUpperCase()}`
+                  : '';
+              onDetailChange(
+                `已定位原文件：${found.path} · inode ${found.inode || '—'} · 分区偏移 ${found.offset}${offsetNote}`
+              );
+            }
             return;
           }
         }
         const curSelected = selectedEntryRef.current;
-        if (curSelected && !res.items.some((i) => i.entryId === curSelected.entryId)) {
+        if (curSelected && !onlyMagicMismatch && !res.items.some((i) => i.entryId === curSelected.entryId)) {
           onSelectEntry(null);
         }
       } catch (err) {
@@ -339,6 +571,7 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
       appliedSuffix,
       appliedKeyword,
       statusFilter,
+      onlyMagicMismatch,
       handleSelectRow,
       onSelectEntry,
       onDetailChange,
@@ -364,6 +597,7 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
     setAppliedSuffix('');
     setAppliedKeyword('');
     setStatusFilter('all');
+    setOnlyMagicMismatch(false);
     setPage(0);
     setFilterSeq((n) => n + 1);
   }, []);
@@ -724,22 +958,90 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
       );
     });
 
-  // 文件列表 9 列定义
+  // 当开启“仅看疑似伪装”胶囊过滤时，全案聚合展示所有魔数不匹配条目（跨目录/跨分页无需手动翻页）
+  const displayedRows = useMemo<EntryView[]>(() => {
+    if (!onlyMagicMismatch || !magicScanResult) {
+      return items;
+    }
+    const itemByKey = new Map<string, EntryView>();
+    for (const item of items) {
+      itemByKey.set(item.entryId, item);
+      itemByKey.set(`${item.offset}|${item.inode}|${item.deleted ? 1 : 0}|${item.path}`, item);
+    }
+    const sfx = appliedSuffix.trim().toLowerCase();
+    const kw = appliedKeyword.trim().toLowerCase();
+
+    return magicScanResult.mismatches
+      .map((m): EntryView => {
+        const existing =
+          itemByKey.get(m.entryKey) ??
+          itemByKey.get(`${m.offset}|${m.inode}|${m.deleted ? 1 : 0}|${m.path}`);
+        if (existing) return existing;
+        const name = m.path.split('/').pop() || m.path;
+        return {
+          entryId: m.entryKey,
+          name,
+          path: m.path,
+          status: m.deleted ? '已删除' : '现存',
+          size: m.size,
+          inode: m.inode,
+          mtime: '—',
+          atime: '—',
+          ctime: '—',
+          crtime: '—',
+          offset: m.offset,
+          directory: false,
+          deleted: m.deleted,
+          mode: m.deleted ? '-/r' : 'r/rrwxrwxrwx',
+          canExport: true,
+        };
+      })
+      .filter((entry) => {
+        if (sfx && !entry.name.toLowerCase().endsWith(sfx)) return false;
+        if (kw && !entry.path.toLowerCase().includes(kw)) return false;
+        if (statusFilter === 'active' && entry.deleted) return false;
+        if (statusFilter === 'deleted' && !entry.deleted) return false;
+        return true;
+      });
+  }, [onlyMagicMismatch, magicScanResult, items, appliedSuffix, appliedKeyword, statusFilter]);
+
+  // 文件列表 9 列定义（附带魔数伪装检测语义徽章）
   const fileColumns = useMemo<VirtualColumn<EntryView>[]>(
     () => [
       {
         key: 'name',
         label: '文件名称 / 镜像内路径',
-        width: 280,
-        minWidth: 160,
+        width: 332,
+        minWidth: 180,
         getText: (e) => e.name || '/',
-        getTooltip: (e) => `${e.path}\n分区偏移 ${e.offset} 扇区`,
-        renderCell: (e) => (
-          <>
-            <EntryIcon kind={inferEntryIconKind(e)} size={15} />
-            <span className="td-vtable-cell-text">{e.name || '/'}</span>
-          </>
-        ),
+        getTooltip: (e) => {
+          const mismatch = findMagicMismatch(e);
+          if (mismatch) {
+            return `${e.path}\n分区偏移 ${e.offset} 扇区\n【${mismatch.severity === 'high' ? '高危伪装' : '疑似伪装'}】${mismatch.reason}\n真实类型：${mismatch.detectedLabel} (${mismatch.detectedType})\n魔数 HEX：${mismatch.magicHex}`;
+          }
+          return `${e.path}\n分区偏移 ${e.offset} 扇区`;
+        },
+        renderCell: (e) => {
+          const mismatch = findMagicMismatch(e);
+          return (
+            <>
+              <EntryIcon kind={inferEntryIconKind(e)} size={15} />
+              <span className="td-vtable-cell-text">{e.name || '/'}</span>
+              {mismatch && (
+                <span
+                  className={`td-magic-badge ${
+                    mismatch.severity === 'high' ? 'td-magic-badge--high' : 'td-magic-badge--medium'
+                  }`}
+                  title={`${mismatch.reason}\n检测类型：${mismatch.detectedLabel} (${mismatch.detectedType})\n魔数 HEX：${mismatch.magicHex}`}
+                >
+                  {mismatch.severity === 'high'
+                    ? `高危伪装 · 实为 ${mismatch.detectedType}`
+                    : `疑似伪装 · 实为 ${mismatch.detectedType}`}
+                </span>
+              )}
+            </>
+          );
+        },
       },
       {
         key: 'status',
@@ -810,7 +1112,7 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
         getText: (e) => String(e.offset),
       },
     ],
-    []
+    [findMagicMismatch]
   );
 
   // 右键菜单构造（支持文件条目菜单与分区节点“仅索引此分区”菜单）
@@ -872,10 +1174,12 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
   }, [evidence, isQuickMode, snapshot?.quickLocation, imageName, scopeOffset, scopePath]);
 
   const inventoryTotal = snapshot?.inventoryCount ?? total;
-  const showPagination = total > PAGING_THRESHOLD || totalPages > 1;
-  const resultCountText = isQuickMode
-    ? `当前目录 ${inventoryTotal} 项 · 匹配 ${total} 项`
-    : `当前范围 ${total} 项 · 完整清单 ${inventoryTotal} 项 · 时间 UTC+8`;
+  const showPagination = !onlyMagicMismatch && (total > PAGING_THRESHOLD || totalPages > 1);
+  const resultCountText = onlyMagicMismatch
+    ? `仅看疑似伪装：显示 ${displayedRows.length} / ${magicScanResult?.mismatchCount ?? 0} 处检出 · 再次点击「仅看疑似伪装」恢复完整列表`
+    : isQuickMode
+      ? `当前目录 ${inventoryTotal} 项 · 匹配 ${total} 项`
+      : `当前范围 ${total} 项 · 完整清单 ${inventoryTotal} 项 · 时间 UTC+8`;
 
   const treeFooterText = !evidence
     ? '尚未读取文件树'
@@ -1269,6 +1573,58 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
         >
           重置
         </button>
+
+        <div className="td-toolbar-divider" />
+
+        <button
+          type="button"
+          className="td-btn td-btn--soft"
+          disabled={busy || !evidence || scanningMagic}
+          title="读取镜像文件头魔数（Magic Bytes），自动检出扩展名伪装与高危可执行文件隐藏"
+          onClick={() => void handleScanMagicMismatches()}
+        >
+          <UiIcon
+            name="magic"
+            size={14}
+            color={busy || !evidence || scanningMagic ? 'var(--text-disabled)' : 'var(--accent-soft-text)'}
+          />
+          {scanningMagic ? '正在检测魔数…' : '魔数伪装检测'}
+        </button>
+
+        {magicScanResult && (
+          <>
+            <span
+              className="td-muted-text"
+              style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}
+              title={`已扫描 ${magicScanResult.scannedCount} 项，跳过 ${magicScanResult.skippedCount} 项，耗时 ${magicScanResult.elapsedMs} ms`}
+            >
+              已扫 {magicScanResult.scannedCount} 项 · {magicScanResult.elapsedMs}ms
+            </span>
+            {magicScanResult.mismatchCount > 0 ? (
+              <button
+                type="button"
+                className={`td-magic-filter-pill ${onlyMagicMismatch ? 'td-magic-filter-pill--active' : ''}`}
+                title={
+                  onlyMagicMismatch
+                    ? '点击恢复完整文件列表'
+                    : `点击仅展示检出的 ${magicScanResult.mismatchCount} 个疑似伪装文件`
+                }
+                onClick={() => setOnlyMagicMismatch((prev) => !prev)}
+              >
+                <UiIcon
+                  name="warning"
+                  size={12}
+                  color={onlyMagicMismatch ? '#FFFFFF' : 'var(--danger-fg)'}
+                />
+                仅看疑似伪装 ({magicScanResult.mismatchCount})
+              </button>
+            ) : (
+              <span className="td-pill td-pill--ok" title="未检出扩展名与真实文件头魔数冲突的文件">
+                未发现伪装
+              </span>
+            )}
+          </>
+        )}
       </div>
 
       <div className="td-breadcrumb-bar" title={breadcrumbText}>
@@ -1276,10 +1632,11 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
       </div>
 
       <VirtualTable
-        rows={items}
+        rows={displayedRows}
         columns={fileColumns}
         rowKey={(e) => e.entryId}
         selectedKey={selectedEntry?.entryId ?? null}
+        scrollToIndex={scrollToRowIndex}
         onSelectRow={(entry) => handleSelectRow(entry)}
         onDoubleClickRow={(entry) => handleDoubleClickRow(entry)}
         onContextMenuRow={(e, entry) => {
@@ -1292,9 +1649,11 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
             ? '尚未打开案件。请先新建或打开案件。'
             : !evidence
               ? '尚未加载镜像。请点击右上角「加载镜像」选择 RAW 或 .E01 首段。'
-              : loadingList
-                ? '正在读取文件列表…'
-                : '当前范围没有匹配项'
+              : onlyMagicMismatch
+                ? '当前筛选条件下无疑似伪装文件'
+                : loadingList
+                  ? '正在读取文件列表…'
+                  : '当前范围没有匹配项'
         }
       />
 
@@ -1360,7 +1719,16 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
       </div>
       <PreviewPane
         entry={selectedEntry}
-        emptyMessage={items.length === 0 && evidence ? '没有匹配项' : '请选择文件'}
+        emptyMessage={displayedRows.length === 0 && evidence ? '没有匹配项' : '请选择文件'}
+        cachedMagic={selectedEntry ? findMagicMismatch(selectedEntry) ?? null : null}
+        highlightByteStart={previewLocateSpec?.byteOffset ?? null}
+        highlightByteLength={previewLocateSpec?.highlightLength ?? null}
+        locateToken={previewLocateSpec?.token ?? 0}
+        onRecordFindingWithPrefill={
+          canRecordNoteSelected
+            ? (targetEntry, prefillNote) => onRecordNote(targetEntry, prefillNote)
+            : undefined
+        }
       />
     </div>
   );

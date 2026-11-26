@@ -1,5 +1,5 @@
-//! 实现 `ui-contract.md` §3 与 `frontend/src/api/tauri.ts` 中定义的全部 38 个 Tauri 命令及
-//! 6 类流式事件（含便捷别名）。
+//! 实现 `ui-contract.md` §3 与 `frontend/src/api/tauri.ts` 中定义的全部 Tauri IPC 命令及
+//! 6 类流式事件（含便捷别名、魔数伪装检测、离线 HTML 报告与可视化复核包核验）。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -13,6 +13,10 @@ use memchr::memmem;
 use rayon::prelude::*;
 use serde_json::{Map, Value, json};
 use tauri::{AppHandle, Emitter, State};
+use tracedesk_core::magic::{
+    MagicCheckItem, MagicScanReport, inspect_entry_magic_at_image, scan_entries_magic_mismatches,
+};
+use tracedesk_core::review::verify_bundle_detailed;
 use tracedesk_mcp::McpActivitySnapshot;
 use tracedesk_core::{
     AuditOrigin, BrowserFilter, BuildBundleOptions, CONTEXT_BYTES, Case, CoreError, EvidenceInfo,
@@ -36,11 +40,12 @@ use uuid::Uuid;
 use crate::mcp_http::mcp_list_cases;
 use crate::state::{
     AppPathsDto, AppState, AuditFilterOptionsDto, AuditRecordDto, BookmarkSearchHitsResponse,
-    BrowseDirectoryResponse, BuildTimelineResponse, BundleExportRowDto, BundleMaterialsResponse,
-    BundleSearchRowDto, BusyCheckResponse, CancelResponse, CaseSnapshot, CloseCaseResponse,
-    EntryView, ExamineFileResponse, ExportFileResponse, ExportFindingsResponse,
-    FindingFilterOptionsDto, FindingGroupDto, FindingRecordDto, GuidePageDto, HashFinishedEvent,
-    HashProgressEvent, HexRowDto, ListAuditLogResponse, ListFindingsResponse, LocateFileResponse,
+    BrowseDirectoryResponse, BuildTimelineResponse, BundleCrossCheckDto, BundleExportRowDto,
+    BundleMaterialsResponse, BundleMemberCheckDto, BundleSearchRowDto, BundleVerificationDetailDto,
+    BusyCheckResponse, CancelResponse, CaseSnapshot, CloseCaseResponse, EntryView,
+    ExamineFileResponse, ExportFileResponse, ExportFindingsResponse, FindingFilterOptionsDto,
+    FindingGroupDto, FindingRecordDto, GuidePageDto, HashFinishedEvent, HashProgressEvent,
+    HexRowDto, HtmlReportDto, ListAuditLogResponse, ListFindingsResponse, LocateFileResponse,
     McpStatus, OpenInOsResponse, PathAndSnapshotResponse, PathResponse, PreviewImageResponse,
     PreviewPageResponse, QueryFilesPageResponse, QueryTimelinePageResponse, RecentCaseDto,
     ScanPartitionsResponse, SearchFinishedEvent, SearchHitDto, SearchHitsEvent,
@@ -1316,6 +1321,69 @@ pub fn cmd_locate_file_in_scope(
         page: loc.page,
         index_in_page: loc.index_in_page,
     })
+}
+
+/// 扫描当前案件清单中的文件头魔数与扩展名伪装情况（短锁提取快照数据后释放 `case_lock`，无锁并行扫描）。
+pub fn cmd_scan_magic_mismatches(state: &Arc<AppState>) -> Result<MagicScanReport, String> {
+    state.task_cancel.store(false, Ordering::Relaxed);
+    let cancel = Arc::clone(&state.task_cancel);
+
+    // 仅持短锁提取镜像路径、清单克隆与分区偏移列表，随即立即释放 `case_lock` 避免阻塞桌面与 MCP 协同。
+    let (image_path, entries, partition_offsets) = {
+        let case_guard = state
+            .case_lock
+            .lock()
+            .map_err(|_| "案件状态锁异常".to_string())?;
+        let case = case_guard
+            .as_ref()
+            .ok_or_else(|| "请先新建或打开案件".to_string())?;
+        let ev = case
+            .data()
+            .evidence
+            .as_ref()
+            .ok_or_else(|| "请先加载镜像".to_string())?;
+        let image_path = PathBuf::from(&ev.path);
+        // 常规模式扫描完整清单；大镜像按需目录浏览模式下若完整清单尚未建立，则扫描当前已展示目录条目。
+        let entries = if !case.data().inventory.is_empty() {
+            case.data().inventory.clone()
+        } else {
+            case.displayed_entries().to_vec()
+        };
+        let partition_offsets: Vec<u64> = ev.partitions.iter().map(|p| p.offset).collect();
+        (image_path, entries, partition_offsets)
+    };
+
+    scan_entries_magic_mismatches(
+        &image_path,
+        &entries,
+        &partition_offsets,
+        Some(cancel.as_ref()),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// 只读识别单个文件的前 4096 字节魔数并与扩展名比对（短锁解析条目后释放读锁再执行镜像 I/O）。
+pub fn cmd_inspect_entry_magic(
+    state: &Arc<AppState>,
+    entry_key: &str,
+) -> Result<MagicCheckItem, String> {
+    let (image_path, entry) = {
+        let view = state
+            .view
+            .read()
+            .map_err(|_| "视图缓存锁异常".to_string())?;
+        let image = view
+            .image_path
+            .clone()
+            .ok_or_else(|| "请先加载镜像".to_string())?;
+        let (_, entry) = view
+            .resolve_entry(entry_key)
+            .ok_or_else(|| format!("未在当前清单中找到条目：{entry_key}"))?;
+        (image, entry)
+    };
+
+    let tsk: Option<TskCli> = None;
+    inspect_entry_magic_at_image(&image_path, &entry, tsk.as_ref()).map_err(|e| e.to_string())
 }
 
 /* ==========================================================================================
@@ -3687,6 +3755,34 @@ pub fn cmd_generate_report(state: &Arc<AppState>) -> Result<PathAndSnapshotRespo
     })
 }
 
+/// 生成当前案件的离线自包含单文件 HTML 取证报告（落盘至 `reports/report_*.html` 并追加 `REPORT_GENERATE` 审计记录）。
+pub fn cmd_generate_html_report(state: &Arc<AppState>) -> Result<HtmlReportDto, String> {
+    let mut case_guard = state
+        .case_lock
+        .lock()
+        .map_err(|_| "案件状态锁异常".to_string())?;
+    let case = case_guard
+        .as_mut()
+        .ok_or_else(|| "请先新建或打开案件".to_string())?;
+
+    let res = case
+        .with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| c.generate_html_report(None))
+        .map_err(|e| e.to_string())?;
+
+    let mut view = state
+        .view
+        .write()
+        .map_err(|_| "视图缓存锁异常".to_string())?;
+    view.sync_from_case(case, false);
+
+    Ok(HtmlReportDto {
+        path: res.path.to_string_lossy().into_owned(),
+        sha256: res.sha256,
+        bytes: res.bytes,
+        generated_at: res.generated_at,
+    })
+}
+
 pub fn cmd_inspect_bundle_materials(
     state: &Arc<AppState>,
 ) -> Result<BundleMaterialsResponse, String> {
@@ -3785,6 +3881,58 @@ pub fn cmd_build_review_bundle(
     Ok(PathAndSnapshotResponse {
         path: res.bundle_path.to_string_lossy().into_owned(),
         snapshot,
+    })
+}
+
+/// 独立核验可交付复核包 ZIP（无需先打开案件），返回整包摘要、审计哈希链、跨文件交叉核对与逐成员明细。
+pub fn cmd_verify_review_bundle(
+    bundle_path: &str,
+    expected_sha256: Option<&str>,
+) -> Result<BundleVerificationDetailDto, String> {
+    let trimmed_path = bundle_path.trim();
+    if trimmed_path.is_empty() {
+        return Err("请选择或输入复核包 ZIP 文件路径".to_string());
+    }
+    let clean_expected = expected_sha256.map(str::trim).filter(|s| !s.is_empty());
+
+    let detail = verify_bundle_detailed(Path::new(trimmed_path), clean_expected)
+        .map_err(|e| e.to_string())?;
+
+    Ok(BundleVerificationDetailDto {
+        ok: detail.ok,
+        bundle_path: detail.bundle_path,
+        bundle_sha256: detail.bundle_sha256,
+        expected_sha256: detail.expected_sha256,
+        sha256_source: detail.sha256_source,
+        sha256_matched: detail.sha256_matched,
+        audit_valid: detail.audit_valid,
+        audit_count: detail.audit_count,
+        audit_head: detail.audit_head,
+        audit_error: detail.audit_error,
+        manifest_valid: detail.manifest_valid,
+        members: detail
+            .members
+            .into_iter()
+            .map(|m| BundleMemberCheckDto {
+                path: m.path,
+                category: m.category,
+                status: m.status,
+                expected_sha256: m.expected_sha256,
+                actual_sha256: m.actual_sha256,
+                size: m.size,
+                message: m.message,
+            })
+            .collect(),
+        cross_checks: detail
+            .cross_checks
+            .into_iter()
+            .map(|c| BundleCrossCheckDto {
+                name: c.name,
+                status: c.status,
+                message: c.message,
+            })
+            .collect(),
+        errors: detail.errors,
     })
 }
 
@@ -4262,6 +4410,27 @@ pub async fn locate_file_in_scope(
 }
 
 #[tauri::command]
+pub async fn scan_magic_mismatches(
+    state: State<'_, Arc<AppState>>,
+) -> Result<MagicScanReport, String> {
+    let st = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || cmd_scan_magic_mismatches(&st))
+        .await
+        .map_err(|e| format!("后台任务执行异常：{e}"))?
+}
+
+#[tauri::command]
+pub async fn inspect_entry_magic(
+    state: State<'_, Arc<AppState>>,
+    entry_key: String,
+) -> Result<MagicCheckItem, String> {
+    let st = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || cmd_inspect_entry_magic(&st, &entry_key))
+        .await
+        .map_err(|e| format!("后台任务执行异常：{e}"))?
+}
+
+#[tauri::command]
 pub async fn preview_file_page(
     state: State<'_, Arc<AppState>>,
     entry_id: String,
@@ -4496,6 +4665,16 @@ pub async fn generate_report(
 }
 
 #[tauri::command]
+pub async fn generate_html_report(
+    state: State<'_, Arc<AppState>>,
+) -> Result<HtmlReportDto, String> {
+    let st = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || cmd_generate_html_report(&st))
+        .await
+        .map_err(|e| format!("后台任务执行异常：{e}"))?
+}
+
+#[tauri::command]
 pub async fn inspect_bundle_materials(
     state: State<'_, Arc<AppState>>,
 ) -> Result<BundleMaterialsResponse, String> {
@@ -4534,6 +4713,18 @@ pub async fn build_review_bundle(
     let st = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || {
         cmd_build_review_bundle(&st, selected_export_indices, selected_search_indices)
+    })
+    .await
+    .map_err(|e| format!("后台任务执行异常：{e}"))?
+}
+
+#[tauri::command]
+pub async fn verify_review_bundle(
+    bundle_path: String,
+    expected_sha256: Option<String>,
+) -> Result<BundleVerificationDetailDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cmd_verify_review_bundle(&bundle_path, expected_sha256.as_deref())
     })
     .await
     .map_err(|e| format!("后台任务执行异常：{e}"))?

@@ -14,9 +14,11 @@ import type {
   ExportFileResponse,
   ExportFindingsResponse,
   FindingGroupDto,
+  GenerateHtmlReportResponse,
   HashFinishedEvent,
   HashProgressEvent,
   HexRowDto,
+  InspectEntryMagicResponse,
   ListAuditLogResponse,
   ListFindingsResponse,
   ListMcpActivitiesParams,
@@ -31,6 +33,7 @@ import type {
   QueryFilesPageResponse,
   QueryTimelinePageResponse,
   RecentCaseDto,
+  ScanMagicMismatchesResponse,
   SearchEncoding,
   SearchFinishedEvent,
   SearchHitDto,
@@ -44,6 +47,7 @@ import type {
   ToolCatalogItem,
   TreeChildrenResponse,
   TreeNodeDto,
+  VerifyReviewBundleResponse,
 } from '../types/ipc';
 import { computeMcpActivityStats, stripTrailingVersion } from '../utils/mcpActivity';
 
@@ -1150,7 +1154,27 @@ export const demoBackend = {
   },
 
   async locate_file_in_scope(args: { entryId: string }): Promise<LocateFileResponse> {
-    const entry = DEMO_ENTRIES.find((e) => e.entryId === args.entryId) || DEMO_ENTRIES[0];
+    const raw = (args.entryId || '').trim();
+    let entry = DEMO_ENTRIES.find((e) => e.entryId === raw);
+    if (!entry) {
+      const parts = raw.split(':');
+      if (parts.length >= 3) {
+        const off = Number(parts[0]);
+        const inode = parts[1];
+        const deleted = parts[2] === '1' || parts[2] === 'true';
+        const pathOpt = parts.length >= 4 ? parts.slice(3).join(':') : null;
+        entry = DEMO_ENTRIES.find(
+          (e) =>
+            e.offset === off &&
+            e.inode === inode &&
+            e.deleted === deleted &&
+            (!pathOpt || e.path === pathOpt)
+        );
+      }
+    }
+    if (!entry) {
+      entry = DEMO_ENTRIES[0];
+    }
     const cleanPath = entry.path.replace(/^\/+|\/+$/g, '');
     const lastSlash = cleanPath.lastIndexOf('/');
     const scopePath = lastSlash >= 0 ? cleanPath.slice(0, lastSlash) : '';
@@ -1660,6 +1684,248 @@ export const demoBackend = {
     return {
       path: `${currentCase.caseDir}\\reports\\report_${currentCase.number}.md`,
       snapshot: currentCase,
+    };
+  },
+
+  async generate_html_report(): Promise<GenerateHtmlReportResponse> {
+    if (!currentCase) throw new Error('尚未打开案件');
+    return {
+      path: `${currentCase.caseDir}\\reports\\report_${currentCase.number}.html`,
+      sha256: '8b4e2f19a7c63d0e5f91a2c3d4e5f60718293a4b5c6d7e8f90123456789abcde',
+      bytes: 48620,
+      generatedAt: '2026-03-10 10:32:18 UTC+8',
+    };
+  },
+
+  async verify_review_bundle(args: {
+    bundlePath: string;
+    expectedSha256?: string | null;
+  }): Promise<VerifyReviewBundleResponse> {
+    const bundlePath = (args.bundlePath || '').trim();
+    if (!bundlePath) {
+      throw new Error('请先选择或输入复核包 .zip 文件路径');
+    }
+    const cleanBundleSha = '5a1f9c2e8d4b7031e6a2f4c890b1d3e5f7a9c1e3b5d7f90123456789abcdef12';
+    const expected = args.expectedSha256?.trim().toLowerCase() || null;
+    const isDemoTampered =
+      bundlePath.toLowerCase().includes('tamper') ||
+      bundlePath.includes('篡改') ||
+      (expected !== null && expected !== cleanBundleSha);
+    const sha256Source: 'manual' | 'sidecar' | 'none' = expected ? 'manual' : 'sidecar';
+    const resolvedExpected = expected ?? cleanBundleSha;
+    const sha256Matched = isDemoTampered ? false : true;
+    const auditHead = '7708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6';
+
+    if (isDemoTampered) {
+      return {
+        ok: false,
+        bundlePath,
+        bundleSha256: 'deadbeef8d4b7031e6a2f4c890b1d3e5f7a9c1e3b5d7f90123456789abcdef12',
+        expectedSha256: resolvedExpected,
+        sha256Source,
+        sha256Matched,
+        auditValid: false,
+        auditCount: 7,
+        auditHead,
+        auditError: '第 #6 条审计记录哈希重算不一致（期望 66f70819…，实测 99ee4411…），审计哈希链已断裂',
+        manifestValid: true,
+        members: [
+          {
+            path: 'report.md',
+            category: '报告',
+            status: 'tampered',
+            expectedSha256: '1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809',
+            actualSha256: 'ff2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f899',
+            size: 12840,
+            message: 'SHA-256 摘要不匹配（疑似被修改）',
+          },
+          {
+            path: 'report.html',
+            category: 'HTML 报告',
+            status: 'ok',
+            expectedSha256: '8b4e2f19a7c63d0e5f91a2c3d4e5f60718293a4b5c6d7e8f90123456789abcde',
+            actualSha256: '8b4e2f19a7c63d0e5f91a2c3d4e5f60718293a4b5c6d7e8f90123456789abcde',
+            size: 48620,
+            message: 'SHA-256 一致',
+          },
+          {
+            path: 'audit/audit.jsonl',
+            category: '审计日志',
+            status: 'tampered',
+            expectedSha256: '2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a',
+            actualSha256: 'ee3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809ee',
+            size: 4218,
+            message: 'SHA-256 摘要不匹配且链式校验断裂',
+          },
+          {
+            path: 'exports/CASE.TXT',
+            category: '导出副本',
+            status: 'ok',
+            expectedSha256: '4d91a3f28b0c7e65d1a9f4c2e38b7a605d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a',
+            actualSha256: '4d91a3f28b0c7e65d1a9f4c2e38b7a605d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a',
+            size: 112,
+            message: 'SHA-256 一致',
+          },
+        ],
+        crossChecks: [
+          { name: 'report.md', status: 'failed', message: '报告正文摘要与 manifest.json 记录不一致' },
+          { name: 'report.html', status: 'ok', message: 'HTML 报告与清单摘要及审计链记录一致' },
+          { name: 'searches/search_demo_1.json', status: 'ok', message: '搜索记录与审计链记录一致' },
+          { name: 'findings', status: 'failed', message: '审计链 #6 断链导致取证发现链校验失败' },
+        ],
+        errors: [
+          'ZIP 整包 SHA-256 与期望基线不一致',
+          '成员 report.md 摘要不匹配（检出篡改）',
+          '审计哈希链第 #6 条记录校验断裂',
+        ],
+      };
+    }
+
+    return {
+      ok: true,
+      bundlePath,
+      bundleSha256: cleanBundleSha,
+      expectedSha256: resolvedExpected,
+      sha256Source,
+      sha256Matched: true,
+      auditValid: true,
+      auditCount: 7,
+      auditHead,
+      auditError: null,
+      manifestValid: true,
+      members: [
+        {
+          path: 'report.md',
+          category: '报告',
+          status: 'ok',
+          expectedSha256: '1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809',
+          actualSha256: '1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809',
+          size: 12840,
+          message: 'SHA-256 一致',
+        },
+        {
+          path: 'report.html',
+          category: 'HTML 报告',
+          status: 'ok',
+          expectedSha256: '8b4e2f19a7c63d0e5f91a2c3d4e5f60718293a4b5c6d7e8f90123456789abcde',
+          actualSha256: '8b4e2f19a7c63d0e5f91a2c3d4e5f60718293a4b5c6d7e8f90123456789abcde',
+          size: 48620,
+          message: 'SHA-256 一致',
+        },
+        {
+          path: 'audit/audit.jsonl',
+          category: '审计日志',
+          status: 'ok',
+          expectedSha256: '2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a',
+          actualSha256: '2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a',
+          size: 4218,
+          message: 'SHA-256 一致，7 条链式审计完整',
+        },
+        {
+          path: 'exports/CASE.TXT',
+          category: '导出副本',
+          status: 'ok',
+          expectedSha256: '4d91a3f28b0c7e65d1a9f4c2e38b7a605d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a',
+          actualSha256: '4d91a3f28b0c7e65d1a9f4c2e38b7a605d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a',
+          size: 112,
+          message: 'SHA-256 一致',
+        },
+        {
+          path: 'searches/search_demo_1.json',
+          category: '搜索记录',
+          status: 'ok',
+          expectedSha256: '3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b',
+          actualSha256: '3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b',
+          size: 982,
+          message: 'SHA-256 一致',
+        },
+      ],
+      crossChecks: [
+        { name: 'report.md', status: 'ok', message: '报告 SHA-256 与审计链及清单一致' },
+        { name: 'report.html', status: 'ok', message: 'HTML 报告 SHA-256 与清单一致' },
+        { name: 'searches/search_demo_1.json', status: 'ok', message: '检索命中与审计链记录一致' },
+        { name: 'findings', status: 'ok', message: '取证发现归组与审计链记录 100% 对应' },
+      ],
+      errors: [],
+    };
+  },
+
+  async scan_magic_mismatches(): Promise<ScanMagicMismatchesResponse> {
+    if (!currentCase?.evidence) {
+      throw new Error('请先加载镜像');
+    }
+    return {
+      scannedCount: 4,
+      skippedCount: 3,
+      mismatchCount: 1,
+      elapsedMs: 14,
+      cancelled: false,
+      typeCounts: [
+        { detectedType: 'PNG', detectedFamily: 'image', label: 'PNG 图像', count: 1 },
+        { detectedType: 'TEXT', detectedFamily: 'text', label: '纯文本', count: 3 },
+      ],
+      mismatches: [
+        {
+          entryKey: '2048:7:1',
+          offset: 2048,
+          inode: '7',
+          path: 'DOCS/DRAFT_DEL.TXT',
+          deleted: true,
+          size: 81,
+          extension: 'txt',
+          detectedType: 'PE',
+          detectedFamily: 'executable',
+          detectedLabel: 'Windows PE 可执行文件',
+          severity: 'high',
+          reason: '演示检出：扩展名为 .txt，但模拟检测到可执行文件头特征（演示数据）',
+          magicHex: '4D 5A 90 00 03 00 00 00 04 00 00 00 FF FF 00 00',
+        },
+      ],
+    };
+  },
+
+  async inspect_entry_magic(args: { entryKey: string }): Promise<InspectEntryMagicResponse> {
+    const key = (args.entryKey || '').trim();
+    if (key === '2048:9:0') {
+      return {
+        detectedType: 'PNG',
+        detectedFamily: 'image',
+        detectedLabel: 'PNG 图像',
+        extension: 'png',
+        mismatch: false,
+        severity: 'none',
+        reason: '文件头魔数与扩展名 .png 一致',
+        magicHex: '89 50 4E 47 0D 0A 1A 0A 00 00 00 0D 49 48 44 52',
+      };
+    }
+    if (key === '2048:7:1') {
+      return {
+        detectedType: 'PE',
+        detectedFamily: 'executable',
+        detectedLabel: 'Windows PE 可执行文件',
+        extension: 'txt',
+        mismatch: true,
+        severity: 'high',
+        reason: '扩展名为 .txt，但文件头魔数特征指向 Windows PE 可执行文件（演示）',
+        magicHex: '4D 5A 90 00 03 00 00 00 04 00 00 00 FF FF 00 00',
+      };
+    }
+    const entry = DEMO_ENTRIES.find((e) => e.entryId === key);
+    const ext = entry?.name.includes('.') ? entry.name.split('.').pop()?.toLowerCase() ?? '' : '';
+    const raw = DEMO_FILE_TEXTS[key] ?? '';
+    const bytes = new TextEncoder().encode(raw).slice(0, 16);
+    const magicHex = Array.from(bytes)
+      .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
+      .join(' ');
+    return {
+      detectedType: null,
+      detectedFamily: null,
+      detectedLabel: '纯文本 / 无特定二进制魔数',
+      extension: ext,
+      mismatch: false,
+      severity: 'none',
+      reason: '未检出扩展名伪装',
+      magicHex: magicHex || '—',
     };
   },
 

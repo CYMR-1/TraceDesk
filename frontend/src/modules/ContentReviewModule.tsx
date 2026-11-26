@@ -14,12 +14,35 @@ import {
   SEARCH_ENCODINGS,
   type CaseSnapshot,
   type EntryView,
+  type LocateEntryRequest,
   type SearchEncoding,
   type SearchFinishedEvent,
   type SearchHitDto,
   type SearchProgressEvent,
 } from '../types/ipc';
 import { formatError } from '../utils/assets';
+
+/** 根据 needleHex 或搜索关键字与编码精确推算命中字节长度（供 HEX 字节级高亮使用） */
+function computeHitHighlightLength(
+  needleHex: string,
+  queryText: string,
+  enc: SearchEncoding
+): number {
+  const cleanHex = needleHex.replace(/\s+/g, '');
+  if (cleanHex.length >= 2 && cleanHex.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(cleanHex)) {
+    return cleanHex.length / 2;
+  }
+  const q = queryText.trim();
+  if (!q) return 1;
+  if (enc === 'HEX') {
+    const qHex = q.replace(/\s+/g, '');
+    return qHex.length >= 2 ? Math.floor(qHex.length / 2) : 1;
+  }
+  if (enc === 'UTF-16LE') {
+    return Math.max(1, q.length * 2);
+  }
+  return Math.max(1, new TextEncoder().encode(q).length);
+}
 
 export interface ContentSearchLiveState {
   searching: boolean;
@@ -39,6 +62,8 @@ interface ContentReviewModuleProps {
   /** 将后台内容搜索实时状态同步给主工作台底栏进度条与标签微点 */
   onSearchLiveStateChange?: (state: ContentSearchLiveState) => void;
   onSnapshotUpdated: (snapshot: CaseSnapshot) => void;
+  /** 跨模块一键跳转定位原文件（自动带入命中偏移与长度并在 HEX 中精确高亮） */
+  onLocateEntry?: (req: LocateEntryRequest) => void;
   onAlert: (title: string, message: string, tone?: 'info' | 'warning' | 'error') => void;
 }
 
@@ -54,6 +79,7 @@ const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
   onSearchingChange,
   onSearchLiveStateChange,
   onSnapshotUpdated,
+  onLocateEntry,
   onAlert,
 }) => {
   const [query, setQuery] = useState('');
@@ -574,6 +600,11 @@ const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
     }
   };
 
+  const hitHighlightLength = useMemo(
+    () => computeHitHighlightLength(needleHex, query, activeEncoding),
+    [needleHex, query, activeEncoding]
+  );
+
   const columns = useMemo<VirtualColumn<SearchHitDto>[]>(
     () => [
       {
@@ -618,13 +649,13 @@ const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
       {
         key: 'path',
         label: '镜像内路径',
-        width: 280,
+        width: 260,
         getText: (r) => r.path,
       },
       {
         key: 'beforeHex',
         label: '前文 HEX',
-        width: 240,
+        width: 210,
         mono: true,
         subtle: true,
         getText: (r) => r.beforeHex,
@@ -632,13 +663,47 @@ const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
       {
         key: 'afterHex',
         label: '后文 HEX',
-        width: 240,
+        width: 210,
         mono: true,
         subtle: true,
         getText: (r) => r.afterHex,
       },
+      ...(onLocateEntry
+        ? [
+            {
+              key: 'actions',
+              label: '操作',
+              width: 106,
+              align: 'center' as const,
+              getText: () => '定位原文件',
+              renderCell: (r: SearchHitDto) => (
+                <button
+                  type="button"
+                  className="td-btn td-btn--compact td-table-row-action"
+                  disabled={busy}
+                  title={`跳转到「文件浏览」定位 ${r.path} 并在 HEX 视图高亮偏移 0x${r.pos.toString(16).toUpperCase()}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onLocateEntry({
+                      entryId: r.entryId,
+                      offset: r.offset,
+                      inode: r.inode,
+                      path: r.path,
+                      deleted: Boolean(r.deleted),
+                      byteOffset: r.pos,
+                      highlightLength: hitHighlightLength,
+                    });
+                  }}
+                >
+                  <UiIcon name="locate" size={11} color="var(--accent-soft-text)" />
+                  定位原文件
+                </button>
+              ),
+            },
+          ]
+        : []),
     ],
-    []
+    [onLocateEntry, busy, hitHighlightLength]
   );
 
   const statusSummary = useMemo(() => {
@@ -958,6 +1023,8 @@ const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
           hit={previewHit}
           encoding={activeEncoding}
           needleHex={needleHex}
+          highlightLength={hitHighlightLength}
+          onLocateEntry={onLocateEntry}
           onClose={() => setPreviewHit(null)}
         />
       )}

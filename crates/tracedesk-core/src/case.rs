@@ -10,6 +10,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use chrono::Utc;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -27,12 +28,13 @@ use crate::coverage::{CoverageReport, Provenance, assess_coverage};
 use crate::error::{CoreError, CoreResult};
 use crate::findings::{AuditOrigin, AuditRecord};
 use crate::formatting::{
-    can_export, canonical_json_value, case_folder_name, create_unique_case_folder,
+    can_export, canonical_json_value, case_folder_name, create_unique_case_folder, east_8,
     entry_name, export_filename, hex_lower, now, numbered_export_filename, sha256_hex,
     windows_filename,
 };
 use crate::paths::{is_within, resolve_clean, strip_verbatim_prefix};
-use crate::reporting::render_report;
+pub use crate::reporting::HtmlReportResult;
+use crate::reporting::{render_html_report_with_time, render_report};
 use crate::timeline::TimelineIndex;
 
 /// 大镜像阈值（1 GiB）：不小于该大小的镜像将进入按需目录快速浏览模式。
@@ -2656,6 +2658,7 @@ impl Case {
             Ok(path) => Ok(path),
             Err(err) => {
                 let mut d = Map::new();
+                d.insert("format".to_string(), Value::String("markdown".to_string()));
                 d.insert("error".to_string(), Value::String(err.to_string()));
                 let _ = self.log("REPORT_GENERATE", "Markdown", "失败", d);
                 Err(err)
@@ -2663,7 +2666,23 @@ impl Case {
         }
     }
 
-    fn write_report(&mut self, tsk: Option<&TskCli>) -> CoreResult<PathBuf> {
+    /// 校验完整性并生成离线自包含单文件 HTML 取证报告
+    /// （`reports/report_<timestamp>_<6hex>.html`，记录含 `format: "html"` 与 `sha256` 的 `REPORT_GENERATE` 审计日志）。
+    pub fn generate_html_report(&mut self, tsk: Option<&TskCli>) -> CoreResult<HtmlReportResult> {
+        match self.write_html_report(tsk) {
+            Ok(result) => Ok(result),
+            Err(err) => {
+                let mut d = Map::new();
+                d.insert("format".to_string(), Value::String("html".to_string()));
+                d.insert("error".to_string(), Value::String(err.to_string()));
+                let _ = self.log("REPORT_GENERATE", "HTML", "失败", d);
+                Err(err)
+            }
+        }
+    }
+
+    /// 报告生成前统一执行只读完整性核验并生成中文结论文本（供 Markdown 与 HTML 报告复用）。
+    fn evaluate_report_conclusion(&mut self, tsk: Option<&TskCli>) -> CoreResult<String> {
         self.ensure_open()?;
         let ev = self
             .data
@@ -2673,23 +2692,29 @@ impl Case {
         let is_large = ev.is_large_image();
         let is_ewf = ev.is_ewf();
 
-        let conclusion = if is_large {
+        if is_large {
             self.operation_check(tsk, None, None)?;
             if !self.session_verified {
                 return Err(CoreError::InvalidInput(
                     "生成正式报告前，请先在“校验完整性”中固定整镜像 SHA-256。".to_string(),
                 ));
             }
-            format!("{}。完整读取时间见校验记录。", self.source_note())
+            Ok(format!("{}。完整读取时间见校验记录。", self.source_note()))
         } else if !self.verify_integrity(tsk, None, None)? {
-            "不通过：镜像当前 SHA-256 与固定值不一致。".to_string()
+            Ok("不通过：镜像当前 SHA-256 与固定值不一致。".to_string())
         } else if is_ewf {
-            "通过：每个 EWF 分段摘要均与首次解码固定时一致。".to_string()
+            Ok("通过：每个 EWF 分段摘要均与首次解码固定时一致。".to_string())
         } else {
-            "通过：本次报告生成时镜像 SHA-256 与初始固定值一致。".to_string()
-        };
+            Ok("通过：本次报告生成时镜像 SHA-256 与初始固定值一致。".to_string())
+        }
+    }
 
-        self.log("REPORT_GENERATE", "Markdown", "开始", Map::new())?;
+    fn write_report(&mut self, tsk: Option<&TskCli>) -> CoreResult<PathBuf> {
+        let conclusion = self.evaluate_report_conclusion(tsk)?;
+
+        let mut start_details = Map::new();
+        start_details.insert("format".to_string(), Value::String("markdown".to_string()));
+        self.log("REPORT_GENERATE", "Markdown", "开始", start_details)?;
         let records = self.check_audit()?;
         let content = render_report(&self.data, &records, &conclusion);
 
@@ -2703,6 +2728,7 @@ impl Case {
 
         let dest_clean = strip_verbatim_prefix(&destination);
         let mut details = Map::new();
+        details.insert("format".to_string(), Value::String("markdown".to_string()));
         details.insert("sha256".to_string(), Value::String(digest));
         self.log(
             "REPORT_GENERATE",
@@ -2711,6 +2737,53 @@ impl Case {
             details,
         )?;
         Ok(dest_clean)
+    }
+
+    fn write_html_report(&mut self, tsk: Option<&TskCli>) -> CoreResult<HtmlReportResult> {
+        let conclusion = self.evaluate_report_conclusion(tsk)?;
+
+        let mut start_details = Map::new();
+        start_details.insert("format".to_string(), Value::String("html".to_string()));
+        self.log("REPORT_GENERATE", "HTML", "开始", start_details)?;
+        let records = self.check_audit()?;
+        let generated_at = now();
+        let content = render_html_report_with_time(&self.data, &records, &conclusion, &generated_at);
+
+        let ts = Utc::now().with_timezone(&east_8()).format("%Y%m%d_%H%M%S");
+        let uuid_hex = Uuid::new_v4().simple().to_string();
+        let file_name = format!("report_{ts}_{}.html", &uuid_hex[..6]);
+        let destination = self.folder.join("reports").join(file_name);
+        let raw_bytes = content.as_bytes();
+        // 使用独占创建避免极端同秒碰撞覆盖历史报告，落盘后立即计算 SHA-256。
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&destination)?;
+            file.write_all(raw_bytes)?;
+            file.flush()?;
+        }
+        let digest = sha256_hex(raw_bytes);
+        let bytes = raw_bytes.len() as u64;
+
+        let dest_clean = strip_verbatim_prefix(&destination);
+        let mut details = Map::new();
+        details.insert("format".to_string(), Value::String("html".to_string()));
+        details.insert("sha256".to_string(), Value::String(digest.clone()));
+        details.insert("bytes".to_string(), Value::from(bytes));
+        self.log(
+            "REPORT_GENERATE",
+            &dest_clean.to_string_lossy(),
+            "成功",
+            details,
+        )?;
+
+        Ok(HtmlReportResult {
+            path: dest_clean,
+            sha256: digest,
+            bytes,
+            generated_at,
+        })
     }
 }
 

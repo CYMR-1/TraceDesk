@@ -7,6 +7,7 @@
 //! - 紧凑 `u64` MACB 时间线及多核并行排序与过滤（`timeline`）
 //! - 单文件哈希/比对/笔记工具（`file_tools`）与分组研判记录及导出（`findings`）
 //! - 9 种编码跨页预览、HEX 格式化与安全图片预览（`preview`）
+//! - 只读文件头魔数（Magic Bytes）识别与扩展名伪装检测（`magic`）
 //! - 多核 AVX2 SIMD 精确字节搜索及确定性排序（`content_search`）
 //! - 10 节 Markdown 取证报告生成（`reporting`）
 //! - ZIP64 可核验复核包构建器与原生 Rust 校验器（`review`）
@@ -19,6 +20,7 @@ pub mod error;
 pub mod file_tools;
 pub mod findings;
 pub mod formatting;
+pub mod magic;
 pub mod paths;
 pub mod preview;
 pub mod reporting;
@@ -60,6 +62,12 @@ pub use formatting::{
     export_filename, format_commas, format_size, format_unix_east8_stack, hex_lower,
     next_case_folder_path, now, numbered_export_filename, parse_iso_to_east8, sha256_hex,
     truncate_utf16_units, utf16_unit_len, windows_filename,
+};
+pub use magic::{
+    MAGIC_HEADER_BYTES, MAGIC_HEX_PREVIEW_BYTES, MagicCheckItem, MagicMismatchEntry,
+    MagicScanReport, MagicTypeCount, MagicTypeInfo, detect_magic_bytes, evaluate_magic_mismatch,
+    extract_extension, format_magic_hex, inspect_entry_magic, inspect_entry_magic_at_image,
+    magic_entry_key, scan_case_magic_mismatches, scan_entries_magic_mismatches,
 };
 pub use paths::{AppPaths, is_within, resolve_clean, strip_verbatim_prefix};
 pub use preview::{

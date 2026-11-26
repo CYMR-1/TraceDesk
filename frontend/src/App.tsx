@@ -13,6 +13,7 @@ import { FindingNoteDialog } from './components/dialogs/FindingNoteDialog';
 import { NewCaseDialog } from './components/dialogs/NewCaseDialog';
 import { OpenCaseDialog } from './components/dialogs/OpenCaseDialog';
 import { RegisterSourceDialog } from './components/dialogs/RegisterSourceDialog';
+import { VerifyBundleDialog } from './components/dialogs/VerifyBundleDialog';
 import { createFeatureRegistry, ENABLED_FEATURES, type PanelKey } from './features/registry';
 import { AuditLogModule } from './modules/AuditLogModule';
 import { ContentReviewModule, type ContentSearchLiveState } from './modules/ContentReviewModule';
@@ -27,6 +28,7 @@ import type {
   CaseSnapshot,
   EntryView,
   ExamineFileResponse,
+  LocateEntryRequest,
   McpActivityRecord,
   McpStatus,
   RecentCaseDto,
@@ -131,13 +133,17 @@ export const App: React.FC = () => {
   const [newCaseOpen, setNewCaseOpen] = useState(false);
   const [openCaseOpen, setOpenCaseOpen] = useState(false);
   const [registerSourceOpen, setRegisterSourceOpen] = useState(false);
+  const [verifyBundleOpen, setVerifyBundleOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [noteTarget, setNoteTarget] = useState<EntryView | null>(null);
+  const [noteTarget, setNoteTarget] = useState<{ entry: EntryView; initialNote?: string } | null>(null);
   const [examineResult, setExamineResult] = useState<ExamineFileResponse | null>(null);
   const [exportResult, setExportResult] = useState<ExportResultInfo | null>(null);
   const [bundleMaterials, setBundleMaterials] = useState<BundleMaterialsResponse | null>(null);
   const [busyDialogReason, setBusyDialogReason] = useState<string | null>(null);
   const [alertState, setAlertState] = useState<AlertDialogState | null>(null);
+  // 跨模块“一键跳转定位原文件”统一状态
+  const [locateTarget, setLocateTarget] = useState<LocateEntryRequest | null>(null);
+  const locateSeqRef = useRef(0);
 
   const busyRef = useRef(false);
   const hashingImageRef = useRef(false);
@@ -696,6 +702,7 @@ export const App: React.FC = () => {
   const handleCaseReplaced = useCallback(
     async (next: CaseSnapshot | null) => {
       setSelectedEntry(null);
+      setLocateTarget(null);
       setDetailText(DEFAULT_DETAIL);
       setStatusText(DEFAULT_STATUS);
       applySnapshot(next);
@@ -1095,8 +1102,25 @@ export const App: React.FC = () => {
       onSuccess: (res) => {
         applySnapshot(res.snapshot);
         setExportResult({
-          title: '报告已生成',
+          title: 'Markdown 报告已生成',
           path: res.path,
+        });
+      },
+    });
+  };
+
+  /** 生成离线自包含 HTML 取证报告并展示路径、SHA-256 与大小 */
+  const handleGenerateHtmlReport = async () => {
+    await runTask('校验并生成 HTML 报告', () => tauriApi.generateHtmlReport(), {
+      onSuccess: (res) => {
+        void refreshCurrentCaseGently('已生成离线 HTML 报告并写入审计链');
+        setExportResult({
+          title: 'HTML 报告已生成',
+          path: res.path,
+          sha256: res.sha256,
+          bytes: res.bytes,
+          generatedAt: res.generatedAt,
+          note: '离线自包含单文件 HTML 报告，可在无网环境下直接使用浏览器打开审阅与打印。',
         });
       },
     });
@@ -1154,8 +1178,18 @@ export const App: React.FC = () => {
     [handleExportEntry]
   );
 
-  const handleRecordNoteClick = useCallback((entry: EntryView) => {
-    setNoteTarget(entry);
+  const handleRecordNoteClick = useCallback((entry: EntryView, initialNote?: string) => {
+    setNoteTarget({ entry, initialNote });
+  }, []);
+
+  /** 跨模块“一键跳转定位原文件”统一入口：切至文件浏览模块并驱动目标定位与 HEX 高亮 */
+  const handleLocateEntry = useCallback((req: LocateEntryRequest) => {
+    const nextId = ++locateSeqRef.current;
+    setLocateTarget({
+      ...req,
+      requestId: nextId,
+    });
+    setActiveTab('files');
   }, []);
 
   const handleHashEntryClick = useCallback(
@@ -1380,7 +1414,7 @@ export const App: React.FC = () => {
 
         <div className="td-header-spacer" />
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           {headerActions.map((act, idx) => {
             const isDeliverable = DELIVERABLE_KEYS.has(act.key);
             const prevIsDeliverable = idx > 0 && DELIVERABLE_KEYS.has(headerActions[idx - 1].key);
@@ -1432,9 +1466,36 @@ export const App: React.FC = () => {
                   )}
                   {act.title}
                 </button>
+                {act.key === 'report' && (
+                  <button
+                    type="button"
+                    data-action-key="html_report"
+                    disabled={busy || !snapshot}
+                    className="td-btn td-hdr-btn"
+                    title="生成离线自包含单文件 HTML 取证报告"
+                    onClick={() => void handleGenerateHtmlReport()}
+                  >
+                    <UiIcon
+                      name="html_report"
+                      size={14}
+                      color={busy || !snapshot ? 'var(--text-disabled)' : 'var(--header-icon)'}
+                    />
+                    生成 HTML 报告
+                  </button>
+                )}
               </React.Fragment>
             );
           })}
+          <button
+            type="button"
+            data-action-key="verify_bundle"
+            className="td-btn td-hdr-btn td-hdr-btn--verify"
+            title="离线核验复核包 ZIP 完整性、审计哈希链与逐成员防篡改摘要（未打开案件同样可用）"
+            onClick={() => setVerifyBundleOpen(true)}
+          >
+            <UiIcon name="check_shield" size={14} color="var(--accent-soft-text)" />
+            核验复核包
+          </button>
         </div>
       </header>
 
@@ -1565,6 +1626,14 @@ export const App: React.FC = () => {
                   <UiIcon name="case_open" size={14} color="var(--accent-soft-text)" />
                   打开案件…
                 </button>
+                <button
+                  type="button"
+                  className="td-btn"
+                  onClick={() => setVerifyBundleOpen(true)}
+                >
+                  <UiIcon name="check_shield" size={14} color="var(--accent)" />
+                  核验复核包
+                </button>
               </div>
             </div>
 
@@ -1657,6 +1726,7 @@ export const App: React.FC = () => {
             busy={busy}
             scanningPartitions={scanningPartitions}
             selectedEntry={selectedEntry}
+            locateTarget={locateTarget}
             onSelectEntry={setSelectedEntry}
             onDetailChange={setDetailText}
             onScanPartitions={handleScanPartitionsClick}
@@ -1687,6 +1757,7 @@ export const App: React.FC = () => {
             busy={busy}
             refreshToken={refreshToken}
             onExportFindings={handleExportFindingsClick}
+            onLocateEntry={handleLocateEntry}
           />
         )}
 
@@ -1699,7 +1770,7 @@ export const App: React.FC = () => {
               flexDirection: 'column',
             }}
           >
-            <TimelineModule snapshot={snapshot} busy={busy} />
+            <TimelineModule snapshot={snapshot} busy={busy} onLocateEntry={handleLocateEntry} />
           </div>
         )}
 
@@ -1724,6 +1795,7 @@ export const App: React.FC = () => {
               onSearchingChange={setContentSearchingState}
               onSearchLiveStateChange={handleSearchLiveStateChange}
               onSnapshotUpdated={applySnapshot}
+              onLocateEntry={handleLocateEntry}
               onAlert={showAlert}
             />
           </div>
@@ -1857,7 +1929,8 @@ export const App: React.FC = () => {
 
       {noteTarget && (
         <FindingNoteDialog
-          entry={noteTarget}
+          entry={noteTarget.entry}
+          initialNote={noteTarget.initialNote}
           onSaved={(snap) => {
             applySnapshot(snap);
             setStatusText('已记录取证发现并写入审计链');
@@ -1875,6 +1948,9 @@ export const App: React.FC = () => {
           title={exportResult.title}
           path={exportResult.path}
           note={exportResult.note}
+          sha256={exportResult.sha256}
+          bytes={exportResult.bytes}
+          generatedAt={exportResult.generatedAt}
           entry={exportResult.entry}
           noteIcon={fileNoteAction?.icon ?? 'note'}
           onRecordNote={
@@ -1882,11 +1958,18 @@ export const App: React.FC = () => {
               ? (entry) => {
                   // 关闭导出成功弹窗并立即打开该文件的取证发现笔记弹窗
                   setExportResult(null);
-                  setNoteTarget(entry);
+                  setNoteTarget({ entry });
                 }
               : undefined
           }
           onClose={() => setExportResult(null)}
+        />
+      )}
+
+      {verifyBundleOpen && (
+        <VerifyBundleDialog
+          defaultDir={snapshot ? `${snapshot.caseDir}\\reports` : appPaths.casesDir || undefined}
+          onClose={() => setVerifyBundleOpen(false)}
         />
       )}
 

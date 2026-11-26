@@ -182,6 +182,8 @@ pub fn run() {
             commands::get_tree_children,
             commands::query_files_page,
             commands::locate_file_in_scope,
+            commands::scan_magic_mismatches,
+            commands::inspect_entry_magic,
             // §3.3 文件预览、导出与取证发现命令
             commands::preview_file_page,
             commands::preview_file_image,
@@ -199,10 +201,12 @@ pub fn run() {
             commands::bookmark_search_hits,
             commands::load_search_record,
             commands::generate_report,
+            commands::generate_html_report,
             commands::inspect_bundle_materials,
             commands::inspect_review_bundle,
             commands::prepare_review_bundle,
             commands::build_review_bundle,
+            commands::verify_review_bundle,
             // §3.5 MCP 托管、实时遥测监控与系统工具命令
             commands::get_mcp_status,
             commands::start_mcp_http,
