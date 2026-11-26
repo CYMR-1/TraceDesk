@@ -1889,69 +1889,7 @@ export const App: React.FC = () => {
       {/* 4. 纯白证据工作区 / 全屏欢迎首页 */}
       <main className="td-workspace">
         {/* 未开案时以全视口铺满式瓷白晴空蓝启动台铺展整个窗口 */}
-        {isWelcomeLaunchpad && (() => {
-          // 列表较少且未筛选时展示柔和虚线引导卡，保持左栏视觉饱满和谐
-          const showMoreGuidanceCard = !trimmedRecentQuery && filteredRecentCases.length > 0 && filteredRecentCases.length <= 3;
-          const placeMoreInGrid = showMoreGuidanceCard && filteredRecentCases.length === 3;
-          const placeMoreBelowGrid = showMoreGuidanceCard && filteredRecentCases.length <= 2;
-
-          const renderMoreGuidanceCard = (extraClassName = '') => (
-            <div
-              role="button"
-              tabIndex={busy ? -1 : 0}
-              aria-disabled={busy}
-              className={`td-welcome-more-card ${extraClassName} ${busy ? 'td-welcome-more-card--disabled' : ''}`}
-              title="点击浏览打开本地已有案件，或点击「新建案件」创建隔离案件目录"
-              onClick={() => {
-                if (!busy) handleOpenCase();
-              }}
-              onKeyDown={(e) => {
-                if (busy) return;
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault();
-                  handleOpenCase();
-                }
-              }}
-            >
-              <span className="td-welcome-more-icon" aria-hidden="true">
-                <UiIcon name="case_new" size={18} color="var(--accent)" />
-              </span>
-              <div className="td-welcome-more-copy">
-                <div className="td-welcome-more-title">+ 新建或浏览打开更多案件</div>
-                <div className="td-welcome-more-desc">
-                  定位磁盘任意位置的 case.json 恢复历史勘验，或新建隔离案件目录建立审计链起点
-                </div>
-              </div>
-              <div className="td-welcome-more-actions">
-                <button
-                  type="button"
-                  className="td-btn td-btn--compact td-btn--accent"
-                  disabled={busy}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleNewCase();
-                  }}
-                >
-                  <UiIcon name="case_new" size={12} color="#FFFFFF" />
-                  <span>新建案件</span>
-                </button>
-                <button
-                  type="button"
-                  className="td-btn td-btn--compact"
-                  disabled={busy}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleOpenCase();
-                  }}
-                >
-                  <UiIcon name="case_open" size={12} color="var(--accent-soft-text)" />
-                  <span>浏览打开</span>
-                </button>
-              </div>
-            </div>
-          );
-
-          return (
+        {isWelcomeLaunchpad && (
             <div className="td-welcome-empty">
               {/* 顶部全宽瓷白品牌顶栏 */}
               <header className="td-welcome-topbar">
@@ -2152,79 +2090,99 @@ export const App: React.FC = () => {
                       <>
                         {filteredRecentCases.length > 0 ? (
                           <div className="td-welcome-case-scroll">
-                            <div
-                              className={`td-welcome-case-grid ${filteredRecentCases.length === 1 ? 'td-welcome-case-grid--single' : ''}`}
-                            >
+                            <div className="td-welcome-case-list" role="list">
                               {filteredRecentCases.map((item) => {
                                 const formattedTime = formatCaseTimestamp(item.created);
                                 const leafDir = extractPathLeafName(item.folder);
+                                const metaSummary = [
+                                  `对象 ${item.target || '—'}`,
+                                  `取证人员 ${item.examiner || '—'}`,
+                                  item.exportsCount > 0 ? `已导出 ${item.exportsCount} 份` : '',
+                                ]
+                                  .filter(Boolean)
+                                  .join(' · ');
                                 return (
                                   <button
                                     key={item.folder}
                                     type="button"
-                                    className="td-welcome-case-card"
+                                    role="listitem"
+                                    className="td-welcome-case-row"
                                     disabled={busy}
                                     onClick={() => void openCaseByPath(item.folder)}
                                     title={`点击打开案件：${item.folder}`}
                                   >
-                                    <div className="td-welcome-case-top">
-                                      <span className="td-welcome-case-id td-mono">
-                                        {item.number || item.name}
-                                      </span>
-                                      <span
-                                        className={`td-recent-badge ${item.hasEvidence ? 'td-recent-badge--ready' : 'td-recent-badge--empty'}`}
-                                      >
-                                        {item.hasEvidence
-                                          ? `已载入镜像 · ${item.inventoryCount.toLocaleString()} 项`
-                                          : '待载入镜像'}
-                                      </span>
-                                    </div>
+                                    {/* 左侧柔和圆角图标徽章：区分已载入镜像与待载入状态 */}
+                                    <span
+                                      className={`td-welcome-case-icon ${item.hasEvidence ? 'td-welcome-case-icon--ready' : 'td-welcome-case-icon--pending'}`}
+                                      aria-hidden="true"
+                                    >
+                                      <UiIcon
+                                        name="case_open"
+                                        size={16}
+                                        color={item.hasEvidence ? 'var(--accent)' : 'var(--text-muted)'}
+                                      />
+                                    </span>
 
-                                    <div className="td-welcome-case-meta">
-                                      <span className="td-welcome-meta-item">
-                                        <span className="td-welcome-meta-key">对象</span>
-                                        <span className="td-welcome-meta-val">{item.target || '—'}</span>
-                                      </span>
-                                      <span className="td-welcome-meta-sep" aria-hidden="true" />
-                                      <span className="td-welcome-meta-item">
-                                        <span className="td-welcome-meta-key">取证人员</span>
-                                        <span className="td-welcome-meta-val">{item.examiner || '—'}</span>
-                                      </span>
-                                      {item.exportsCount > 0 && (
-                                        <>
+                                    {/* 中主区：第一行案件编号与轻量信息项，第二行完整易读目录名 */}
+                                    <span className="td-welcome-case-main">
+                                      <span className="td-welcome-case-line1">
+                                        <span className="td-welcome-case-id td-mono">
+                                          {item.number || item.name}
+                                        </span>
+                                        <span className="td-welcome-case-id-divider" aria-hidden="true" />
+                                        <span className="td-welcome-case-meta" title={metaSummary}>
+                                          <span className="td-welcome-meta-item">
+                                            <span className="td-welcome-meta-key">对象</span>
+                                            <span className="td-welcome-meta-val">{item.target || '—'}</span>
+                                          </span>
                                           <span className="td-welcome-meta-sep" aria-hidden="true" />
                                           <span className="td-welcome-meta-item">
-                                            <span className="td-welcome-meta-key">已导出</span>
-                                            <span className="td-welcome-meta-val">{item.exportsCount} 份</span>
+                                            <span className="td-welcome-meta-key">取证人员</span>
+                                            <span className="td-welcome-meta-val">{item.examiner || '—'}</span>
                                           </span>
-                                        </>
-                                      )}
-                                    </div>
-
-                                    <div className="td-welcome-case-foot">
-                                      <span className="td-welcome-case-dir" title={item.folder}>
-                                        <UiIcon name="case_open" size={12} color="var(--text-muted)" />
-                                        <span className="td-mono">{leafDir}</span>
-                                      </span>
-                                      <span className="td-welcome-case-foot-right">
-                                        {formattedTime && (
-                                          <span className="td-welcome-case-time" title={item.created}>
-                                            <UiIcon name="clock" size={12} color="var(--text-muted)" />
-                                            <span className="td-mono">{formattedTime}</span>
-                                          </span>
-                                        )}
-                                        <span className="td-welcome-case-open-hint" aria-hidden="true">
-                                          打开工作区 →
+                                          {item.exportsCount > 0 && (
+                                            <>
+                                              <span className="td-welcome-meta-sep" aria-hidden="true" />
+                                              <span className="td-welcome-meta-item">
+                                                <span className="td-welcome-meta-key">已导出</span>
+                                                <span className="td-welcome-meta-val">{item.exportsCount} 份</span>
+                                              </span>
+                                            </>
+                                          )}
                                         </span>
                                       </span>
-                                    </div>
+
+                                      <span className="td-welcome-case-dir" title={item.folder}>
+                                        <UiIcon name="case_open" size={12} color="var(--text-disabled)" />
+                                        <span className="td-mono">{leafDir}</span>
+                                      </span>
+                                    </span>
+
+                                    {/* 右侧固定对齐区：镜像状态胶囊、等宽时间戳与轻量悬停箭头 */}
+                                    <span className="td-welcome-case-right">
+                                      <span className="td-welcome-case-status-col">
+                                        <span
+                                          className={`td-recent-badge ${item.hasEvidence ? 'td-recent-badge--ready' : 'td-recent-badge--empty'}`}
+                                        >
+                                          {item.hasEvidence
+                                            ? `已载入镜像 · ${item.inventoryCount.toLocaleString()} 项`
+                                            : '待载入镜像'}
+                                        </span>
+                                        <span className="td-welcome-case-time" title={item.created || undefined}>
+                                          {formattedTime && (
+                                            <UiIcon name="clock" size={11.5} color="var(--text-disabled)" />
+                                          )}
+                                          <span className="td-mono">{formattedTime || '—'}</span>
+                                        </span>
+                                      </span>
+                                      <span className="td-welcome-case-arrow" aria-hidden="true">
+                                        <UiIcon name="arrow_right" size={14} color="currentColor" />
+                                      </span>
+                                    </span>
                                   </button>
                                 );
                               })}
-                              {placeMoreInGrid && renderMoreGuidanceCard('td-welcome-more-card--compact')}
                             </div>
-
-                            {placeMoreBelowGrid && renderMoreGuidanceCard('td-welcome-more-card--fill')}
                           </div>
                         ) : (
                           <div className="td-welcome-case-empty">
@@ -2246,7 +2204,7 @@ export const App: React.FC = () => {
                         )}
 
                         <div className="td-welcome-panel-foot">
-                          点击任意案件卡片即可恢复工作区；也可通过上方「打开已有案件」定位磁盘任意位置的 case.json。
+                          点击任意案件记录即可恢复工作区；也可通过上方「打开已有案件」定位磁盘任意位置的 case.json。
                         </div>
                       </>
                     ) : (
@@ -2403,8 +2361,7 @@ export const App: React.FC = () => {
                 </div>
               </div>
             </div>
-          );
-        })()}
+        )}
 
         {/* 文件浏览与内容搜索保持挂载，避免切换标签时丢失文件树或后台流式搜索结果 */}
         <div

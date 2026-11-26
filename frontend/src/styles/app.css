@@ -815,6 +815,8 @@
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-width: 0;
+  min-height: 0;
   background: var(--chrome-bg);
 }
 
@@ -849,21 +851,34 @@
 
 .td-nav-tree {
   flex: 1;
+  min-width: 0;
+  min-height: 0;
   overflow: auto;
   padding: 2px 0;
   background: var(--chrome-bg);
+}
+
+/* 左侧文件树横向撑开包裹层：内容未超宽时占满可视区，深层嵌套或长文件名时整体撑开以呈现完整行高亮并平滑展示水平滚动条 */
+.td-nav-tree-inner {
+  width: max-content;
+  min-width: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 .td-tree-row {
   position: relative;
   display: flex;
   align-items: center;
+  width: 100%;
+  min-width: 100%;
   height: var(--row-height-tree);
-  padding-right: 10px;
+  padding-right: 12px;
   cursor: pointer;
   white-space: nowrap;
   color: var(--text-primary);
   font-size: 12.5px;
+  flex-shrink: 0;
 }
 
 .td-tree-row:hover {
@@ -911,9 +926,10 @@
   flex-shrink: 0;
 }
 
+/* 取消横向截断，允许深层目录和超长节点名自然撑开宽度供水平滚动浏览 */
 .td-tree-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .td-tree-label--deleted {
@@ -933,7 +949,7 @@
   min-height: var(--row-height-tree);
   padding-top: 3px;
   padding-bottom: 3px;
-  white-space: normal;
+  white-space: nowrap;
   line-height: 1.4;
   font-size: 11.5px;
   color: var(--warn-fg);
@@ -944,9 +960,10 @@
 }
 
 .td-tree-retry-link {
-  margin-left: 4px;
+  margin-left: 6px;
   text-decoration: underline;
   font-weight: 500;
+  flex-shrink: 0;
 }
 
 .td-nav-footer {
@@ -3793,7 +3810,7 @@
   color: var(--text-primary);
 }
 
-/* 左栏最近案件全高面板 */
+/* 左栏最近案件全高面板与全宽单列结构化案件列表 */
 .td-welcome-recent-panel {
   height: 100%;
 }
@@ -3802,78 +3819,148 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 16px;
+  padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
 }
 
-.td-welcome-case-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  align-content: start;
-}
-
-.td-welcome-case-grid--single {
-  grid-template-columns: 1fr;
-}
-
-.td-welcome-case-card {
+.td-welcome-case-list {
   display: flex;
   flex-direction: column;
-  gap: 9px;
   width: 100%;
-  padding: 14px 16px;
-  background: var(--surface-subtle);
-  border: 1px solid #DFE8F2;
-  border-radius: 9px;
+}
+
+.td-welcome-case-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  width: 100%;
+  min-height: 68px;
+  padding: 13px 16px 13px 18px;
+  background: var(--surface-bg);
+  border: none;
+  border-bottom: 1px solid var(--border-soft-rule);
   text-align: left;
   cursor: pointer;
   outline: none;
   min-width: 0;
-  transition: background-color 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease, transform 0.14s ease;
+  transition: background-color 0.14s ease;
 }
 
-.td-welcome-case-card:hover:not(:disabled) {
+/* 悬停与聚焦时的左侧 3px 晴空蓝指示条 */
+.td-welcome-case-row::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: transparent;
+  transition: background-color 0.14s ease;
+}
+
+.td-welcome-case-row:hover:not(:disabled) {
   background: #F3F9FF;
-  border-color: var(--accent);
-  box-shadow: 0 4px 12px rgba(38, 116, 196, 0.1);
-  transform: translateY(-1px);
 }
 
-.td-welcome-case-card:focus-visible {
-  border-color: var(--border-focus);
-  box-shadow: 0 0 0 2px rgba(38, 116, 196, 0.18);
+.td-welcome-case-row:hover:not(:disabled)::before,
+.td-welcome-case-row:focus-visible::before {
+  background: var(--accent);
 }
 
-.td-welcome-case-card:disabled {
+.td-welcome-case-row:focus-visible {
+  background: #F3F9FF;
+  box-shadow: inset 0 0 0 1.5px var(--accent-soft-border);
+}
+
+.td-welcome-case-row:disabled {
   opacity: 0.65;
   cursor: not-allowed;
 }
 
-.td-welcome-case-top {
+/* 左侧柔和圆角图标徽章：已载入镜像用浅晴空蓝底，待载入用浅瓷灰底 */
+.td-welcome-case-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+  transition: background-color 0.14s ease, border-color 0.14s ease;
+}
+
+.td-welcome-case-icon--ready {
+  background: var(--accent-soft-bg);
+  border-color: var(--accent-soft-border);
+}
+
+.td-welcome-case-icon--pending {
+  background: var(--neutral-bg);
+  border-color: var(--border-subtle);
+}
+
+.td-welcome-case-row:hover:not(:disabled) .td-welcome-case-icon--ready {
+  background: #DFEEFD;
+  border-color: #9BC4EE;
+}
+
+.td-welcome-case-row:hover:not(:disabled) .td-welcome-case-icon--pending {
+  background: #E8EFF7;
+  border-color: var(--border-default);
+}
+
+/* 中主区：占据剩余宽度，双行结构严格等高 */
+.td-welcome-case-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+}
+
+.td-welcome-case-line1 {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 9px;
+  min-width: 0;
+  height: 20px;
+  line-height: 20px;
 }
 
 .td-welcome-case-id {
-  font-size: 14.25px;
+  font-size: 13.75px;
   font-weight: 700;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
+  flex-shrink: 0;
+  max-width: 220px;
+  transition: color 0.14s ease;
+}
+
+.td-welcome-case-row:hover:not(:disabled) .td-welcome-case-id {
+  color: var(--surface-selected-text);
+}
+
+.td-welcome-case-id-divider {
+  width: 1px;
+  height: 11px;
+  background: var(--border-default);
+  flex-shrink: 0;
 }
 
 .td-welcome-case-meta {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
   font-size: 12px;
   color: var(--text-secondary);
 }
@@ -3881,18 +3968,24 @@
 .td-welcome-meta-item {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   min-width: 0;
+  flex-shrink: 1;
 }
 
 .td-welcome-meta-key {
   color: var(--text-muted);
   font-size: 11.5px;
+  flex-shrink: 0;
 }
 
 .td-welcome-meta-val {
-  color: var(--text-primary);
+  color: var(--text-secondary);
   font-weight: 500;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .td-welcome-meta-sep {
@@ -3903,23 +3996,15 @@
   flex-shrink: 0;
 }
 
-.td-welcome-case-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border-soft-rule);
-  font-size: 11.5px;
-  color: var(--text-muted);
-}
-
 .td-welcome-case-dir {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   min-width: 0;
-  overflow: hidden;
+  height: 18px;
+  line-height: 18px;
+  font-size: 11.75px;
+  color: var(--text-muted);
 }
 
 .td-welcome-case-dir > span {
@@ -3928,126 +4013,51 @@
   white-space: nowrap;
 }
 
-/* 右侧时间戳与悬停「打开工作区 →」无抖动切换 */
-.td-welcome-case-foot-right {
-  position: relative;
+/* 右侧固定对齐区：语义状态胶囊与等宽时间戳纵列右对齐 + 轻量悬停箭头 */
+.td-welcome-case-right {
   display: inline-flex;
   align-items: center;
-  justify-content: flex-end;
+  gap: 12px;
   flex-shrink: 0;
-  min-width: 116px;
+  margin-left: 4px;
+}
+
+.td-welcome-case-status-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 5px;
 }
 
 .td-welcome-case-time {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  justify-content: flex-end;
+  gap: 4px;
+  height: 18px;
+  line-height: 18px;
+  font-size: 11.25px;
   color: var(--text-muted);
-  transition: opacity 0.14s ease;
-}
-
-.td-welcome-case-open-hint {
-  position: absolute;
-  right: 0;
-  font-size: 11.75px;
-  font-weight: 600;
-  color: var(--accent);
   white-space: nowrap;
-  opacity: 0;
-  transform: translateX(-4px);
-  transition: opacity 0.14s ease, transform 0.14s ease;
 }
 
-.td-welcome-case-card:hover:not(:disabled) .td-welcome-case-time,
-.td-welcome-case-card:focus-visible .td-welcome-case-time {
-  opacity: 0;
-}
-
-.td-welcome-case-card:hover:not(:disabled) .td-welcome-case-open-hint,
-.td-welcome-case-card:focus-visible .td-welcome-case-open-hint {
-  opacity: 1;
-  transform: translateX(0);
-}
-
-/* 最近案件较少时的柔和虚线补充引导卡 */
-.td-welcome-more-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 20px 22px;
-  border-radius: 9px;
-  border: 1.5px dashed #BDD6F0;
-  background: linear-gradient(180deg, #F8FBFF 0%, #FFFFFF 100%);
-  text-align: center;
-  cursor: pointer;
-  outline: none;
-  transition: border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
-}
-
-.td-welcome-more-card--fill {
-  flex: 1;
-  min-height: 136px;
-}
-
-.td-welcome-more-card--compact {
-  padding: 14px 16px;
-  min-height: 108px;
-}
-
-.td-welcome-more-card:hover:not(.td-welcome-more-card--disabled) {
-  border-color: var(--accent);
-  background: linear-gradient(180deg, #F0F7FF 0%, #FAFDFE 100%);
-  box-shadow: 0 3px 12px rgba(38, 116, 196, 0.08);
-}
-
-.td-welcome-more-card:focus-visible {
-  border-color: var(--border-focus);
-  box-shadow: 0 0 0 2px rgba(38, 116, 196, 0.18);
-}
-
-.td-welcome-more-card--disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.td-welcome-more-icon {
-  width: 38px;
-  height: 38px;
-  border-radius: 10px;
-  background: var(--accent-soft-bg);
-  border: 1px solid var(--accent-soft-border);
+.td-welcome-case-arrow {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  width: 16px;
+  color: var(--text-disabled);
+  opacity: 0.45;
+  flex-shrink: 0;
+  transition: color 0.14s ease, opacity 0.14s ease, transform 0.14s ease;
 }
 
-.td-welcome-more-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-width: 440px;
-}
-
-.td-welcome-more-title {
-  font-size: 13.25px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.td-welcome-more-desc {
-  font-size: 11.75px;
-  color: var(--text-muted);
-  line-height: 1.5;
-}
-
-.td-welcome-more-actions {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  margin-top: 2px;
+.td-welcome-case-row:hover:not(:disabled) .td-welcome-case-arrow,
+.td-welcome-case-row:focus-visible .td-welcome-case-arrow {
+  color: var(--accent);
+  opacity: 1;
+  transform: translateX(2px);
 }
 
 .td-welcome-panel-foot {
@@ -4477,10 +4487,6 @@
 
 /* 响应式适配：覆盖 1280×720 / 窄窗 / 超矮视口，杜绝裁切与双滚动条 */
 @media (max-width: 1240px) {
-  .td-welcome-case-grid {
-    grid-template-columns: 1fr;
-  }
-
   .td-welcome-filter-box {
     width: 184px;
   }
@@ -4549,6 +4555,15 @@
 
   .td-welcome-panel-head {
     flex-wrap: wrap;
+  }
+
+  .td-welcome-case-row {
+    padding: 11px 12px 11px 14px;
+    gap: 10px;
+  }
+
+  .td-welcome-case-right {
+    gap: 8px;
   }
 }
 
@@ -4756,9 +4771,9 @@
   text-decoration: underline;
 }
 
-/* 左侧分区树未索引节点悬浮“仅索引”快捷按钮 */
+/* 左侧分区树未索引节点悬浮“仅索引”快捷按钮（紧随分区标签右侧，避免文件树横向撑开时按钮被推至视口外） */
 .td-tree-inline-action {
-  margin-left: auto;
+  margin-left: 8px;
   margin-right: 4px;
   height: 20px;
   padding: 0 7px;

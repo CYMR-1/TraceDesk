@@ -1269,223 +1269,226 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
       )}
 
       <div className="td-nav-tree" role="tree" aria-label="数据源文件树">
-        <div
-          className={`td-tree-row ${selectedTreeId === '__image__' ? 'td-tree-row--selected' : ''}`}
-          style={{ paddingLeft: 6 }}
-          title={evidence?.path ?? '尚未加载镜像'}
-          onClick={() =>
-            void handleTreeNodeClick(
-              {
-                id: '__image__',
-                label: imageName,
-                kind: 'image',
-                iconKind: 'disk',
-                hasChildren: partitions.length > 0,
-              },
-              '__image__'
-            )
-          }
-        >
-          {partitions.length > 0 ? (
-            <button
-              type="button"
-              className="td-tree-toggle"
-              onClick={(e) => {
-                e.stopPropagation();
-                toggleTreeExpand('__image__');
-              }}
-            >
-              <img
-                src={assetUrl(
-                  expandedIds.has('__image__') ? 'assets/branch-open.svg' : 'assets/branch-closed.svg'
-                )}
-                alt=""
-              />
-            </button>
-          ) : (
-            <span style={{ width: 18, flexShrink: 0 }} />
-          )}
-          <span className="td-tree-icon">
-            <EntryIcon kind="disk" size={15} />
-          </span>
-          <span className="td-tree-label">{imageName}</span>
-        </div>
+        {/* 内部横向撑开包裹层：深层目录或超长文件名自动撑宽行高亮并触发底部水平滚动条 */}
+        <div className="td-nav-tree-inner">
+          <div
+            className={`td-tree-row ${selectedTreeId === '__image__' ? 'td-tree-row--selected' : ''}`}
+            style={{ paddingLeft: 6 }}
+            title={evidence?.path ?? '尚未加载镜像'}
+            onClick={() =>
+              void handleTreeNodeClick(
+                {
+                  id: '__image__',
+                  label: imageName,
+                  kind: 'image',
+                  iconKind: 'disk',
+                  hasChildren: partitions.length > 0,
+                },
+                '__image__'
+              )
+            }
+          >
+            {partitions.length > 0 ? (
+              <button
+                type="button"
+                className="td-tree-toggle"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleTreeExpand('__image__');
+                }}
+              >
+                <img
+                  src={assetUrl(
+                    expandedIds.has('__image__') ? 'assets/branch-open.svg' : 'assets/branch-closed.svg'
+                  )}
+                  alt=""
+                />
+              </button>
+            ) : (
+              <span style={{ width: 18, flexShrink: 0 }} />
+            )}
+            <span className="td-tree-icon">
+              <EntryIcon kind="disk" size={15} />
+            </span>
+            <span className="td-tree-label">{imageName}</span>
+          </div>
 
-        {expandedIds.has('__image__') &&
-          partitions.map((part, idx) => {
-            const partId = `part:${part.offset}`;
-            const rootId = `dir:${part.offset}:`;
-            const scan = scanMap.get(part.offset);
-            const partExpanded = expandedIds.has(partId);
-            const rootExpanded = expandedIds.has(rootId);
-            const rootBranch = branches[rootId];
-            const stateLabel =
-              scan?.status === 'ready'
-                ? `已读取 ${scan.count ?? 0} 项`
-                : scan?.status === 'error'
-                  ? '无法读取'
-                  : isQuickMode && rootBranch?.error
+          {expandedIds.has('__image__') &&
+            partitions.map((part, idx) => {
+              const partId = `part:${part.offset}`;
+              const rootId = `dir:${part.offset}:`;
+              const scan = scanMap.get(part.offset);
+              const partExpanded = expandedIds.has(partId);
+              const rootExpanded = expandedIds.has(rootId);
+              const rootBranch = branches[rootId];
+              const stateLabel =
+                scan?.status === 'ready'
+                  ? `已读取 ${scan.count ?? 0} 项`
+                  : scan?.status === 'error'
                     ? '无法读取'
-                    : isQuickMode && rootBranch?.loaded
-                      ? `已展开 ${rootBranch.children.length} 项`
-                      : '待读取';
+                    : isQuickMode && rootBranch?.error
+                      ? '无法读取'
+                      : isQuickMode && rootBranch?.loaded
+                        ? `已展开 ${rootBranch.children.length} 项`
+                        : '待读取';
 
-            return (
-              <React.Fragment key={partId}>
-                <div
-                  className={`td-tree-row td-tree-row--partition ${selectedTreeId === partId ? 'td-tree-row--selected' : ''}`}
-                  style={{ paddingLeft: 20 }}
-                  title={`${part.description}\n偏移 ${part.offset} 扇区\n${scan?.error || rootBranch?.error || stateLabel}${scan?.status !== 'error' ? '\n右键可选择「仅索引此分区」' : ''}`}
-                  onClick={() =>
-                    void handleTreeNodeClick(
-                      {
-                        id: partId,
-                        label: `分区 ${idx + 1} · 偏移 ${part.offset} · ${stateLabel}`,
+              return (
+                <React.Fragment key={partId}>
+                  <div
+                    className={`td-tree-row td-tree-row--partition ${selectedTreeId === partId ? 'td-tree-row--selected' : ''}`}
+                    style={{ paddingLeft: 20 }}
+                    title={`${part.description}\n偏移 ${part.offset} 扇区\n${scan?.error || rootBranch?.error || stateLabel}${scan?.status !== 'error' ? '\n右键可选择「仅索引此分区」' : ''}`}
+                    onClick={() =>
+                      void handleTreeNodeClick(
+                        {
+                          id: partId,
+                          label: `分区 ${idx + 1} · 偏移 ${part.offset} · ${stateLabel}`,
+                          kind: 'partition',
+                          iconKind: 'disk',
+                          offset: part.offset,
+                          hasChildren: scan?.status !== 'error',
+                        },
+                        partId
+                      )
+                    }
+                    onContextMenu={(e) => {
+                      if (scan?.status === 'error') return;
+                      e.preventDefault();
+                      setSelectedTreeId(partId);
+                      setContextMenu({
                         kind: 'partition',
-                        iconKind: 'disk',
+                        x: e.clientX,
+                        y: e.clientY,
                         offset: part.offset,
-                        hasChildren: scan?.status !== 'error',
-                      },
-                      partId
-                    )
-                  }
-                  onContextMenu={(e) => {
-                    if (scan?.status === 'error') return;
-                    e.preventDefault();
-                    setSelectedTreeId(partId);
-                    setContextMenu({
-                      kind: 'partition',
-                      x: e.clientX,
-                      y: e.clientY,
-                      offset: part.offset,
-                      description: part.description,
-                      ready: scan?.status === 'ready',
-                    });
-                  }}
-                >
-                  {scan?.status !== 'error' ? (
-                    <button
-                      type="button"
-                      className="td-tree-toggle"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        toggleTreeExpand(partId);
-                      }}
-                    >
-                      <img
-                        src={assetUrl(partExpanded ? 'assets/branch-open.svg' : 'assets/branch-closed.svg')}
-                        alt=""
-                      />
-                    </button>
-                  ) : (
-                    <span style={{ width: 18, flexShrink: 0 }} />
-                  )}
-                  <span className="td-tree-icon">
-                    <EntryIcon kind="disk" size={15} />
-                  </span>
-                  <span className="td-tree-label">
-                    分区 {idx + 1} · 偏移 {part.offset} · {stateLabel}
-                  </span>
-                  {scan?.status !== 'ready' && scan?.status !== 'error' && (
-                    <button
-                      type="button"
-                      className="td-tree-inline-action"
-                      disabled={busy}
-                      title={`仅索引分区偏移 ${part.offset} 扇区`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onScanPartition(part.offset);
-                      }}
-                    >
-                      仅索引
-                    </button>
-                  )}
-                </div>
-
-                {partExpanded && scan?.status !== 'error' && (
-                  <>
-                    <div
-                      className={`td-tree-row ${selectedTreeId === rootId ? 'td-tree-row--selected' : ''}`}
-                      style={{ paddingLeft: 34 }}
-                      title={
-                        isQuickMode
-                          ? `分区偏移 ${part.offset} / 根目录（点击展开按需读取）`
-                          : `分区偏移 ${part.offset} / 根目录`
-                      }
-                      onClick={() =>
-                        void handleTreeNodeClick(
-                          {
-                            id: rootId,
-                            label: '/ 根目录',
-                            kind: 'root',
-                            iconKind: 'folder',
-                            offset: part.offset,
-                            scopePath: '',
-                            hasChildren: true,
-                          },
-                          rootId
-                        )
-                      }
-                    >
+                        description: part.description,
+                        ready: scan?.status === 'ready',
+                      });
+                    }}
+                  >
+                    {scan?.status !== 'error' ? (
                       <button
                         type="button"
                         className="td-tree-toggle"
                         onClick={(e) => {
                           e.stopPropagation();
-                          toggleTreeExpand(rootId, part.offset, '', null);
+                          toggleTreeExpand(partId);
                         }}
-                        aria-label={rootExpanded ? '折叠根目录' : '展开根目录'}
                       >
                         <img
-                          src={assetUrl(rootExpanded ? 'assets/branch-open.svg' : 'assets/branch-closed.svg')}
+                          src={assetUrl(partExpanded ? 'assets/branch-open.svg' : 'assets/branch-closed.svg')}
                           alt=""
                         />
                       </button>
-                      <span className="td-tree-icon">
-                        <EntryIcon kind="folder" size={15} />
-                      </span>
-                      <span className="td-tree-label">/ 根目录</span>
-                      {isQuickMode && !rootBranch?.loaded && !rootBranch?.loading && !rootBranch?.error && (
-                        <span className="td-tree-hint">点击展开按需读取</span>
-                      )}
-                    </div>
-
-                    {rootExpanded && (
-                      <>
-                        {rootBranch?.loading && (
-                          <div className="td-tree-row td-muted-text" style={{ paddingLeft: 66, fontSize: 11.5 }}>
-                            正在读取目录…
-                          </div>
-                        )}
-                        {rootBranch?.error && !rootBranch.loading && (
-                          <div
-                            className="td-tree-row td-tree-error-row"
-                            style={{ paddingLeft: 66 }}
-                            title={rootBranch.error}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void loadTreeBranch(rootId, part.offset, '', null);
-                            }}
-                          >
-                            <span>读取失败：{rootBranch.error}</span>
-                            <span className="td-tree-retry-link">点击重试</span>
-                          </div>
-                        )}
-                        {rootBranch?.loaded && !rootBranch.loading && rootBranch.children.length === 0 && (
-                          <div className="td-tree-row td-muted-text" style={{ paddingLeft: 66, fontSize: 11.5 }}>
-                            （空目录）
-                          </div>
-                        )}
-                        {rootBranch?.loaded &&
-                          rootBranch.children.length > 0 &&
-                          renderTreeChildren(rootBranch.children, 3, '', null)}
-                      </>
+                    ) : (
+                      <span style={{ width: 18, flexShrink: 0 }} />
                     )}
-                  </>
-                )}
-              </React.Fragment>
-            );
-          })}
+                    <span className="td-tree-icon">
+                      <EntryIcon kind="disk" size={15} />
+                    </span>
+                    <span className="td-tree-label">
+                      分区 {idx + 1} · 偏移 {part.offset} · {stateLabel}
+                    </span>
+                    {scan?.status !== 'ready' && scan?.status !== 'error' && (
+                      <button
+                        type="button"
+                        className="td-tree-inline-action"
+                        disabled={busy}
+                        title={`仅索引分区偏移 ${part.offset} 扇区`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onScanPartition(part.offset);
+                        }}
+                      >
+                        仅索引
+                      </button>
+                    )}
+                  </div>
+
+                  {partExpanded && scan?.status !== 'error' && (
+                    <>
+                      <div
+                        className={`td-tree-row ${selectedTreeId === rootId ? 'td-tree-row--selected' : ''}`}
+                        style={{ paddingLeft: 34 }}
+                        title={
+                          isQuickMode
+                            ? `分区偏移 ${part.offset} / 根目录（点击展开按需读取）`
+                            : `分区偏移 ${part.offset} / 根目录`
+                        }
+                        onClick={() =>
+                          void handleTreeNodeClick(
+                            {
+                              id: rootId,
+                              label: '/ 根目录',
+                              kind: 'root',
+                              iconKind: 'folder',
+                              offset: part.offset,
+                              scopePath: '',
+                              hasChildren: true,
+                            },
+                            rootId
+                          )
+                        }
+                      >
+                        <button
+                          type="button"
+                          className="td-tree-toggle"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleTreeExpand(rootId, part.offset, '', null);
+                          }}
+                          aria-label={rootExpanded ? '折叠根目录' : '展开根目录'}
+                        >
+                          <img
+                            src={assetUrl(rootExpanded ? 'assets/branch-open.svg' : 'assets/branch-closed.svg')}
+                            alt=""
+                          />
+                        </button>
+                        <span className="td-tree-icon">
+                          <EntryIcon kind="folder" size={15} />
+                        </span>
+                        <span className="td-tree-label">/ 根目录</span>
+                        {isQuickMode && !rootBranch?.loaded && !rootBranch?.loading && !rootBranch?.error && (
+                          <span className="td-tree-hint">点击展开按需读取</span>
+                        )}
+                      </div>
+
+                      {rootExpanded && (
+                        <>
+                          {rootBranch?.loading && (
+                            <div className="td-tree-row td-muted-text" style={{ paddingLeft: 66, fontSize: 11.5 }}>
+                              正在读取目录…
+                            </div>
+                          )}
+                          {rootBranch?.error && !rootBranch.loading && (
+                            <div
+                              className="td-tree-row td-tree-error-row"
+                              style={{ paddingLeft: 66 }}
+                              title={rootBranch.error}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void loadTreeBranch(rootId, part.offset, '', null);
+                              }}
+                            >
+                              <span>读取失败：{rootBranch.error}</span>
+                              <span className="td-tree-retry-link">点击重试</span>
+                            </div>
+                          )}
+                          {rootBranch?.loaded && !rootBranch.loading && rootBranch.children.length === 0 && (
+                            <div className="td-tree-row td-muted-text" style={{ paddingLeft: 66, fontSize: 11.5 }}>
+                              （空目录）
+                            </div>
+                          )}
+                          {rootBranch?.loaded &&
+                            rootBranch.children.length > 0 &&
+                            renderTreeChildren(rootBranch.children, 3, '', null)}
+                        </>
+                      )}
+                    </>
+                  )}
+                </React.Fragment>
+              );
+            })}
+        </div>
       </div>
 
       <div className="td-nav-footer">{treeFooterText}</div>
