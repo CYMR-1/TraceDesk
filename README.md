@@ -23,7 +23,7 @@
 
 | 位置 | 用途 |
 | --- | --- |
-| `Cargo.toml`、`启动取证工作台.bat` | Rust 工作区（5 个成员）与一键构建/启动入口 |
+| `Cargo.toml`、`启动取证工作台.ps1` | Rust 工作区（5 个成员）与 PowerShell 7（`pwsh`）一键构建/启动入口 |
 | `crates/tracedesk-engines/` | 底层只读取证引擎：TSK 白名单、纯 Rust EWF1 并行解码、FAT/NTFS、卷随机读取与 Windows 拒写句柄 |
 | `crates/tracedesk-core/` | 案件隔离、SHA-256 审计链、目录树索引、时间线、9 编码与图片预览、文件魔数伪装检测、SIMD 并行搜索、Markdown/HTML 报告与 ZIP64 复核包交叉验签 |
 | `crates/tracedesk-mcp/` | 标准 MCP 服务端 `tracedesk-mcp.exe`（20 工具 + 2 资源、跨进程实时遥测与统计，支持 `stdio` 与仅回环 `Streamable HTTP`） |
@@ -48,14 +48,30 @@
   ```
   如需为 `cargo` 配置国内稀疏索引镜像，可在 `%USERPROFILE%\.cargo\config.toml` 中配置 `rsproxy-sparse` 源。
 - **Node.js**（v20+，随附 `npm`）
+- **PowerShell 7（`pwsh` 7.0+）**：用于运行根目录一键启动脚本 `启动取证工作台.ps1`（可通过 `winget install Microsoft.PowerShell` 安装）
 - **Visual Studio Build Tools（MSVC C++ 工具集）** 与 Windows 11 自带的 **WebView2 Runtime**
-- **The Sleuth Kit 4.15.0**：本仓库已随附完整官方 Windows 版 TSK 与两份 FAT16 演示镜像；如 `tools/` 缺失，运行 `powershell -File scripts/install_tsk.ps1` 或将环境变量 `TSK_BIN` 指向完整 TSK `bin` 目录（须保留 DLL 与 `licenses/`）。
+- **The Sleuth Kit 4.15.0**：本仓库已随附完整官方 Windows 版 TSK 与两份 FAT16 演示镜像；如 `tools/` 缺失，运行 `pwsh -File scripts/install_tsk.ps1` 或将环境变量 `TSK_BIN` 指向完整 TSK `bin` 目录（须保留 DLL 与 `licenses/`）。
 
 ### 2. 一键启动桌面工作台
 
-双击根目录 **启动取证工作台.bat**：
-- 若 `target\release\tracedesk-desktop.exe` 已存在，直接拉起原生桌面工作台并在确认窗口创建后自动关闭启动终端；若启动异常或秒退，会保留终端显示错误并输出 `logs\startup.log`（桌面端同时弹窗提示）；
-- 若尚未编译，自动检查 `frontend\dist`（缺失时执行 `npm.cmd ci` 与 `npm.cmd run build`），随后执行 `cargo build --release -p tracedesk-desktop`（默认启用 `custom-protocol` 内嵌前端资源）并启动桌面端。
+在项目根目录使用 PowerShell 7（`pwsh`）执行 **启动取证工作台.ps1**：
+
+```powershell
+# 默认启动：已有 Release 二进制时直接拉起；缺失时自动构建前端与 Rust 后启动
+pwsh -File .\启动取证工作台.ps1
+
+# 强制重新构建前端与 Rust Release 二进制后再启动
+pwsh -File .\启动取证工作台.ps1 -Rebuild
+
+# 仅执行构建检查，不拉起桌面窗口（可配合 -Rebuild 仅重编不启动）
+pwsh -File .\启动取证工作台.ps1 -BuildOnly
+
+# 启动后跳过主窗口句柄等待直接返回
+pwsh -File .\启动取证工作台.ps1 -NoWait
+```
+
+- 若 `target\release\tracedesk-desktop.exe` 已存在且未指定 `-Rebuild`，直接拉起原生桌面工作台并轮询最长 8 秒确认主窗口句柄创建；若启动异常或秒退，会输出中文诊断并自动展示 `logs\startup.log` 最近 20 行（桌面端同时弹窗提示）；
+- 若尚未编译或指定 `-Rebuild`，自动检查 `frontend\dist`（缺失或 `-Rebuild` 时执行 `npm.cmd ci` 与 `npm.cmd run build`），随后执行 `cargo build --release -p tracedesk-desktop`（默认启用 `custom-protocol` 内嵌前端资源）并按需启动桌面端。
 
 ### 3. 手动编译、运行与测试
 
@@ -97,7 +113,7 @@ cargo test --workspace
 
 ## 桌面工作台视觉与操作流程
 
-界面采用 **明净瓷白与晴空蓝（Daylight Porcelain & Cerulean Sky）** 浅色取证视觉规范：顶部明净瓷白命令带（`#FFFFFF`）、带 3 px 语义状态边框的浅冰色案件保管栏（`#F7FAFD`）、薄雾浅蓝模块导航带（`#EFF4F9`，右侧嵌入镜像操作按钮）、纯白证据工作区与浅瓷色底栏；主色晴空蓝（`#2674C4`），提供柔和浅底语义胶囊徽章（现存/已删除/重分配/人工/MCP/MACB 事件）、虚拟滚动表格、本地高 DPI 矢量图标与内置 9 主题图文操作说明（支持高清 Lightbox 大图查看）。
+界面采用 **明净瓷白与晴空蓝（Daylight Porcelain & Cerulean Sky）** 浅色取证视觉规范：顶部明净瓷白命令带（`#FFFFFF`，含案件管理分段按钮组、合并式「生成报告 ▾」下拉菜单、主焦「导出复核包」与次焦「核验复核包」）、单行左右排布的浅冰色案件保管栏（`#F7FAFD`，左侧 3 px 语义状态边框，左显案件摘要、右显证据镜像与校验状态）、薄雾浅蓝模块导航带（`#EFF4F9`，右侧嵌入镜像操作按钮）、精致居中排布的未开案启动欢迎工作台（快捷操作瓷砖、格式化时间的最近案件卡片、虚线文件拖放区与 4 步取证流程速览）、纯白证据工作区与浅瓷色底栏；主色晴空蓝（`#2674C4`），提供柔和浅底语义胶囊徽章（现存/已删除/重分配/人工/MCP/MACB 事件）、虚拟滚动表格、本地高 DPI 矢量图标与内置 9 主题图文操作说明（支持高清 Lightbox 大图查看）。
 
 ### 完整取证闭环操作
 

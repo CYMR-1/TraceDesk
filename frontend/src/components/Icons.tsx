@@ -35,7 +35,9 @@ export type UiIconName =
   | 'locate'
   | 'html_report'
   | 'magic'
-  | 'note';
+  | 'note'
+  | 'chevron_down'
+  | 'clock';
 
 export type EntryIconKind = 'folder' | 'disk' | 'file' | 'image' | 'table' | 'system';
 
@@ -327,6 +329,17 @@ export const UiIcon: React.FC<UiIconProps> = ({
               d="M12.8 2.4 L13.8 3.4 Q14.2 3.8 13.8 4.2 L8.0 10.0 L5.8 10.4 L6.2 8.2 L12.0 2.4 Q12.4 2.0 12.8 2.4 Z"
               fill="none"
             />
+          </>
+        );
+      case 'chevron_down':
+        // 下拉菜单向下折角箭头
+        return <polyline points="4.0,6.2 8.0,10.2 12.0,6.2" fill="none" />;
+      case 'clock':
+        // 时间戳辅助图标（简洁表盘）
+        return (
+          <>
+            <circle cx="8" cy="8" r="5.6" fill="none" />
+            <polyline points="8.0,4.8 8.0,8.2 10.4,9.6" fill="none" />
           </>
         );
       default:
