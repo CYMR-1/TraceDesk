@@ -56,22 +56,22 @@ const IMAGE_DROP_EXT_SET = new Set(RAW_IMAGE_EXTENSIONS.map((ext) => ext.toLower
 /** 标准取证闭环四步速览（用于未开案欢迎工作台侧栏） */
 const WORKFLOW_STEPS = [
   {
-    step: '1',
+    step: '01',
     title: '建案与镜像固定',
     desc: '初始化隔离案件目录，只读载入镜像并固定整盘 SHA-256 基线',
   },
   {
-    step: '2',
+    step: '02',
     title: '浏览预览与魔数检测',
     desc: '支持文本、HEX 与图片预览，自动识别扩展名伪装文件',
   },
   {
-    step: '3',
+    step: '03',
     title: '搜索、时间线与发现',
     desc: '多编码流式检索、MACB 时间线分析与结构化取证笔录',
   },
   {
-    step: '4',
+    step: '04',
     title: '双报告与复核包核验',
     desc: '输出 Markdown / HTML 报告及防篡改复核包并支持离线验真',
   },
@@ -138,6 +138,7 @@ export const App: React.FC = () => {
   });
   const [cancellingActiveTask, setCancellingActiveTask] = useState(false);
   const [recentCases, setRecentCases] = useState<RecentCaseDto[]>([]);
+  const [recentCaseQuery, setRecentCaseQuery] = useState('');
   const [loadingRecentCases, setLoadingRecentCases] = useState(false);
   const [dragOverActive, setDragOverActive] = useState(false);
   const [refreshToken, setRefreshToken] = useState(0);
@@ -1409,13 +1410,33 @@ export const App: React.FC = () => {
     return statusText;
   }, [taskStageText, hashingImage, contentSearching, searchLiveState.stageText, statusText]);
 
-  // 当前正在执行中的 MCP 工具信息（用于顶栏和底栏实时状态指示）
+  // 按编号、对象、取证人员或目录名实时过滤最近案件列表
+  const trimmedRecentQuery = recentCaseQuery.trim().toLowerCase();
+  const filteredRecentCases = useMemo(() => {
+    if (!trimmedRecentQuery) return recentCases;
+    return recentCases.filter((item) => {
+      const haystack = [
+        item.number,
+        item.name,
+        item.target,
+        item.examiner,
+        extractPathLeafName(item.folder),
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(trimmedRecentQuery);
+    });
+  }, [recentCases, trimmedRecentQuery]);
+
+  // 当前正在执行中的 MCP 工具信息（用于顶栏、欢迎页状态微卡和底栏实时状态指示）
   const activeRunningMcp = useMemo(
     () => mcpActivities.find((item) => item.phase === 'started') ?? null,
     [mcpActivities]
   );
   const mcpRunningCalls = mcpStats.runningCalls;
   const mcpHttpRunning = Boolean(mcpStatus?.running);
+  const mcpToolCount = mcpStatus?.tools?.length || 20;
   const mcpLiveLabel = useMemo(() => {
     if (mcpRunningCalls > 0) {
       const toolTitle = activeRunningMcp?.toolTitle || '正在调用工具';
@@ -1867,325 +1888,523 @@ export const App: React.FC = () => {
 
       {/* 4. 纯白证据工作区 / 全屏欢迎首页 */}
       <main className="td-workspace">
-        {/* 未开案时以全屏瓷白晴空蓝启动台铺满窗口（集成操作说明与 MCP 实时状态入口） */}
-        {isWelcomeLaunchpad && (
-          <div className="td-welcome-empty">
-            <div className="td-welcome-canvas">
-              {/* 顶部品牌头区与右上角轻量工具入口 */}
-              <div className="td-welcome-masthead">
-                <div className="td-welcome-masthead-top">
-                  <div className="td-welcome-brand">
-                    <div className="td-welcome-emblem">
-                      <BrandLogo size={36} />
-                    </div>
-                    <div className="td-welcome-hero-text">
-                      <div className="td-welcome-title-row">
-                        <h1 className="td-welcome-title">TraceDesk 电子数据取证工作台</h1>
-                        {!inTauri && (
-                          <span
-                            className="td-header-demo-tag"
-                            title="当前运行在纯浏览器环境，采用内置只读演示数据"
-                          >
-                            演示预览
-                          </span>
-                        )}
-                      </div>
-                      <p className="td-welcome-subtitle">
-                        面向本地证据镜像的无损只读勘验、流式内容检索与防篡改交付工作台
-                      </p>
-                    </div>
-                  </div>
+        {/* 未开案时以全视口铺满式瓷白晴空蓝启动台铺展整个窗口 */}
+        {isWelcomeLaunchpad && (() => {
+          // 列表较少且未筛选时展示柔和虚线引导卡，保持左栏视觉饱满和谐
+          const showMoreGuidanceCard = !trimmedRecentQuery && filteredRecentCases.length > 0 && filteredRecentCases.length <= 3;
+          const placeMoreInGrid = showMoreGuidanceCard && filteredRecentCases.length === 3;
+          const placeMoreBelowGrid = showMoreGuidanceCard && filteredRecentCases.length <= 2;
 
-                  {/* 顶部精致集成工具角：操作说明 + MCP 实时监控 */}
-                  {(helpAction || mcpAction) && (
-                    <div className="td-welcome-utilities" role="toolbar" aria-label="工作台辅助功能">
-                      {helpAction && (
-                        <button
-                          type="button"
-                          className="td-welcome-tool-btn"
-                          title="查看 TraceDesk 操作说明与标准取证流程"
-                          onClick={() => invokeAction('help')}
-                        >
-                          <UiIcon name={helpAction.icon || 'help'} size={14} color="var(--header-icon)" />
-                          <span>{helpAction.title}</span>
-                        </button>
-                      )}
-                      {mcpAction && (() => {
-                        const isRunningNow = mcpRunningCalls > 0;
-                        const mcpStateClass = isRunningNow
-                          ? 'td-welcome-mcp-btn--running'
-                          : mcpHttpRunning
-                            ? 'td-welcome-mcp-btn--online'
-                            : '';
-                        return (
-                          <button
-                            type="button"
-                            className={`td-welcome-tool-btn td-welcome-mcp-btn ${mcpStateClass}`}
-                            title={
-                              isRunningNow
-                                ? `${mcpLiveLabel}（点击进入 MCP 实时监控）`
-                                : mcpHttpRunning
-                                  ? `本地 MCP HTTP 服务运行中：${mcpStatus?.url}（点击进入实时监控）`
-                                  : '打开 MCP 实时监控与服务接入配置'
-                            }
-                            onClick={() => invokeAction('mcp')}
-                          >
-                            {isRunningNow ? (
-                              <span className="td-mcp-dot td-mcp-dot--running" />
-                            ) : mcpHttpRunning ? (
-                              <span className="td-mcp-dot td-mcp-dot--online" />
-                            ) : (
-                              <UiIcon name={mcpAction.icon || 'mcp'} size={14} color="var(--header-icon)" />
-                            )}
-                            <span className="td-welcome-mcp-label">{mcpLiveLabel}</span>
-                          </button>
-                        );
-                      })()}
-                    </div>
-                  )}
-                </div>
-
-                {/* 核心特性微标签行 */}
-                <div className="td-welcome-specs" aria-label="工作台核心能力">
-                  {WORKBENCH_CAPABILITIES.map((cap) => (
-                    <span key={cap} className="td-welcome-spec-chip">
-                      {cap}
-                    </span>
-                  ))}
+          const renderMoreGuidanceCard = (extraClassName = '') => (
+            <div
+              role="button"
+              tabIndex={busy ? -1 : 0}
+              aria-disabled={busy}
+              className={`td-welcome-more-card ${extraClassName} ${busy ? 'td-welcome-more-card--disabled' : ''}`}
+              title="点击浏览打开本地已有案件，或点击「新建案件」创建隔离案件目录"
+              onClick={() => {
+                if (!busy) handleOpenCase();
+              }}
+              onKeyDown={(e) => {
+                if (busy) return;
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  handleOpenCase();
+                }
+              }}
+            >
+              <span className="td-welcome-more-icon" aria-hidden="true">
+                <UiIcon name="case_new" size={18} color="var(--accent)" />
+              </span>
+              <div className="td-welcome-more-copy">
+                <div className="td-welcome-more-title">+ 新建或浏览打开更多案件</div>
+                <div className="td-welcome-more-desc">
+                  定位磁盘任意位置的 case.json 恢复历史勘验，或新建隔离案件目录建立审计链起点
                 </div>
               </div>
-
-              {/* 三张高质感快捷操作瓷砖：新建案件 / 打开已有案件 / 离线核验复核包 */}
-              <div className="td-welcome-tiles" role="group" aria-label="快速开始">
+              <div className="td-welcome-more-actions">
                 <button
                   type="button"
-                  className="td-welcome-tile td-welcome-tile--primary"
+                  className="td-btn td-btn--compact td-btn--accent"
                   disabled={busy}
-                  onClick={handleNewCase}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleNewCase();
+                  }}
                 >
-                  <span className="td-welcome-tile-badge td-welcome-tile-badge--primary">
-                    <UiIcon name="case_new" size={18} color="#FFFFFF" />
-                  </span>
-                  <span className="td-welcome-tile-body">
-                    <span className="td-welcome-tile-title">新建案件</span>
-                    <span className="td-welcome-tile-desc">创建隔离案件目录与审计链起点</span>
-                  </span>
-                  <UiIcon
-                    name="arrow_right"
-                    size={15}
-                    className="td-welcome-tile-arrow"
-                    color="var(--accent)"
-                  />
+                  <UiIcon name="case_new" size={12} color="#FFFFFF" />
+                  <span>新建案件</span>
                 </button>
-
                 <button
                   type="button"
-                  className="td-welcome-tile"
+                  className="td-btn td-btn--compact"
                   disabled={busy}
-                  onClick={handleOpenCase}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleOpenCase();
+                  }}
                 >
-                  <span className="td-welcome-tile-badge">
-                    <UiIcon name="case_open" size={18} color="var(--accent)" />
-                  </span>
-                  <span className="td-welcome-tile-body">
-                    <span className="td-welcome-tile-title">打开已有案件</span>
-                    <span className="td-welcome-tile-desc">浏览本地 case.json 或恢复历史勘验</span>
-                  </span>
-                  <UiIcon
-                    name="arrow_right"
-                    size={15}
-                    className="td-welcome-tile-arrow"
-                    color="var(--text-muted)"
-                  />
+                  <UiIcon name="case_open" size={12} color="var(--accent-soft-text)" />
+                  <span>浏览打开</span>
                 </button>
-
-                <button
-                  type="button"
-                  className="td-welcome-tile"
-                  onClick={() => setVerifyBundleOpen(true)}
-                >
-                  <span className="td-welcome-tile-badge">
-                    <UiIcon name="check_shield" size={18} color="var(--accent)" />
-                  </span>
-                  <span className="td-welcome-tile-body">
-                    <span className="td-welcome-tile-title">离线核验复核包</span>
-                    <span className="td-welcome-tile-desc">校验复核包 ZIP 完整性与审计链</span>
-                  </span>
-                  <UiIcon
-                    name="arrow_right"
-                    size={15}
-                    className="td-welcome-tile-arrow"
-                    color="var(--text-muted)"
-                  />
-                </button>
-              </div>
-
-              {/* 主体平衡双栏：左侧最近案件档案列表 + 右侧快捷拖放/点击打开区与标准取证闭环 */}
-              <div className="td-welcome-split">
-                <section className="td-welcome-panel td-welcome-recent-panel" aria-label="最近案件">
-                  <div className="td-welcome-panel-head">
-                    <div className="td-welcome-panel-title-group">
-                      <h2 className="td-welcome-panel-title">最近案件</h2>
-                      <span className="td-welcome-count-badge td-mono">{recentCases.length}</span>
-                    </div>
-                    <button
-                      type="button"
-                      className="td-btn td-btn--compact"
-                      disabled={loadingRecentCases || busy}
-                      onClick={() => void refreshRecentCases()}
-                    >
-                      <UiIcon name="refresh" size={12} color="var(--text-secondary)" />
-                      {loadingRecentCases ? '正在刷新…' : '刷新列表'}
-                    </button>
-                  </div>
-
-                  {recentCases.length > 0 ? (
-                    <>
-                      <div className="td-welcome-case-list">
-                        {recentCases.map((item) => {
-                          const formattedTime = formatCaseTimestamp(item.created);
-                          const leafDir = extractPathLeafName(item.folder);
-                          return (
-                            <button
-                              key={item.folder}
-                              type="button"
-                              className="td-welcome-case-card"
-                              disabled={busy}
-                              onClick={() => void openCaseByPath(item.folder)}
-                              title={`点击打开案件：${item.folder}`}
-                            >
-                              <div className="td-welcome-case-top">
-                                <span className="td-welcome-case-id td-mono">
-                                  {item.number || item.name}
-                                </span>
-                                <span
-                                  className={`td-recent-badge ${item.hasEvidence ? 'td-recent-badge--ready' : 'td-recent-badge--empty'}`}
-                                >
-                                  {item.hasEvidence
-                                    ? `已载入镜像 · ${item.inventoryCount.toLocaleString()} 项`
-                                    : '待载入镜像'}
-                                </span>
-                              </div>
-
-                              <div className="td-welcome-case-meta">
-                                <span className="td-welcome-meta-item">
-                                  <span className="td-welcome-meta-key">对象</span>
-                                  <span className="td-welcome-meta-val">{item.target || '—'}</span>
-                                </span>
-                                <span className="td-welcome-meta-sep" aria-hidden="true" />
-                                <span className="td-welcome-meta-item">
-                                  <span className="td-welcome-meta-key">取证人员</span>
-                                  <span className="td-welcome-meta-val">{item.examiner || '—'}</span>
-                                </span>
-                                {item.exportsCount > 0 && (
-                                  <>
-                                    <span className="td-welcome-meta-sep" aria-hidden="true" />
-                                    <span className="td-welcome-meta-item">
-                                      <span className="td-welcome-meta-key">已导出</span>
-                                      <span className="td-welcome-meta-val">{item.exportsCount} 份</span>
-                                    </span>
-                                  </>
-                                )}
-                              </div>
-
-                              <div className="td-welcome-case-foot">
-                                <span className="td-welcome-case-dir" title={item.folder}>
-                                  <UiIcon name="case_open" size={12} color="var(--text-muted)" />
-                                  <span className="td-mono">{leafDir}</span>
-                                </span>
-                                {formattedTime && (
-                                  <span className="td-welcome-case-time" title={item.created}>
-                                    <UiIcon name="clock" size={12} color="var(--text-muted)" />
-                                    <span className="td-mono">{formattedTime}</span>
-                                  </span>
-                                )}
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </div>
-                      <div className="td-welcome-panel-foot">
-                        点击任意案件卡片即可恢复工作区；也可通过上方「打开已有案件」定位磁盘任意位置的 case.json。
-                      </div>
-                    </>
-                  ) : (
-                    <div className="td-welcome-case-empty">
-                      <span className="td-welcome-empty-icon">
-                        <UiIcon name="case_open" size={22} color="var(--accent)" />
-                      </span>
-                      <div className="td-welcome-empty-title">
-                        {loadingRecentCases ? '正在扫描案件库目录…' : '案件库中尚无历史案件'}
-                      </div>
-                      <div className="td-welcome-empty-desc">
-                        {loadingRecentCases
-                          ? '请稍候，正在读取本地案件索引清单。'
-                          : '点击上方「新建案件」开始首次勘验，或直接将本地 case.json 拖入窗口快速打开。'}
-                      </div>
-                    </div>
-                  )}
-                </section>
-
-                <aside className="td-welcome-aside" aria-label="文件拖放与标准取证流程">
-                  {/* 可点击与拖放双模式虚线引导区 */}
-                  <button
-                    type="button"
-                    className="td-welcome-dropzone"
-                    disabled={busy}
-                    title="点击选择本地 case.json 打开案件，或直接拖入窗口"
-                    onClick={handleOpenCase}
-                  >
-                    <div className="td-welcome-dropzone-head">
-                      <span className="td-welcome-dropzone-icon">
-                        <UiIcon name="import_disk" size={17} color="var(--accent)" />
-                      </span>
-                      <div className="td-welcome-dropzone-copy">
-                        <div className="td-welcome-dropzone-title-row">
-                          <span className="td-welcome-dropzone-title">拖入文件快速打开</span>
-                          <span className="td-welcome-dropzone-hint">点击选择</span>
-                        </div>
-                        <div className="td-welcome-dropzone-desc">
-                          {inTauri
-                            ? '将 case.json 拖入窗口或点击此处打开案件；开案后拖入镜像文件自动识别分区。'
-                            : '点击此处打开演示案件；桌面端支持将 case.json 或磁盘镜像直接拖入窗口。'}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="td-welcome-format-pills">
-                      <span className="td-welcome-fmt-pill td-welcome-fmt-pill--case td-mono">
-                        case.json
-                      </span>
-                      <span className="td-welcome-fmt-pill td-mono">.e01</span>
-                      <span className="td-welcome-fmt-pill td-mono">.dd</span>
-                      <span className="td-welcome-fmt-pill td-mono">.raw</span>
-                      <span className="td-welcome-fmt-pill td-mono">.img</span>
-                    </div>
-                  </button>
-
-                  {/* 四步标准取证闭环速览 */}
-                  <div className="td-welcome-panel td-welcome-workflow">
-                    <div className="td-welcome-panel-head td-welcome-panel-head--compact">
-                      <h2 className="td-welcome-panel-title">标准取证闭环</h2>
-                      <span className="td-welcome-tz-badge td-mono">UTC+8</span>
-                    </div>
-                    <ol className="td-welcome-steps">
-                      {WORKFLOW_STEPS.map((item) => (
-                        <li key={item.step} className="td-welcome-step">
-                          <span className="td-welcome-step-num td-mono" aria-hidden="true">
-                            {item.step}
-                          </span>
-                          <div className="td-welcome-step-body">
-                            <div className="td-welcome-step-title">{item.title}</div>
-                            <div className="td-welcome-step-desc">{item.desc}</div>
-                          </div>
-                        </li>
-                      ))}
-                    </ol>
-                  </div>
-                </aside>
               </div>
             </div>
-          </div>
-        )}
+          );
+
+          return (
+            <div className="td-welcome-empty">
+              {/* 顶部全宽瓷白品牌顶栏 */}
+              <header className="td-welcome-topbar">
+                <div className="td-welcome-topbar-left">
+                  <div className="td-welcome-emblem">
+                    <BrandLogo size={32} />
+                  </div>
+                  <div className="td-welcome-hero-text">
+                    <div className="td-welcome-title-row">
+                      <h1 className="td-welcome-title">TraceDesk 电子数据取证工作台</h1>
+                      <div className="td-welcome-specs" aria-label="工作台核心能力">
+                        {WORKBENCH_CAPABILITIES.map((cap) => (
+                          <span key={cap} className="td-welcome-spec-chip">
+                            {cap}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <p className="td-welcome-subtitle">
+                      面向本地证据镜像的无损只读勘验、流式内容检索与防篡改交付工作台
+                    </p>
+                  </div>
+                </div>
+
+                {/* 顶栏右侧状态与辅助工具角：演示微标 + 操作说明 + MCP 实时监控 */}
+                <div className="td-welcome-topbar-right" role="toolbar" aria-label="工作台辅助功能">
+                  {!inTauri && (
+                    <span
+                      className="td-header-demo-tag"
+                      title="当前运行在纯浏览器环境，采用内置只读演示数据"
+                    >
+                      演示预览
+                    </span>
+                  )}
+                  {helpAction && (
+                    <button
+                      type="button"
+                      className="td-welcome-tool-btn"
+                      title="查看 TraceDesk 操作说明与标准取证流程"
+                      onClick={() => invokeAction('help')}
+                    >
+                      <UiIcon name={helpAction.icon || 'help'} size={14} color="var(--header-icon)" />
+                      <span>{helpAction.title}</span>
+                    </button>
+                  )}
+                  {mcpAction && (() => {
+                    const isRunningNow = mcpRunningCalls > 0;
+                    const mcpStateClass = isRunningNow
+                      ? 'td-welcome-mcp-btn--running'
+                      : mcpHttpRunning
+                        ? 'td-welcome-mcp-btn--online'
+                        : '';
+                    return (
+                      <button
+                        type="button"
+                        className={`td-welcome-tool-btn td-welcome-mcp-btn ${mcpStateClass}`}
+                        title={
+                          isRunningNow
+                            ? `${mcpLiveLabel}（点击进入 MCP 实时监控）`
+                            : mcpHttpRunning
+                              ? `本地 MCP HTTP 服务运行中：${mcpStatus?.url}（点击进入实时监控）`
+                              : '打开 MCP 实时监控与服务接入配置'
+                        }
+                        onClick={() => invokeAction('mcp')}
+                      >
+                        {isRunningNow ? (
+                          <span className="td-mcp-dot td-mcp-dot--running" />
+                        ) : mcpHttpRunning ? (
+                          <span className="td-mcp-dot td-mcp-dot--online" />
+                        ) : (
+                          <UiIcon name={mcpAction.icon || 'mcp'} size={14} color="var(--header-icon)" />
+                        )}
+                        <span className="td-welcome-mcp-label">{mcpLiveLabel}</span>
+                      </button>
+                    );
+                  })()}
+                </div>
+              </header>
+
+              {/* 主体全屏铺展画布 */}
+              <div className="td-welcome-stage">
+                {/* 第一层：3 张等宽全铺快捷操作瓷砖 */}
+                <div className="td-welcome-tiles" role="group" aria-label="快速开始">
+                  <button
+                    type="button"
+                    className="td-welcome-tile td-welcome-tile--primary"
+                    disabled={busy}
+                    onClick={handleNewCase}
+                  >
+                    <span className="td-welcome-tile-badge td-welcome-tile-badge--primary">
+                      <UiIcon name="case_new" size={18} color="#FFFFFF" />
+                    </span>
+                    <span className="td-welcome-tile-body">
+                      <span className="td-welcome-tile-title">新建案件</span>
+                      <span className="td-welcome-tile-desc">创建隔离案件目录与审计链起点</span>
+                    </span>
+                    <UiIcon
+                      name="arrow_right"
+                      size={15}
+                      className="td-welcome-tile-arrow"
+                      color="var(--accent)"
+                    />
+                  </button>
+
+                  <button
+                    type="button"
+                    className="td-welcome-tile"
+                    disabled={busy}
+                    onClick={handleOpenCase}
+                  >
+                    <span className="td-welcome-tile-badge">
+                      <UiIcon name="case_open" size={18} color="var(--accent)" />
+                    </span>
+                    <span className="td-welcome-tile-body">
+                      <span className="td-welcome-tile-title">打开已有案件</span>
+                      <span className="td-welcome-tile-desc">浏览本地 case.json 或恢复历史勘验</span>
+                    </span>
+                    <UiIcon
+                      name="arrow_right"
+                      size={15}
+                      className="td-welcome-tile-arrow"
+                      color="var(--text-muted)"
+                    />
+                  </button>
+
+                  <button
+                    type="button"
+                    className="td-welcome-tile"
+                    onClick={() => setVerifyBundleOpen(true)}
+                  >
+                    <span className="td-welcome-tile-badge">
+                      <UiIcon name="check_shield" size={18} color="var(--accent)" />
+                    </span>
+                    <span className="td-welcome-tile-body">
+                      <span className="td-welcome-tile-title">离线核验复核包</span>
+                      <span className="td-welcome-tile-desc">校验复核包 ZIP 完整性与审计链</span>
+                    </span>
+                    <UiIcon
+                      name="arrow_right"
+                      size={15}
+                      className="td-welcome-tile-arrow"
+                      color="var(--text-muted)"
+                    />
+                  </button>
+                </div>
+
+                {/* 第二层：全高双栏主网格（左栏最近案件 + 右栏拖放/取证闭环/环境微卡） */}
+                <div className="td-welcome-split">
+                  <section className="td-welcome-panel td-welcome-recent-panel" aria-label="最近案件">
+                    <div className="td-welcome-panel-head">
+                      <div className="td-welcome-panel-title-group">
+                        <h2 className="td-welcome-panel-title">最近案件</h2>
+                        <span className="td-welcome-count-badge td-mono">
+                          {trimmedRecentQuery
+                            ? `${filteredRecentCases.length}/${recentCases.length}`
+                            : recentCases.length}
+                        </span>
+                      </div>
+
+                      <div className="td-welcome-panel-controls">
+                        <div className="td-welcome-filter-box">
+                          <span className="td-welcome-filter-icon" aria-hidden="true">
+                            <UiIcon name="search" size={12} color="var(--text-muted)" />
+                          </span>
+                          <input
+                            type="text"
+                            className="td-welcome-filter-input"
+                            value={recentCaseQuery}
+                            onChange={(e) => setRecentCaseQuery(e.target.value)}
+                            placeholder="筛选编号 / 对象 / 人员…"
+                            aria-label="筛选最近案件"
+                          />
+                          {recentCaseQuery && (
+                            <button
+                              type="button"
+                              className="td-welcome-filter-clear"
+                              title="清空筛选条件"
+                              aria-label="清空筛选条件"
+                              onClick={() => setRecentCaseQuery('')}
+                            >
+                              ×
+                            </button>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          className="td-btn td-btn--compact"
+                          disabled={loadingRecentCases || busy}
+                          onClick={() => void refreshRecentCases()}
+                        >
+                          <UiIcon name="refresh" size={12} color="var(--text-secondary)" />
+                          {loadingRecentCases ? '正在刷新…' : '刷新列表'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {recentCases.length > 0 ? (
+                      <>
+                        {filteredRecentCases.length > 0 ? (
+                          <div className="td-welcome-case-scroll">
+                            <div
+                              className={`td-welcome-case-grid ${filteredRecentCases.length === 1 ? 'td-welcome-case-grid--single' : ''}`}
+                            >
+                              {filteredRecentCases.map((item) => {
+                                const formattedTime = formatCaseTimestamp(item.created);
+                                const leafDir = extractPathLeafName(item.folder);
+                                return (
+                                  <button
+                                    key={item.folder}
+                                    type="button"
+                                    className="td-welcome-case-card"
+                                    disabled={busy}
+                                    onClick={() => void openCaseByPath(item.folder)}
+                                    title={`点击打开案件：${item.folder}`}
+                                  >
+                                    <div className="td-welcome-case-top">
+                                      <span className="td-welcome-case-id td-mono">
+                                        {item.number || item.name}
+                                      </span>
+                                      <span
+                                        className={`td-recent-badge ${item.hasEvidence ? 'td-recent-badge--ready' : 'td-recent-badge--empty'}`}
+                                      >
+                                        {item.hasEvidence
+                                          ? `已载入镜像 · ${item.inventoryCount.toLocaleString()} 项`
+                                          : '待载入镜像'}
+                                      </span>
+                                    </div>
+
+                                    <div className="td-welcome-case-meta">
+                                      <span className="td-welcome-meta-item">
+                                        <span className="td-welcome-meta-key">对象</span>
+                                        <span className="td-welcome-meta-val">{item.target || '—'}</span>
+                                      </span>
+                                      <span className="td-welcome-meta-sep" aria-hidden="true" />
+                                      <span className="td-welcome-meta-item">
+                                        <span className="td-welcome-meta-key">取证人员</span>
+                                        <span className="td-welcome-meta-val">{item.examiner || '—'}</span>
+                                      </span>
+                                      {item.exportsCount > 0 && (
+                                        <>
+                                          <span className="td-welcome-meta-sep" aria-hidden="true" />
+                                          <span className="td-welcome-meta-item">
+                                            <span className="td-welcome-meta-key">已导出</span>
+                                            <span className="td-welcome-meta-val">{item.exportsCount} 份</span>
+                                          </span>
+                                        </>
+                                      )}
+                                    </div>
+
+                                    <div className="td-welcome-case-foot">
+                                      <span className="td-welcome-case-dir" title={item.folder}>
+                                        <UiIcon name="case_open" size={12} color="var(--text-muted)" />
+                                        <span className="td-mono">{leafDir}</span>
+                                      </span>
+                                      <span className="td-welcome-case-foot-right">
+                                        {formattedTime && (
+                                          <span className="td-welcome-case-time" title={item.created}>
+                                            <UiIcon name="clock" size={12} color="var(--text-muted)" />
+                                            <span className="td-mono">{formattedTime}</span>
+                                          </span>
+                                        )}
+                                        <span className="td-welcome-case-open-hint" aria-hidden="true">
+                                          打开工作区 →
+                                        </span>
+                                      </span>
+                                    </div>
+                                  </button>
+                                );
+                              })}
+                              {placeMoreInGrid && renderMoreGuidanceCard('td-welcome-more-card--compact')}
+                            </div>
+
+                            {placeMoreBelowGrid && renderMoreGuidanceCard('td-welcome-more-card--fill')}
+                          </div>
+                        ) : (
+                          <div className="td-welcome-case-empty">
+                            <span className="td-welcome-empty-icon">
+                              <UiIcon name="search" size={20} color="var(--accent)" />
+                            </span>
+                            <div className="td-welcome-empty-title">未匹配到符合条件的案件</div>
+                            <div className="td-welcome-empty-desc">
+                              当前筛选词「{recentCaseQuery.trim()}」没有匹配到最近案件编号、对象或取证人员。
+                            </div>
+                            <button
+                              type="button"
+                              className="td-btn td-btn--compact"
+                              onClick={() => setRecentCaseQuery('')}
+                            >
+                              清除筛选条件
+                            </button>
+                          </div>
+                        )}
+
+                        <div className="td-welcome-panel-foot">
+                          点击任意案件卡片即可恢复工作区；也可通过上方「打开已有案件」定位磁盘任意位置的 case.json。
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="td-welcome-case-empty">
+                          <span className="td-welcome-empty-icon">
+                            <UiIcon name="case_open" size={22} color="var(--accent)" />
+                          </span>
+                          <div className="td-welcome-empty-title">
+                            {loadingRecentCases ? '正在扫描案件库目录…' : '案件库中尚无历史案件'}
+                          </div>
+                          <div className="td-welcome-empty-desc">
+                            {loadingRecentCases
+                              ? '请稍候，正在读取本地案件索引清单。'
+                              : '点击下方按钮创建首个隔离案件目录，或直接将本地 case.json 拖入窗口快速打开。'}
+                          </div>
+                          {!loadingRecentCases && (
+                            <div className="td-welcome-empty-actions">
+                              <button
+                                type="button"
+                                className="td-btn td-btn--accent"
+                                disabled={busy}
+                                onClick={handleNewCase}
+                              >
+                                <UiIcon name="case_new" size={14} color="#FFFFFF" />
+                                <span>新建案件</span>
+                              </button>
+                              <button
+                                type="button"
+                                className="td-btn"
+                                disabled={busy}
+                                onClick={handleOpenCase}
+                              >
+                                <UiIcon name="case_open" size={14} color="var(--accent-soft-text)" />
+                                <span>打开已有案件</span>
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                        <div className="td-welcome-panel-foot">
+                          本地案件默认归档于案件库目录；所有勘验操作均执行应用层只读保护并写入 SHA-256 审计链。
+                        </div>
+                      </>
+                    )}
+                  </section>
+
+                  <aside className="td-welcome-side-col" aria-label="文件拖放、标准取证闭环与运行状态">
+                    {/* 上卡：虚线拖入文件快速打开区 */}
+                    <button
+                      type="button"
+                      className="td-welcome-dropzone"
+                      disabled={busy}
+                      title="点击选择本地 case.json 打开案件，或直接拖入窗口"
+                      onClick={handleOpenCase}
+                    >
+                      <div className="td-welcome-dropzone-head">
+                        <span className="td-welcome-dropzone-icon">
+                          <UiIcon name="import_disk" size={17} color="var(--accent)" />
+                        </span>
+                        <div className="td-welcome-dropzone-copy">
+                          <div className="td-welcome-dropzone-title-row">
+                            <span className="td-welcome-dropzone-title">拖入文件快速打开</span>
+                            <span className="td-welcome-dropzone-hint">点击选择</span>
+                          </div>
+                          <div className="td-welcome-dropzone-desc">
+                            {inTauri
+                              ? '将 case.json 拖入窗口或点击此处打开案件；开案后拖入镜像文件自动识别分区。'
+                              : '点击此处打开演示案件；桌面端支持将 case.json 或磁盘镜像直接拖入窗口。'}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="td-welcome-format-pills">
+                        <span className="td-welcome-fmt-pill td-welcome-fmt-pill--case td-mono">
+                          case.json
+                        </span>
+                        <span className="td-welcome-fmt-pill td-mono">.e01</span>
+                        <span className="td-welcome-fmt-pill td-mono">.dd</span>
+                        <span className="td-welcome-fmt-pill td-mono">.raw</span>
+                        <span className="td-welcome-fmt-pill td-mono">.img</span>
+                      </div>
+                    </button>
+
+                    {/* 中卡：四步标准取证闭环（01–04），随视口高度舒展呼吸 */}
+                    <div className="td-welcome-panel td-welcome-workflow">
+                      <div className="td-welcome-panel-head td-welcome-panel-head--compact">
+                        <h2 className="td-welcome-panel-title">标准取证闭环</h2>
+                        <span className="td-welcome-tz-badge td-mono">UTC+8</span>
+                      </div>
+                      <ol className="td-welcome-steps">
+                        {WORKFLOW_STEPS.map((item) => (
+                          <li key={item.step} className="td-welcome-step">
+                            <span className="td-welcome-step-num td-mono" aria-hidden="true">
+                              {item.step}
+                            </span>
+                            <div className="td-welcome-step-body">
+                              <div className="td-welcome-step-title">{item.title}</div>
+                              <div className="td-welcome-step-desc">{item.desc}</div>
+                            </div>
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
+
+                    {/* 底卡：紧凑 3 列工作台运行状态微卡，与左栏底边严丝合缝对齐 */}
+                    <div className="td-welcome-env-strip" aria-label="工作台运行状态">
+                      <div className="td-welcome-env-card" title="所有证据镜像与文件解析均采用应用层只读模式，数据不离开本机">
+                        <span className="td-welcome-env-head">
+                          <span className="td-welcome-env-dot td-welcome-env-dot--ok" aria-hidden="true" />
+                          <span className="td-welcome-env-title">只读保护</span>
+                        </span>
+                        <span className="td-welcome-env-sub">本地零上传</span>
+                      </div>
+
+                      <div className="td-welcome-env-card" title="内置 libewf / RAW 与 Sleuth Kit 取证文件系统解析引擎">
+                        <span className="td-welcome-env-head">
+                          <UiIcon name="index" size={12} color="var(--accent)" />
+                          <span className="td-welcome-env-title">引擎就绪</span>
+                        </span>
+                        <span className="td-welcome-env-sub td-mono">EWF / RAW / TSK</span>
+                      </div>
+
+                      <button
+                        type="button"
+                        className={`td-welcome-env-card td-welcome-env-card--interactive ${
+                          mcpRunningCalls > 0
+                            ? 'td-welcome-env-card--running'
+                            : mcpHttpRunning
+                              ? 'td-welcome-env-card--online'
+                              : ''
+                        }`}
+                        title="点击进入 MCP 实时监控与工具目录"
+                        onClick={() => invokeAction('mcp')}
+                      >
+                        <span className="td-welcome-env-head">
+                          {mcpRunningCalls > 0 ? (
+                            <span className="td-mcp-dot td-mcp-dot--running" style={{ width: 6.5, height: 6.5 }} />
+                          ) : mcpHttpRunning ? (
+                            <span className="td-mcp-dot td-mcp-dot--online" style={{ width: 6.5, height: 6.5 }} />
+                          ) : (
+                            <UiIcon name="mcp" size={12} color="var(--accent)" />
+                          )}
+                          <span className="td-welcome-env-title">MCP {mcpToolCount} 工具</span>
+                        </span>
+                        <span className="td-welcome-env-sub">
+                          {mcpRunningCalls > 0
+                            ? `执行中 · ${mcpRunningCalls} 项`
+                            : mcpHttpRunning
+                              ? '运行中 · 点击监控'
+                              : '点击监控'}
+                        </span>
+                      </button>
+                    </div>
+                  </aside>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* 文件浏览与内容搜索保持挂载，避免切换标签时丢失文件树或后台流式搜索结果 */}
         <div

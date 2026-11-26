@@ -3333,61 +3333,51 @@
   position: relative;
 }
 
-/* 未开案全屏欢迎首页：明净瓷白与晴空蓝专业取证启动台 */
+/* 未开案全屏铺满式欢迎首页：明净瓷白与晴空蓝原生桌面工作台启动页 */
 .td-welcome-empty {
+  width: 100%;
+  height: 100%;
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
-  padding: 36px 40px 44px;
-  background-color: #F6FAFD;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background-color: #F3F8FC;
   background-image:
-    radial-gradient(ellipse 76% 42% at 50% 0%, rgba(38, 116, 196, 0.085), transparent 72%),
-    radial-gradient(rgba(148, 174, 202, 0.28) 0.9px, transparent 0.9px);
+    radial-gradient(ellipse 84% 38% at 50% 0%, rgba(38, 116, 196, 0.06), transparent 72%),
+    radial-gradient(rgba(148, 174, 202, 0.22) 0.85px, transparent 0.85px);
   background-size: 100% 100%, 22px 22px;
-  display: flex;
-  flex-direction: column;
 }
 
-.td-welcome-canvas {
+/* 顶部全宽瓷白品牌顶栏 */
+.td-welcome-topbar {
   width: 100%;
-  max-width: 1120px;
-  margin: auto;
   display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-/* 顶部品牌头区：左侧徽标标题 + 右侧轻量集成工具角 + 下方核心能力微标 */
-.td-welcome-masthead {
-  display: flex;
-  flex-direction: column;
-  gap: 13px;
-  padding: 2px 2px 16px;
-  border-bottom: 1px solid rgba(211, 221, 232, 0.72);
-}
-
-.td-welcome-masthead-top {
-  display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 18px;
-  flex-wrap: wrap;
+  gap: 20px;
+  padding: 13px 24px;
+  background: linear-gradient(180deg, #FFFFFF 0%, #FBFEFF 100%);
+  border-bottom: 1px solid #DCE6F0;
+  box-shadow: 0 1px 4px rgba(15, 35, 66, 0.03);
+  flex-shrink: 0;
 }
 
-.td-welcome-brand {
+.td-welcome-topbar-left {
   display: flex;
   align-items: center;
   gap: 14px;
   min-width: 0;
+  flex: 1;
 }
 
 .td-welcome-emblem {
-  width: 54px;
-  height: 54px;
-  border-radius: 13px;
-  background: var(--surface-bg);
-  border: 1px solid var(--border-pane);
-  box-shadow: 0 3px 10px rgba(24, 64, 112, 0.07);
+  width: 46px;
+  height: 46px;
+  border-radius: 11px;
+  background: linear-gradient(145deg, #FFFFFF 0%, #F2F8FF 100%);
+  border: 1px solid #D5E4F4;
+  box-shadow: 0 2px 8px rgba(38, 116, 196, 0.09);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3404,34 +3394,58 @@
 .td-welcome-title-row {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 12px;
   flex-wrap: wrap;
 }
 
 .td-welcome-title {
   margin: 0;
   font-family: var(--font-brand);
-  font-size: 21px;
+  font-size: 19px;
   font-weight: 700;
   color: var(--text-primary);
   letter-spacing: 0.2px;
-  line-height: 1.24;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .td-welcome-subtitle {
   margin: 0;
-  font-size: 12.75px;
+  font-size: 12.25px;
   color: var(--text-secondary);
-  line-height: 1.45;
+  line-height: 1.38;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* 欢迎首页顶部轻量集成工具角（操作说明 + MCP 实时监控） */
-.td-welcome-utilities {
+.td-welcome-specs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.td-welcome-spec-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 21px;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: #F4F9FF;
+  border: 1px solid #D4E4F5;
+  color: var(--accent-soft-text);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 顶栏右侧集成工具角：演示微标 + 操作说明 + MCP 实时监控 */
+.td-welcome-topbar-right {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
-  padding-top: 2px;
 }
 
 .td-welcome-tool-btn {
@@ -3442,9 +3456,9 @@
   height: 32px;
   padding: 0 12px;
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid var(--border-pane);
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+  background: var(--header-btn-bg);
+  border: 1px solid var(--header-btn-border);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.025);
   color: var(--header-text);
   font-size: 12.25px;
   font-weight: 500;
@@ -3508,48 +3522,42 @@
   white-space: nowrap;
 }
 
-.td-welcome-specs {
+/* 主体全屏铺展画布 */
+.td-welcome-stage {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
   display: flex;
-  align-items: center;
-  gap: 7px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 24px 20px;
+  overflow: hidden;
 }
 
-.td-welcome-spec-chip {
-  display: inline-flex;
-  align-items: center;
-  height: 23px;
-  padding: 0 10px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.88);
-  border: 1px solid var(--border-pane);
-  color: var(--text-secondary);
-  font-size: 11.25px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-/* 三张高质感快捷操作瓷砖 */
+/* 第一层：3 张等宽全铺快捷操作瓷砖 */
 .td-welcome-tiles {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
+  gap: 16px;
   align-items: stretch;
+  flex-shrink: 0;
 }
 
 .td-welcome-tile {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 13px;
-  padding: 16px 17px;
+  gap: 14px;
+  padding: 15px 18px;
   background: var(--surface-bg);
-  border: 1px solid var(--border-pane);
+  border: 1px solid #DCE6F0;
   border-radius: 10px;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.03);
   text-align: left;
   cursor: pointer;
   outline: none;
   min-width: 0;
+  overflow: hidden;
   transition: border-color 0.14s ease, background-color 0.14s ease, box-shadow 0.14s ease, transform 0.14s ease;
 }
 
@@ -3570,20 +3578,32 @@
   cursor: not-allowed;
 }
 
+/* 主推荐快捷操作瓷砖：柔和晴空蓝轻高亮 + 左侧语义强调线 */
 .td-welcome-tile--primary {
-  background: linear-gradient(135deg, #FFFFFF 0%, #F4F9FF 100%);
-  border-color: var(--accent-soft-border);
+  background: linear-gradient(135deg, #FFFFFF 0%, #F1F8FF 100%);
+  border-color: #BBD8F6;
+  padding-left: 20px;
+}
+
+.td-welcome-tile--primary::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3.5px;
+  background: linear-gradient(180deg, #3B8AE0 0%, #2674C4 100%);
 }
 
 .td-welcome-tile--primary:hover:not(:disabled) {
-  background: linear-gradient(135deg, #FFFFFF 0%, #EAF4FF 100%);
+  background: linear-gradient(135deg, #FFFFFF 0%, #E7F3FF 100%);
   border-color: var(--accent);
-  box-shadow: 0 5px 16px rgba(38, 116, 196, 0.13);
+  box-shadow: 0 5px 16px rgba(38, 116, 196, 0.14);
 }
 
 .td-welcome-tile-badge {
-  width: 38px;
-  height: 38px;
+  width: 40px;
+  height: 40px;
   border-radius: 9px;
   background: var(--accent-soft-bg);
   border: 1px solid var(--accent-soft-border);
@@ -3596,7 +3616,7 @@
 .td-welcome-tile-badge--primary {
   background: var(--accent);
   border-color: var(--header-primary-border);
-  box-shadow: 0 2px 6px rgba(38, 116, 196, 0.24);
+  box-shadow: 0 2px 7px rgba(38, 116, 196, 0.26);
 }
 
 .td-welcome-tile-body {
@@ -3608,16 +3628,22 @@
 }
 
 .td-welcome-tile-title {
-  font-size: 14px;
+  font-size: 14.25px;
   font-weight: 600;
   color: var(--text-primary);
   line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .td-welcome-tile-desc {
-  font-size: 11.75px;
+  font-size: 12px;
   color: var(--text-muted);
   line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .td-welcome-tile-arrow {
@@ -3631,35 +3657,41 @@
   transform: translateX(2px);
 }
 
-/* 下方平衡左右双栏：左侧最近案件档案 + 右侧拖放引导与取证闭环 */
+/* 第二层：全高双栏主网格（左右顶底严丝合缝对齐并撑满视口） */
 .td-welcome-split {
+  flex: 1;
+  min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1.42fr) minmax(308px, 0.92fr);
+  grid-template-columns: minmax(0, 1.55fr) minmax(360px, 1fr);
   gap: 16px;
   align-items: stretch;
 }
 
 .td-welcome-panel {
   background: var(--surface-bg);
-  border: 1px solid var(--border-pane);
+  border: 1px solid #DCE6F0;
   border-radius: 10px;
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.025);
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .td-welcome-panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 13px 16px;
+  gap: 12px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--border-subtle);
+  background: #FCFDFE;
+  flex-shrink: 0;
 }
 
 .td-welcome-panel-head--compact {
-  padding: 11px 15px;
+  padding: 10px 16px;
 }
 
 .td-welcome-panel-title-group {
@@ -3667,65 +3699,147 @@
   align-items: center;
   gap: 8px;
   min-width: 0;
+  flex-shrink: 0;
 }
 
 .td-welcome-panel-title {
   margin: 0;
-  font-size: 13.5px;
+  font-size: 13.75px;
   font-weight: 600;
   color: var(--text-primary);
+  white-space: nowrap;
 }
 
 .td-welcome-count-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 20px;
-  height: 18px;
-  padding: 0 6px;
+  min-width: 22px;
+  height: 19px;
+  padding: 0 7px;
   border-radius: 999px;
   background: var(--canvas-bg);
   border: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
+  color: var(--accent-soft-text);
   font-size: 11px;
   font-weight: 600;
 }
 
-/* 最近案件卡片列表 */
-.td-welcome-recent-panel {
-  min-height: 360px;
+/* 左栏头部右侧：实时筛选框 + 刷新列表 */
+.td-welcome-panel-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
-.td-welcome-case-list {
+.td-welcome-filter-box {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 220px;
+  max-width: 100%;
+}
+
+.td-welcome-filter-icon {
+  position: absolute;
+  left: 9px;
+  display: inline-flex;
+  align-items: center;
+  pointer-events: none;
+}
+
+.td-welcome-filter-input {
+  width: 100%;
+  height: 27px;
+  padding: 0 24px 0 27px;
+  border-radius: 6px;
+  border: 1px solid var(--border-default);
+  background: var(--surface-bg);
+  color: var(--text-primary);
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease, background-color 0.12s ease;
+}
+
+.td-welcome-filter-input::placeholder {
+  color: var(--text-disabled);
+}
+
+.td-welcome-filter-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(38, 116, 196, 0.14);
+}
+
+.td-welcome-filter-clear {
+  position: absolute;
+  right: 5px;
+  width: 17px;
+  height: 17px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.td-welcome-filter-clear:hover {
+  background: var(--canvas-bg);
+  color: var(--text-primary);
+}
+
+/* 左栏最近案件全高面板 */
+.td-welcome-recent-panel {
+  height: 100%;
+}
+
+.td-welcome-case-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 14px 16px;
-  flex: 1;
-  max-height: 390px;
-  overflow-y: auto;
+  gap: 12px;
+}
+
+.td-welcome-case-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-content: start;
+}
+
+.td-welcome-case-grid--single {
+  grid-template-columns: 1fr;
 }
 
 .td-welcome-case-card {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 9px;
   width: 100%;
-  padding: 13px 15px;
+  padding: 14px 16px;
   background: var(--surface-subtle);
-  border: 1px solid var(--border-pane);
-  border-radius: 8px;
+  border: 1px solid #DFE8F2;
+  border-radius: 9px;
   text-align: left;
   cursor: pointer;
   outline: none;
   min-width: 0;
-  transition: background-color 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease;
+  transition: background-color 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease, transform 0.14s ease;
 }
 
 .td-welcome-case-card:hover:not(:disabled) {
-  background: #F4F9FF;
+  background: #F3F9FF;
   border-color: var(--accent);
-  box-shadow: 0 3px 10px rgba(38, 116, 196, 0.08);
+  box-shadow: 0 4px 12px rgba(38, 116, 196, 0.1);
+  transform: translateY(-1px);
 }
 
 .td-welcome-case-card:focus-visible {
@@ -3746,7 +3860,7 @@
 }
 
 .td-welcome-case-id {
-  font-size: 14px;
+  font-size: 14.25px;
   font-weight: 700;
   color: var(--text-primary);
   overflow: hidden;
@@ -3794,7 +3908,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding-top: 7px;
+  padding-top: 8px;
   border-top: 1px solid var(--border-soft-rule);
   font-size: 11.5px;
   color: var(--text-muted);
@@ -3814,38 +3928,153 @@
   white-space: nowrap;
 }
 
+/* 右侧时间戳与悬停「打开工作区 →」无抖动切换 */
+.td-welcome-case-foot-right {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-shrink: 0;
+  min-width: 116px;
+}
+
 .td-welcome-case-time {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  flex-shrink: 0;
   color: var(--text-muted);
+  transition: opacity 0.14s ease;
+}
+
+.td-welcome-case-open-hint {
+  position: absolute;
+  right: 0;
+  font-size: 11.75px;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+
+.td-welcome-case-card:hover:not(:disabled) .td-welcome-case-time,
+.td-welcome-case-card:focus-visible .td-welcome-case-time {
+  opacity: 0;
+}
+
+.td-welcome-case-card:hover:not(:disabled) .td-welcome-case-open-hint,
+.td-welcome-case-card:focus-visible .td-welcome-case-open-hint {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+/* 最近案件较少时的柔和虚线补充引导卡 */
+.td-welcome-more-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 20px 22px;
+  border-radius: 9px;
+  border: 1.5px dashed #BDD6F0;
+  background: linear-gradient(180deg, #F8FBFF 0%, #FFFFFF 100%);
+  text-align: center;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
+}
+
+.td-welcome-more-card--fill {
+  flex: 1;
+  min-height: 136px;
+}
+
+.td-welcome-more-card--compact {
+  padding: 14px 16px;
+  min-height: 108px;
+}
+
+.td-welcome-more-card:hover:not(.td-welcome-more-card--disabled) {
+  border-color: var(--accent);
+  background: linear-gradient(180deg, #F0F7FF 0%, #FAFDFE 100%);
+  box-shadow: 0 3px 12px rgba(38, 116, 196, 0.08);
+}
+
+.td-welcome-more-card:focus-visible {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px rgba(38, 116, 196, 0.18);
+}
+
+.td-welcome-more-card--disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.td-welcome-more-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: var(--accent-soft-bg);
+  border: 1px solid var(--accent-soft-border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.td-welcome-more-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 440px;
+}
+
+.td-welcome-more-title {
+  font-size: 13.25px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.td-welcome-more-desc {
+  font-size: 11.75px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.td-welcome-more-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 2px;
 }
 
 .td-welcome-panel-foot {
   padding: 10px 16px;
   border-top: 1px solid var(--border-soft-rule);
   background: var(--chrome-bg);
-  border-radius: 0 0 9px 9px;
   font-size: 11.5px;
   color: var(--text-muted);
-  line-height: 1.45;
+  line-height: 1.4;
+  flex-shrink: 0;
 }
 
 .td-welcome-case-empty {
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 36px 24px;
+  gap: 10px;
+  padding: 32px 24px;
   text-align: center;
 }
 
 .td-welcome-empty-icon {
-  width: 44px;
-  height: 44px;
+  width: 46px;
+  height: 46px;
   border-radius: 50%;
   background: var(--accent-soft-bg);
   border: 1px solid var(--accent-soft-border);
@@ -3856,29 +4085,39 @@
 }
 
 .td-welcome-empty-title {
-  font-size: 13.5px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
 }
 
 .td-welcome-empty-desc {
-  max-width: 360px;
+  max-width: 390px;
   font-size: 12px;
   color: var(--text-muted);
   line-height: 1.55;
 }
 
-/* 右侧栏：虚线文件拖放区 + 四步取证流程速览 */
-.td-welcome-aside {
+.td-welcome-empty-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+/* 右栏全高容器：上卡拖放区 + 中卡取证闭环 + 底卡 3 列运行状态微卡 */
+.td-welcome-side-col {
+  height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 16px;
+  min-height: 0;
   min-width: 0;
 }
 
 .td-welcome-dropzone {
   width: 100%;
-  padding: 14px 15px;
+  padding: 14px 16px;
   border-radius: 10px;
   background: linear-gradient(180deg, #F5FAFF 0%, #FFFFFF 100%);
   border: 1.5px dashed #A4C7EC;
@@ -3888,6 +4127,7 @@
   text-align: left;
   cursor: pointer;
   outline: none;
+  flex-shrink: 0;
   transition: border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
 }
 
@@ -3915,8 +4155,8 @@
 }
 
 .td-welcome-dropzone-icon {
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   border-radius: 8px;
   background: var(--accent-soft-bg);
   border: 1px solid var(--accent-soft-border);
@@ -3948,7 +4188,7 @@
 }
 
 .td-welcome-dropzone-title {
-  font-size: 13px;
+  font-size: 13.25px;
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -4015,7 +4255,7 @@
 .td-welcome-dropzone-desc {
   font-size: 11.75px;
   color: var(--text-secondary);
-  line-height: 1.5;
+  line-height: 1.48;
 }
 
 .td-welcome-format-pills {
@@ -4045,8 +4285,12 @@
   font-weight: 600;
 }
 
+/* 中卡：标准取证闭环（01–04），随视口高度舒展分布且保持连续纵轴连线 */
 .td-welcome-workflow {
   flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .td-welcome-tz-badge {
@@ -4060,39 +4304,49 @@
 }
 
 .td-welcome-steps {
+  position: relative;
   list-style: none;
   margin: 0;
-  padding: 13px 15px 15px;
+  padding: 16px 16px 16px;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
 }
 
 .td-welcome-step {
   position: relative;
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: 12px;
+}
+
+/* 前三步均分剩余纵向空间，使 01–04 间距随视口高度均匀舒展，且连接线严丝合缝衔接下一圆环 */
+.td-welcome-step:not(:last-child) {
+  flex: 1;
+  padding-bottom: 12px;
 }
 
 .td-welcome-step:not(:last-child)::after {
   content: "";
   position: absolute;
-  left: 10.5px;
-  top: 23px;
-  bottom: -10px;
-  width: 1px;
-  background: var(--border-pane);
+  left: 12px;
+  top: 26px;
+  bottom: 0;
+  width: 1.5px;
+  background: linear-gradient(180deg, #C7DFF6 0%, #DFEAF5 100%);
+  pointer-events: none;
 }
 
 .td-welcome-step-num {
-  width: 22px;
-  height: 22px;
+  width: 25px;
+  height: 25px;
   border-radius: 50%;
   background: var(--accent-soft-bg);
   border: 1px solid var(--accent-soft-border);
+  box-shadow: 0 0 0 3px var(--surface-bg);
   color: var(--accent-soft-text);
-  font-size: 11px;
+  font-size: 10.75px;
   font-weight: 700;
   display: inline-flex;
   align-items: center;
@@ -4109,26 +4363,150 @@
 }
 
 .td-welcome-step-title {
-  font-size: 12.5px;
+  font-size: 12.75px;
   font-weight: 600;
   color: var(--text-primary);
   line-height: 1.35;
 }
 
 .td-welcome-step-desc {
-  font-size: 11.5px;
+  font-size: 11.75px;
   color: var(--text-muted);
   line-height: 1.45;
 }
 
-/* 响应式适配：覆盖 1080px 窄窗与更小视口 */
+/* 底卡：紧凑 3 列工作台运行状态微卡，底部与左栏严丝合缝对齐 */
+.td-welcome-env-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.td-welcome-env-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: var(--surface-bg);
+  border: 1px solid #DCE6F0;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.025);
+  text-align: left;
+  min-width: 0;
+}
+
+.td-welcome-env-card--interactive {
+  cursor: pointer;
+  outline: none;
+  transition: background-color 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease, transform 0.14s ease;
+}
+
+.td-welcome-env-card--interactive:hover {
+  background: #F4F9FF;
+  border-color: var(--accent);
+  box-shadow: 0 3px 10px rgba(38, 116, 196, 0.1);
+  transform: translateY(-1px);
+}
+
+.td-welcome-env-card--interactive:focus-visible {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px rgba(38, 116, 196, 0.18);
+}
+
+.td-welcome-env-card--online {
+  background: #F3FBF6;
+  border-color: var(--ok-border);
+}
+
+.td-welcome-env-card--online:hover {
+  background: #E8F8EE;
+  border-color: #6EE7B7;
+}
+
+.td-welcome-env-card--running {
+  background: #EFF6FF;
+  border-color: #93C5FD;
+}
+
+.td-welcome-env-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.td-welcome-env-dot {
+  width: 6.5px;
+  height: 6.5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.td-welcome-env-dot--ok {
+  background: var(--ok-fg);
+  box-shadow: 0 0 0 2.5px rgba(21, 115, 71, 0.15);
+}
+
+.td-welcome-env-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.td-welcome-env-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.td-welcome-env-card--interactive .td-welcome-env-sub {
+  color: var(--accent-soft-text);
+  font-weight: 500;
+}
+
+.td-welcome-env-card--online .td-welcome-env-sub {
+  color: var(--ok-fg);
+}
+
+/* 响应式适配：覆盖 1280×720 / 窄窗 / 超矮视口，杜绝裁切与双滚动条 */
+@media (max-width: 1240px) {
+  .td-welcome-case-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .td-welcome-filter-box {
+    width: 184px;
+  }
+}
+
 @media (max-width: 1120px) {
-  .td-welcome-empty {
-    padding: 26px 26px 32px;
+  .td-welcome-topbar {
+    padding: 12px 18px;
+  }
+
+  .td-welcome-stage {
+    padding: 14px 18px 16px;
+    gap: 14px;
+  }
+
+  .td-welcome-tiles {
+    gap: 12px;
   }
 
   .td-welcome-split {
-    grid-template-columns: minmax(0, 1.28fr) minmax(280px, 0.94fr);
+    grid-template-columns: minmax(0, 1.35fr) minmax(320px, 1fr);
+    gap: 14px;
+  }
+
+  .td-welcome-side-col {
+    gap: 14px;
   }
 
   .td-custody-secondary {
@@ -4136,17 +4514,57 @@
   }
 }
 
-@media (max-width: 880px) {
-  .td-welcome-tiles {
-    grid-template-columns: 1fr;
+@media (max-width: 960px) {
+  .td-welcome-topbar {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .td-welcome-stage {
+    overflow-y: auto;
   }
 
   .td-welcome-split {
     grid-template-columns: 1fr;
+    flex: 1 0 auto;
   }
 
   .td-welcome-recent-panel {
-    min-height: auto;
+    min-height: 320px;
+  }
+
+  .td-welcome-side-col {
+    height: auto;
+  }
+}
+
+@media (max-width: 780px) {
+  .td-welcome-tiles {
+    grid-template-columns: 1fr;
+  }
+
+  .td-welcome-env-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .td-welcome-panel-head {
+    flex-wrap: wrap;
+  }
+}
+
+/* 极矮窗口（高度 < 660px）开启主体画布平滑纵向滚动，避免内容被裁切 */
+@media (max-height: 660px) {
+  .td-welcome-stage {
+    overflow-y: auto;
+  }
+
+  .td-welcome-split {
+    flex: 1 0 auto;
+    min-height: 450px;
+  }
+
+  .td-welcome-case-scroll {
+    max-height: 360px;
   }
 }
 
