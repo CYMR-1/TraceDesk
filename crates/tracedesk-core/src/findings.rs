@@ -25,7 +25,7 @@ pub const OPERATIONS: [(&str, &str); 3] = [
 pub const AUDIT_ORIGINS: [(&str, &str); 2] = [("manual", "人工"), ("mcp", "MCP")];
 
 /// 全部审计操作代码到中文标题的完整映射（对应 `core-contract.md` §3.3）。
-pub const ACTION_TITLES: [(&str, &str); 20] = [
+pub const ACTION_TITLES: [(&str, &str); 21] = [
     ("CONTENT_SEARCH", "搜索文件内容"),
     ("SOURCE_REGISTER", "登记证据来源"),
     ("REVIEW_EXPORT", "生成复核包"),
@@ -33,6 +33,7 @@ pub const ACTION_TITLES: [(&str, &str); 20] = [
     ("CASE_OPEN", "打开案件"),
     ("IMAGE_LOAD_BEGIN", "开始载入镜像"),
     ("IMAGE_LOAD", "载入镜像"),
+    ("IMAGE_REBIND", "重绑源镜像路径"),
     ("HASH_FIXED", "固定镜像摘要"),
     ("HASH_VERIFY", "校验镜像完整性"),
     ("FILE_BROWSE", "读取分区文件"),

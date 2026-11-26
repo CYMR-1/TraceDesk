@@ -2,10 +2,10 @@
 //! 跨进程文件锁、大镜像目录浏览与防篡改 SHA-256 审计哈希链
 //! （对应 `core-contract.md` §1.2、§1.3、§2.1、§2.2、§3.4）。
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -14,6 +14,7 @@ use chrono::Utc;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
+use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
@@ -48,6 +49,10 @@ const DIR_CACHE_MAX_ENTRIES: usize = 20_000;
 
 static INVENTORY_FILE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^inventory-[0-9a-f]{32}\.jsonl\.gz$").expect("valid inventory filename regex")
+});
+static PARTITION_INVENTORY_FILE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^inventory-p[0-9]+-[0-9a-f]{32}\.jsonl\.gz$")
+        .expect("valid partition inventory filename regex")
 });
 static EWF_NUMBERED_EXT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^e\d\d$").expect("valid ewf ext regex"));
@@ -99,11 +104,25 @@ pub fn strip_trailing_version(raw: &str) -> String {
 /// 与旧版 Python `case.json` 中 `source_stamp` 行一致的元组布局：`(name, size, mtime_ns, ino)`。
 pub type SourceStampRow = (String, u64, i64, u64);
 
+/// 字节级进度回调 trait 对象类型别名（`(bytes_done, total_bytes)`）。
+pub type ProgressFn<'a> = dyn Fn(u64, u64) + Sync + 'a;
+
 /// 报告 `(bytes_done, total_bytes)` 字节进度的回调函数。
-pub type ByteProgress<'a> = &'a (dyn Fn(u64, u64) + Sync);
+pub type ByteProgress<'a> = &'a ProgressFn<'a>;
 
 /// 报告 `(stage_label, done, total)` 阶段进度的回调函数。
 pub type StageProgress<'a> = &'a (dyn Fn(&str, u64, u64) + Sync);
+
+/// 重新定位源镜像路径（[`Case::rebind_image_path`]）的返回结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebindImageResult {
+    pub old_image: String,
+    pub new_image: String,
+    pub sha256: String,
+    pub verified: bool,
+    pub segment_count: usize,
+}
 
 fn stamp_to_row(s: &FileStamp) -> SourceStampRow {
     (s.name.clone(), s.size, s.mtime_ns, s.ino)
@@ -232,7 +251,8 @@ pub struct CaseData {
     pub verification: Option<VerificationInfo>,
 }
 
-/// `case.json` 的磁盘序列化形态（使用 `inventory_file` + `inventory_count`，或内联 `inventory: []`）。
+/// `case.json` 的磁盘序列化形态（优先使用分分区 `inventory_files` + `inventory_count`，
+/// 兼容旧版单文件 `inventory_file` + `inventory_count` 或空清单内联 `inventory: []`）。
 #[derive(Serialize)]
 struct CaseJsonDisk<'a> {
     id: &'a str,
@@ -256,6 +276,8 @@ struct CaseJsonDisk<'a> {
     fsstat: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     inventory_file: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inventory_files: Option<&'a BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     inventory_count: Option<usize>,
 }
@@ -307,10 +329,78 @@ impl<'a> From<&'a InventoryEntry> for CanonicalInventoryEntry<'a> {
     }
 }
 
-/// 将清单切片以快速 gzip 压缩（`compresslevel=1`）规范化 JSONL 格式写入 `path`。
-pub fn write_inventory_gz(
+/// 校验案件目录下的相对文件名是否安全（仅允许单层普通文件名，严禁路径穿越、盘符或目录分隔符）。
+fn is_safe_case_child(name: &str) -> bool {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+        || name == "."
+        || name == ".."
+    {
+        return false;
+    }
+    let mut comps = Path::new(name).components();
+    matches!(comps.next(), Some(Component::Normal(_))) && comps.next().is_none()
+}
+
+/// 在目标文件同级目录生成带唯一 UUID 后缀的临时文件路径（防止残留冲突与并发竞态）。
+fn unique_sibling_tmp(path: &Path, suffix: &str) -> PathBuf {
+    let uuid = Uuid::new_v4().simple();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("file");
+    let file_name = format!("{stem}.{uuid}.{suffix}");
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(file_name),
+        _ => PathBuf::from(file_name),
+    }
+}
+
+/// 在覆盖已有 `case.json` 前，以“写入唯一临时文件 + sync_all + 原子重命名”的方式
+/// 保留最近一份容灾备份 `case.json.bak`；任何备份异常均静默忽略，绝不阻断主保存。
+fn backup_case_json_best_effort(path: &Path) {
+    let is_case_json = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("case.json"));
+    if !is_case_json {
+        return;
+    }
+    let Ok(meta) = fs::metadata(path) else {
+        return;
+    };
+    if !meta.is_file() || meta.len() == 0 {
+        return;
+    }
+    let bak_path = path.with_file_name("case.json.bak");
+    let bak_tmp = unique_sibling_tmp(path, "bak.tmp");
+    let copy_ok = (|| -> std::io::Result<()> {
+        let mut src = File::open(path)?;
+        let mut dst = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&bak_tmp)?;
+        std::io::copy(&mut src, &mut dst)?;
+        dst.flush()?;
+        dst.sync_all()?;
+        Ok(())
+    })();
+    if copy_ok.is_err() {
+        let _ = fs::remove_file(&bak_tmp);
+        return;
+    }
+    if fs::rename(&bak_tmp, &bak_path).is_err() {
+        let _ = fs::remove_file(&bak_tmp);
+    }
+}
+
+/// 将清单条目迭代器以快速 gzip 压缩（`compresslevel=1`）规范化 JSONL 格式写入 `path` 并 `sync_all()` 落盘。
+fn write_inventory_gz_iter<'a>(
     path: &Path,
-    entries: &[InventoryEntry],
+    entries: impl IntoIterator<Item = &'a InventoryEntry>,
     cancel: Option<&AtomicBool>,
 ) -> CoreResult<()> {
     let file = OpenOptions::new().write(true).create_new(true).open(path)?;
@@ -318,7 +408,7 @@ pub fn write_inventory_gz(
         let buffered = BufWriter::with_capacity(256 * 1024, file);
         let mut gz = GzEncoder::new(buffered, Compression::fast());
         let mut line_buf = Vec::with_capacity(512);
-        for (idx, entry) in entries.iter().enumerate() {
+        for (idx, entry) in entries.into_iter().enumerate() {
             if idx.is_multiple_of(1024) && cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
                 return Err(CoreError::Cancelled("已取消建立索引".to_string()));
             }
@@ -329,12 +419,22 @@ pub fn write_inventory_gz(
         }
         let mut inner = gz.finish()?;
         inner.flush()?;
+        inner.get_ref().sync_all()?;
         Ok(())
     })();
     if write_res.is_err() {
         let _ = fs::remove_file(path);
     }
     write_res
+}
+
+/// 将清单切片以快速 gzip 压缩（`compresslevel=1`）规范化 JSONL 格式写入 `path`。
+pub fn write_inventory_gz(
+    path: &Path,
+    entries: &[InventoryEntry],
+    cancel: Option<&AtomicBool>,
+) -> CoreResult<()> {
+    write_inventory_gz_iter(path, entries.iter(), cancel)
 }
 
 /// 从 `path` 读取 gzip 压缩的 JSONL 清单文件。
@@ -360,20 +460,26 @@ pub fn read_inventory_gz(path: &Path) -> CoreResult<Vec<InventoryEntry>> {
     Ok(entries)
 }
 
-/// 通过 `.tmp` 临时文件 + `sync_all()` 刷盘 + 重命名原子持久化带 2 空格缩进的 UTF-8 美化 JSON。
+/// 通过唯一随机临时文件 + `flush()` + `sync_all()` 刷盘 + 原子重命名持久化带 2 空格缩进的 UTF-8 美化 JSON。
+/// 覆盖已有 `case.json` 前会自动保留一份容灾备份 `case.json.bak`（备份异常不阻断主保存）。
 pub fn save_json_atomic<T: Serialize>(path: &Path, value: &T) -> CoreResult<()> {
-    let tmp = path.with_extension("tmp");
+    let tmp = unique_sibling_tmp(path, "tmp");
     let raw = serde_json::to_string_pretty(value)?;
-    {
+    let write_res = (|| -> std::io::Result<()> {
         let mut f = OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .open(&tmp)?;
         f.write_all(raw.as_bytes())?;
         f.flush()?;
         f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(err) = write_res {
+        let _ = fs::remove_file(&tmp);
+        return Err(CoreError::Io(err));
     }
+    backup_case_json_best_effort(path);
     if let Err(err) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(CoreError::Io(err));
@@ -381,11 +487,24 @@ pub fn save_json_atomic<T: Serialize>(path: &Path, value: &T) -> CoreResult<()> 
     Ok(())
 }
 
-/// 通过相邻临时文件 + 原子重命名写入短小文本文件（如 `audit.head`），
-/// 避免直接截断原文件在进程崩溃时留下 0 字节残损文件。
-fn write_bytes_atomic_no_fsync(path: &Path, bytes: &[u8]) -> CoreResult<()> {
-    let tmp = path.with_extension("head.tmp");
-    fs::write(&tmp, bytes)?;
+/// 通过唯一随机临时文件 + `flush()` + `sync_all()` + 原子重命名写入短小锚点文件（如 `audit.head`），
+/// 杜绝极端断电窗口导致 `audit.jsonl` 已刷盘而 `audit.head` 滞后或截断为 0 字节的误报。
+fn write_bytes_atomic_sync(path: &Path, bytes: &[u8]) -> CoreResult<()> {
+    let tmp = unique_sibling_tmp(path, "head.tmp");
+    let write_res = (|| -> std::io::Result<()> {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        f.write_all(bytes)?;
+        f.flush()?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(err) = write_res {
+        let _ = fs::remove_file(&tmp);
+        return Err(CoreError::Io(err));
+    }
     if let Err(err) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(CoreError::Io(err));
@@ -484,8 +603,16 @@ fn read_disk_fingerprint(folder: &Path) -> CoreResult<DiskFingerprint> {
     })
 }
 
-/// 从磁盘读取并校验 `case.json` 与关联的 gzip 清单文件，返回 `(CaseData, inventory_file, needs_legacy_migration)`。
-fn load_case_data_from_disk(folder: &Path) -> CoreResult<(CaseData, Option<String>, bool)> {
+/// `load_case_data_from_disk` 的结构化加载结果。
+struct LoadedCaseDisk {
+    data: CaseData,
+    inventory_file: Option<String>,
+    inventory_files: BTreeMap<u64, String>,
+    needs_legacy_migration: bool,
+}
+
+/// 从磁盘读取并校验 `case.json` 与关联的 gzip 清单文件。
+fn load_case_data_from_disk(folder: &Path) -> CoreResult<LoadedCaseDisk> {
     let metadata_path = folder.join("case.json");
     if !metadata_path.is_file() {
         return Err(CoreError::CorruptCase("缺少案件元数据 case.json".to_string()));
@@ -512,37 +639,104 @@ fn load_case_data_from_disk(folder: &Path) -> CoreResult<(CaseData, Option<Strin
         return Err(CoreError::CorruptCase("案件清单格式错误".to_string()));
     }
 
-    // 从 `inventory_file`（.jsonl.gz）或旧版内联 `inventory` 字段加载清单。
-    let inventory_file = match obj.remove("inventory_file") {
+    // 优先读取分分区 `inventory_files`（并行解压按 offset 升序拼接）；
+    // 否则无缝回退至旧版单文件 `inventory_file` 或内联 `inventory` 数组。
+    let inventory_files_raw = match obj.remove("inventory_files") {
+        Some(Value::Object(map)) if !map.is_empty() => Some(map),
+        Some(Value::Object(_)) | Some(Value::Null) | None => None,
+        Some(_) => return Err(CoreError::CorruptCase("分分区清单映射格式无效".to_string())),
+    };
+    let legacy_inventory_file = match obj.remove("inventory_file") {
         Some(Value::String(name)) => Some(name),
         Some(Value::Null) | None => None,
         Some(_) => return Err(CoreError::CorruptCase("清单文件名无效".to_string())),
     };
-    let inventory: Vec<InventoryEntry> = if let Some(ref idx_name) = inventory_file {
-        if !INVENTORY_FILE_RE.is_match(idx_name) {
-            return Err(CoreError::CorruptCase("清单文件名无效".to_string()));
-        }
-        let expected_count = obj
-            .remove("inventory_count")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| CoreError::CorruptCase("缺少 inventory_count".to_string()))?
-            as usize;
-        let loaded = read_inventory_gz(&folder.join(idx_name))
-            .map_err(|e| CoreError::CorruptCase(format!("读取清单文件失败：{e}")))?;
-        if loaded.len() != expected_count {
-            return Err(CoreError::CorruptCase("案件清单数量不匹配".to_string()));
-        }
-        loaded
-    } else {
-        let arr = obj
-            .get("inventory")
-            .ok_or_else(|| CoreError::CorruptCase("案件清单格式错误".to_string()))?;
-        if !arr.is_array() {
-            return Err(CoreError::CorruptCase("案件清单格式错误".to_string()));
-        }
-        serde_json::from_value(arr.clone())
-            .map_err(|e| CoreError::CorruptCase(format!("案件清单格式错误：{e}")))?
-    };
+
+    let (inventory, inventory_file, inventory_files, needs_legacy_migration) =
+        if let Some(files_map) = inventory_files_raw {
+            let mut parsed_files: BTreeMap<u64, String> = BTreeMap::new();
+            for (offset_key, file_val) in files_map {
+                let offset = offset_key.parse::<u64>().map_err(|_| {
+                    CoreError::CorruptCase(format!("分区清单偏移键无效：{offset_key}"))
+                })?;
+                if offset.to_string() != offset_key {
+                    return Err(CoreError::CorruptCase(format!(
+                        "分区清单偏移键格式不规范：{offset_key}"
+                    )));
+                }
+                let file_name = file_val
+                    .as_str()
+                    .ok_or_else(|| CoreError::CorruptCase("清单文件名无效".to_string()))?;
+                if !is_safe_case_child(file_name) || !PARTITION_INVENTORY_FILE_RE.is_match(file_name)
+                {
+                    return Err(CoreError::CorruptCase("清单文件名无效".to_string()));
+                }
+                parsed_files.insert(offset, file_name.to_string());
+            }
+            let expected_count = obj
+                .remove("inventory_count")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| CoreError::CorruptCase("缺少 inventory_count".to_string()))?
+                as usize;
+
+            // `BTreeMap` 按分区偏移升序排列；使用 `rayon` 并行解压各分区文件并保持升序拼接。
+            let ordered_paths: Vec<PathBuf> = parsed_files
+                .values()
+                .map(|name| folder.join(name))
+                .collect();
+            let chunks: Vec<Vec<InventoryEntry>> = if ordered_paths.len() > 1 {
+                ordered_paths
+                    .par_iter()
+                    .map(|p| {
+                        read_inventory_gz(p)
+                            .map_err(|e| CoreError::CorruptCase(format!("读取清单文件失败：{e}")))
+                    })
+                    .collect::<CoreResult<Vec<_>>>()?
+            } else {
+                ordered_paths
+                    .iter()
+                    .map(|p| {
+                        read_inventory_gz(p)
+                            .map_err(|e| CoreError::CorruptCase(format!("读取清单文件失败：{e}")))
+                    })
+                    .collect::<CoreResult<Vec<_>>>()?
+            };
+            let total_len: usize = chunks.iter().map(Vec::len).sum();
+            let mut combined = Vec::with_capacity(total_len);
+            for mut chunk in chunks {
+                combined.append(&mut chunk);
+            }
+            if combined.len() != expected_count {
+                return Err(CoreError::CorruptCase("案件清单数量不匹配".to_string()));
+            }
+            (combined, None, parsed_files, false)
+        } else if let Some(idx_name) = legacy_inventory_file {
+            if !is_safe_case_child(&idx_name) || !INVENTORY_FILE_RE.is_match(&idx_name) {
+                return Err(CoreError::CorruptCase("清单文件名无效".to_string()));
+            }
+            let expected_count = obj
+                .remove("inventory_count")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| CoreError::CorruptCase("缺少 inventory_count".to_string()))?
+                as usize;
+            let loaded = read_inventory_gz(&folder.join(&idx_name))
+                .map_err(|e| CoreError::CorruptCase(format!("读取清单文件失败：{e}")))?;
+            if loaded.len() != expected_count {
+                return Err(CoreError::CorruptCase("案件清单数量不匹配".to_string()));
+            }
+            (loaded, Some(idx_name), BTreeMap::new(), false)
+        } else {
+            let arr = obj
+                .get("inventory")
+                .ok_or_else(|| CoreError::CorruptCase("案件清单格式错误".to_string()))?;
+            if !arr.is_array() {
+                return Err(CoreError::CorruptCase("案件清单格式错误".to_string()));
+            }
+            let loaded: Vec<InventoryEntry> = serde_json::from_value(arr.clone())
+                .map_err(|e| CoreError::CorruptCase(format!("案件清单格式错误：{e}")))?;
+            let needs_migration = !loaded.is_empty();
+            (loaded, None, BTreeMap::new(), needs_migration)
+        };
 
     // 若 `evidence` 非空，校验其必需字段。
     let evidence: Option<EvidenceInfo> = match obj.get("evidence") {
@@ -606,7 +800,6 @@ fn load_case_data_from_disk(folder: &Path) -> CoreResult<(CaseData, Option<Strin
         ),
     };
 
-    let needs_legacy_migration = inventory_file.is_none() && !inventory.is_empty();
     let data = CaseData {
         id,
         number,
@@ -622,7 +815,12 @@ fn load_case_data_from_disk(folder: &Path) -> CoreResult<(CaseData, Option<Strin
         index_verification,
         verification,
     };
-    Ok((data, inventory_file, needs_legacy_migration))
+    Ok(LoadedCaseDisk {
+        data,
+        inventory_file,
+        inventory_files,
+        needs_legacy_migration,
+    })
 }
 
 fn system_time_to_ns(t: SystemTime) -> Option<i128> {
@@ -717,7 +915,10 @@ pub struct Case {
     source_paths: Vec<PathBuf>,
     session_verified: bool,
     session_stamp: Option<Vec<SourceStampRow>>,
+    /// 旧版单文件清单名（保留用于向后兼容历史案件与迁移清理）。
     inventory_file: Option<String>,
+    /// 分分区清单文件名映射（分区起始扇区偏移 -> `inventory-p<offset>-<uuid>.jsonl.gz`）。
+    inventory_files: BTreeMap<u64, String>,
     data: CaseData,
     directory_cache: VecDeque<(DirCacheKey, Vec<InventoryEntry>)>,
     directory_cache_total: usize,
@@ -862,6 +1063,7 @@ impl Case {
             index_verification: &None,
             fsstat: &None,
             inventory_file: None,
+            inventory_files: None,
             inventory_count: None,
         };
         save_json_atomic(&folder.join("case.json"), &init_data)?;
@@ -912,7 +1114,12 @@ impl Case {
                 other => CoreError::Locked(format!("案件已被占用或无法加锁：{other}")),
             })?;
 
-        let (data, inventory_file, needs_legacy_migration) = load_case_data_from_disk(&folder)?;
+        let LoadedCaseDisk {
+            data,
+            inventory_file,
+            inventory_files,
+            needs_legacy_migration,
+        } = load_case_data_from_disk(&folder)?;
 
         let resolved_actor = actor
             .map(str::trim)
@@ -934,6 +1141,7 @@ impl Case {
             session_verified: false,
             session_stamp: None,
             inventory_file,
+            inventory_files,
             data,
             directory_cache: VecDeque::new(),
             directory_cache_total: 0,
@@ -945,7 +1153,7 @@ impl Case {
 
         case.check_audit()?;
         if needs_legacy_migration {
-            case.save_internal(true, None)?;
+            case.save_with_dirty_partitions(None, None)?;
         }
         case.disk_fingerprint = read_disk_fingerprint(&case.folder).ok();
 
@@ -1000,10 +1208,16 @@ impl Case {
 
         if case_json_changed {
             let prev_evidence_path = self.data.evidence.as_ref().map(|e| e.path.clone());
-            let (new_data, new_inventory_file, _) = load_case_data_from_disk(&self.folder)?;
+            let LoadedCaseDisk {
+                data: new_data,
+                inventory_file: new_inventory_file,
+                inventory_files: new_inventory_files,
+                ..
+            } = load_case_data_from_disk(&self.folder)?;
             let next_evidence_path = new_data.evidence.as_ref().map(|e| e.path.clone());
             self.data = new_data;
             self.inventory_file = new_inventory_file;
+            self.inventory_files = new_inventory_files;
 
             // 若证据切换或已从大镜像快速浏览完成全盘扫描，则清理旧目录浏览缓存。
             if prev_evidence_path != next_evidence_path || !self.browsing_directories() {
@@ -1097,6 +1311,68 @@ impl Case {
         Ok(PathBuf::from(&ev.path))
     }
 
+    /// 检查当前案件关联的源镜像在磁盘上是否存在（EWF 格式同时确认首段 `.E01` 及连续分段存在）。
+    pub fn evidence_exists(&self) -> bool {
+        let Some(ref ev) = self.data.evidence else {
+            return false;
+        };
+        let path = Path::new(&ev.path);
+        if !path.is_file() {
+            return false;
+        }
+        if ev.is_ewf() {
+            let is_e01 = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("e01"));
+            if !is_e01 {
+                return false;
+            }
+            return ewf::discover_segments(path)
+                .map(|parts| !parts.is_empty() && parts.iter().all(|p| p.is_file()))
+                .unwrap_or(false);
+        }
+        true
+    }
+
+    /// 返回当前案件的分分区清单文件名映射（分区起始扇区偏移 -> 文件名）。
+    pub fn inventory_files(&self) -> &BTreeMap<u64, String> {
+        &self.inventory_files
+    }
+
+    /// 计算当前案件清单与源镜像摘要的确定性 SHA-256 短指纹（16 位小写十六进制），
+    /// 供魔数扫描磁盘缓存等派生产物判定是否过期。
+    pub fn inventory_cache_key(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"tracedesk-inventory-cache-v1\0");
+        if let Some(ref ev) = self.data.evidence {
+            hasher.update(ev.sha256.as_deref().unwrap_or("").as_bytes());
+            hasher.update(b"\0");
+            hasher.update(ev.size.to_le_bytes());
+        } else {
+            hasher.update(b"\0");
+            hasher.update(0u64.to_le_bytes());
+        }
+        hasher.update((self.data.inventory.len() as u64).to_le_bytes());
+        if !self.inventory_files.is_empty() {
+            hasher.update(b"partitioned\0");
+            for (offset, file_name) in &self.inventory_files {
+                hasher.update(offset.to_string().as_bytes());
+                hasher.update(b"=");
+                hasher.update(file_name.as_bytes());
+                hasher.update(b"\0");
+            }
+        } else if let Some(ref legacy) = self.inventory_file {
+            hasher.update(b"legacy\0");
+            hasher.update(legacy.as_bytes());
+            hasher.update(b"\0");
+        } else {
+            hasher.update(b"inline\0");
+        }
+        let digest = hex_lower(&hasher.finalize());
+        digest[..16].to_string()
+    }
+
     /// 当案件关联了 `>= 1 GiB` 大镜像且尚未完成全部分区扫描时返回 `true`。
     pub fn browsing_directories(&self) -> bool {
         let large = self
@@ -1139,43 +1415,105 @@ impl Case {
     }
 
     /// 原子持久化 `case.json`；当 `rewrite_inventory` 为 `true` 且清单非空时，
-    /// 写入新的 `inventory-<uuid32>.jsonl.gz`，替换成功后删除旧清单文件。
+    /// 按分区写出 `inventory-p<offset>-<uuid>.jsonl.gz`，替换成功后清理旧清单文件。
     pub fn save(&mut self, rewrite_inventory: bool, cancel: Option<&AtomicBool>) -> CoreResult<()> {
-        self.save_internal(rewrite_inventory, cancel)
+        if rewrite_inventory {
+            self.save_with_dirty_partitions(None, cancel)
+        } else {
+            self.save_internal(false, cancel)
+        }
     }
 
+    /// 按脏分区集合原子持久化分分区清单与 `case.json`：
+    /// - 当 `dirty_offsets` 为 `Some(set)` 且非脏分区对应的 `.jsonl.gz` 文件已存在于磁盘时，
+    ///   仅重新压缩写出 `set` 涉及的分区，未变更分区直接沿用原文件（不重压、不改名）；
+    /// - 当 `dirty_offsets` 为 `None` 时，按分区偏移分组将全部非空分区并行写出为
+    ///   `inventory-p<offset>-<uuid>.jsonl.gz`；
+    /// - 若中途取消或写盘失败，自动回滚删除本次新建的未引用 `.jsonl.gz`；
+    /// - 原子替换 `case.json` 成功后，再清理不再引用的旧分区文件和旧单文件 `inventory-*.jsonl.gz`。
+    pub fn save_with_dirty_partitions(
+        &mut self,
+        dirty_offsets: Option<&HashSet<u64>>,
+        cancel: Option<&AtomicBool>,
+    ) -> CoreResult<()> {
+        self.save_partitioned_internal(dirty_offsets, cancel)
+    }
+
+    /// 仅更新 `case.json` 元数据（`rewrite_inventory == false`），保持既有分分区或旧单文件清单引用不变；
+    /// 若 `rewrite_inventory == true` 则委托给全量分分区写入。
     fn save_internal(
         &mut self,
         rewrite_inventory: bool,
         cancel: Option<&AtomicBool>,
     ) -> CoreResult<()> {
+        if rewrite_inventory {
+            return self.save_partitioned_internal(None, cancel);
+        }
         self.ensure_open()?;
-        let previous_index = self.inventory_file.clone();
-        let mut next_index = previous_index.clone();
-
-        if rewrite_inventory && !self.data.inventory.is_empty() {
-            let new_name = format!("inventory-{}.jsonl.gz", Uuid::new_v4().simple());
-            let new_path = self.folder.join(&new_name);
-            write_inventory_gz(&new_path, &self.data.inventory, cancel)?;
-            next_index = Some(new_name);
-        }
-        if self.data.inventory.is_empty() {
-            next_index = None;
-        }
-
         if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
-            if let Some(ref idx) = next_index
-                && previous_index.as_deref() != Some(idx.as_str())
-            {
-                let _ = fs::remove_file(self.folder.join(idx));
-            }
-            return Err(CoreError::Cancelled("已取消建立索引".to_string()));
+            return Err(CoreError::Cancelled("已取消保存案件".to_string()));
         }
 
-        let (inv_inline, inv_file, inv_count) = match next_index.as_deref() {
-            Some(file_name) => (None, Some(file_name), Some(self.data.inventory.len())),
-            None => (Some(self.data.inventory.as_slice()), None, None),
+        let prev_legacy_file = self.inventory_file.clone();
+        let prev_partition_files = self.inventory_files.clone();
+
+        if self.data.inventory.is_empty() {
+            let disk = CaseJsonDisk {
+                id: &self.data.id,
+                number: &self.data.number,
+                examiner: &self.data.examiner,
+                target: &self.data.target,
+                created: &self.data.created,
+                evidence: &self.data.evidence,
+                inventory: Some(&[]),
+                exports: &self.data.exports,
+                verification: &self.data.verification,
+                partition_scans: &self.data.partition_scans,
+                offset: &self.data.offset,
+                index_verification: &self.data.index_verification,
+                fsstat: &self.data.fsstat,
+                inventory_file: None,
+                inventory_files: None,
+                inventory_count: None,
+            };
+            save_json_atomic(&self.folder.join("case.json"), &disk)?;
+            self.inventory_file = None;
+            self.inventory_files.clear();
+            if let Some(old_legacy) = prev_legacy_file {
+                let _ = fs::remove_file(self.folder.join(old_legacy));
+            }
+            for old_part in prev_partition_files.values() {
+                let _ = fs::remove_file(self.folder.join(old_part));
+            }
+            self.disk_fingerprint = read_disk_fingerprint(&self.folder).ok();
+            return Ok(());
+        }
+
+        let disk_part_files: Option<BTreeMap<String, String>> = if !self.inventory_files.is_empty()
+        {
+            Some(
+                self.inventory_files
+                    .iter()
+                    .map(|(off, name)| (off.to_string(), name.clone()))
+                    .collect(),
+            )
+        } else {
+            None
         };
+
+        let (inv_inline, inv_file, inv_files_ref, inv_count) =
+            if let Some(ref map) = disk_part_files {
+                (None, None, Some(map), Some(self.data.inventory.len()))
+            } else if let Some(ref legacy_name) = self.inventory_file {
+                (
+                    None,
+                    Some(legacy_name.as_str()),
+                    None,
+                    Some(self.data.inventory.len()),
+                )
+            } else {
+                (Some(self.data.inventory.as_slice()), None, None, None)
+            };
 
         let disk = CaseJsonDisk {
             id: &self.data.id,
@@ -1192,24 +1530,188 @@ impl Case {
             index_verification: &self.data.index_verification,
             fsstat: &self.data.fsstat,
             inventory_file: inv_file,
+            inventory_files: inv_files_ref,
             inventory_count: inv_count,
+        };
+        save_json_atomic(&self.folder.join("case.json"), &disk)?;
+        self.disk_fingerprint = read_disk_fingerprint(&self.folder).ok();
+        Ok(())
+    }
+
+    fn save_partitioned_internal(
+        &mut self,
+        dirty_offsets: Option<&HashSet<u64>>,
+        cancel: Option<&AtomicBool>,
+    ) -> CoreResult<()> {
+        self.ensure_open()?;
+        let prev_legacy_file = self.inventory_file.clone();
+        let prev_partition_files = self.inventory_files.clone();
+
+        if self.data.inventory.is_empty() {
+            if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+                return Err(CoreError::Cancelled("已取消建立索引".to_string()));
+            }
+            let disk = CaseJsonDisk {
+                id: &self.data.id,
+                number: &self.data.number,
+                examiner: &self.data.examiner,
+                target: &self.data.target,
+                created: &self.data.created,
+                evidence: &self.data.evidence,
+                inventory: Some(&[]),
+                exports: &self.data.exports,
+                verification: &self.data.verification,
+                partition_scans: &self.data.partition_scans,
+                offset: &self.data.offset,
+                index_verification: &self.data.index_verification,
+                fsstat: &self.data.fsstat,
+                inventory_file: None,
+                inventory_files: None,
+                inventory_count: None,
+            };
+            save_json_atomic(&self.folder.join("case.json"), &disk)?;
+            self.inventory_file = None;
+            self.inventory_files.clear();
+            if let Some(old_legacy) = prev_legacy_file {
+                let _ = fs::remove_file(self.folder.join(old_legacy));
+            }
+            for old_part in prev_partition_files.values() {
+                let _ = fs::remove_file(self.folder.join(old_part));
+            }
+            self.disk_fingerprint = read_disk_fingerprint(&self.folder).ok();
+            return Ok(());
+        }
+
+        // 按分区起始扇区偏移分组（保持每分区内既有条目顺序）。
+        let mut grouped: BTreeMap<u64, Vec<&InventoryEntry>> = BTreeMap::new();
+        for entry in &self.data.inventory {
+            grouped.entry(entry.offset).or_default().push(entry);
+        }
+
+        let mut next_files: BTreeMap<u64, String> = BTreeMap::new();
+        let mut to_write: Vec<(u64, String, Vec<&InventoryEntry>)> = Vec::new();
+        let mut newly_created: Vec<String> = Vec::new();
+
+        for (offset, entries) in grouped {
+            if entries.is_empty() {
+                continue;
+            }
+            let can_reuse = match dirty_offsets {
+                Some(dirty) if !dirty.contains(&offset) => prev_partition_files
+                    .get(&offset)
+                    .filter(|name| self.folder.join(name).is_file())
+                    .cloned(),
+                _ => None,
+            };
+            if let Some(existing_name) = can_reuse {
+                next_files.insert(offset, existing_name);
+            } else {
+                let new_name = format!("inventory-p{offset}-{}.jsonl.gz", Uuid::new_v4().simple());
+                next_files.insert(offset, new_name.clone());
+                newly_created.push(new_name.clone());
+                to_write.push((offset, new_name, entries));
+            }
+        }
+
+        // 并行压缩写出本次变更的分分区清单文件；任一分区失败或被取消时统一清理所有新建文件。
+        if !to_write.is_empty() {
+            let folder = &self.folder;
+            let results: Vec<CoreResult<()>> = if to_write.len() > 1 {
+                to_write
+                    .par_iter()
+                    .map(|(_offset, file_name, entries)| {
+                        write_inventory_gz_iter(
+                            &folder.join(file_name),
+                            entries.iter().copied(),
+                            cancel,
+                        )
+                    })
+                    .collect()
+            } else {
+                to_write
+                    .iter()
+                    .map(|(_offset, file_name, entries)| {
+                        write_inventory_gz_iter(
+                            &folder.join(file_name),
+                            entries.iter().copied(),
+                            cancel,
+                        )
+                    })
+                    .collect()
+            };
+
+            let mut first_err: Option<CoreError> = None;
+            for res in results {
+                if let Err(err) = res {
+                    if err.is_cancelled() {
+                        first_err = Some(err);
+                        break;
+                    }
+                    if first_err.is_none() {
+                        first_err = Some(err);
+                    }
+                }
+            }
+            if let Some(err) = first_err {
+                for created_name in &newly_created {
+                    let _ = fs::remove_file(self.folder.join(created_name));
+                }
+                return Err(err);
+            }
+        }
+
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            for created_name in &newly_created {
+                let _ = fs::remove_file(self.folder.join(created_name));
+            }
+            return Err(CoreError::Cancelled("已取消建立索引".to_string()));
+        }
+
+        let disk_files: BTreeMap<String, String> = next_files
+            .iter()
+            .map(|(off, name)| (off.to_string(), name.clone()))
+            .collect();
+        let disk = CaseJsonDisk {
+            id: &self.data.id,
+            number: &self.data.number,
+            examiner: &self.data.examiner,
+            target: &self.data.target,
+            created: &self.data.created,
+            evidence: &self.data.evidence,
+            inventory: None,
+            exports: &self.data.exports,
+            verification: &self.data.verification,
+            partition_scans: &self.data.partition_scans,
+            offset: &self.data.offset,
+            index_verification: &self.data.index_verification,
+            fsstat: &self.data.fsstat,
+            inventory_file: None,
+            inventory_files: Some(&disk_files),
+            inventory_count: Some(self.data.inventory.len()),
         };
 
         if let Err(err) = save_json_atomic(&self.folder.join("case.json"), &disk) {
-            if let Some(ref idx) = next_index
-                && previous_index.as_deref() != Some(idx.as_str())
-            {
-                let _ = fs::remove_file(self.folder.join(idx));
+            for created_name in &newly_created {
+                let _ = fs::remove_file(self.folder.join(created_name));
             }
             return Err(err);
         }
 
-        self.inventory_file = next_index.clone();
-        if let Some(prev) = previous_index
-            && next_index.as_deref() != Some(prev.as_str())
-        {
-            let _ = fs::remove_file(self.folder.join(prev));
+        // `case.json` 原子替换成功后，再安全清理不再被引用的旧分区文件与旧单文件。
+        let kept_names: HashSet<&str> = next_files.values().map(String::as_str).collect();
+        for old_name in prev_partition_files.values() {
+            if !kept_names.contains(old_name.as_str()) {
+                let _ = fs::remove_file(self.folder.join(old_name));
+            }
         }
+        if let Some(old_legacy) = prev_legacy_file
+            && !kept_names.contains(old_legacy.as_str())
+        {
+            let _ = fs::remove_file(self.folder.join(old_legacy));
+        }
+
+        self.inventory_files = next_files;
+        self.inventory_file = None;
         self.disk_fingerprint = read_disk_fingerprint(&self.folder).ok();
         Ok(())
     }
@@ -1269,8 +1771,19 @@ impl Case {
                 return None;
             }
         }
-        let disk_bytes = fs::read(&audit_path).ok()?;
-        if sha256_hex(&disk_bytes) != cache.file_sha256 {
+        // 使用 64 KiB 固定栈缓冲区流式计算 `audit.jsonl` 的 SHA-256，
+        // 零整文件堆分配且保持与全量字节哈希完全等价的强防篡改校验。
+        let mut file = File::open(&audit_path).ok()?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = file.read(&mut buf).ok()?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        if hex_lower(&hasher.finalize()) != cache.file_sha256 {
             return None;
         }
         Some((cache.count, cache.head.clone(), cache.file_hasher.clone()))
@@ -1363,9 +1876,9 @@ impl Case {
         drop(file);
 
         // 关键约定：精确写入 64 字节 ASCII 十六进制摘要（禁止附加换行符，对齐 `verify_bundle.py`），
-        // 并经由相邻临时文件原子重命名，防止写入中途崩溃导致 `audit.head` 截断为 0 字节。
+        // 经由唯一随机临时文件 `flush()` + `sync_all()` 后原子重命名，杜绝断电滞后与 0 字节残损。
         let head_path = self.folder.join("audit.head");
-        write_bytes_atomic_no_fsync(&head_path, hash.as_bytes())?;
+        write_bytes_atomic_sync(&head_path, hash.as_bytes())?;
 
         next_hasher.update(signed_line.as_bytes());
         next_hasher.update(b"\n");
@@ -1659,6 +2172,385 @@ impl Case {
             return Err(err);
         }
         Ok(())
+    }
+
+    /// 记录 `IMAGE_REBIND` 失败审计日志（不修改案件已有证据路径）。
+    fn log_rebind_failure(
+        &mut self,
+        old_image: &str,
+        new_image: &str,
+        expected_sha256: Option<&str>,
+        actual_sha256: Option<&str>,
+        err: &CoreError,
+    ) {
+        let mut details = Map::new();
+        details.insert("old_image".to_string(), Value::String(old_image.to_string()));
+        details.insert("new_image".to_string(), Value::String(new_image.to_string()));
+        if let Some(exp) = expected_sha256 {
+            details.insert("expected_sha256".to_string(), Value::String(exp.to_string()));
+        }
+        if let Some(act) = actual_sha256 {
+            details.insert("actual_sha256".to_string(), Value::String(act.to_string()));
+        }
+        details.insert("error".to_string(), Value::String(err.to_string()));
+        let _ = self.log("IMAGE_REBIND", new_image, "失败", details);
+    }
+
+    /// 在强制 SHA-256（或未固定摘要大镜像的逻辑大小/分区表）校验保护下重新定位源镜像路径。
+    ///
+    /// - 严格校验目标路径位于案件目录及案件库根目录之外，严禁绑定案件库内文件；
+    /// - 目标镜像格式（RAW / EWF）与逻辑大小必须与案件原有记录完全一致；
+    /// - 若原案件已固定 `evidence.sha256`，强制流式复算新路径的逻辑 SHA-256 并逐位比对，
+    ///   任何不匹配立即写入 `IMAGE_REBIND` 失败审计并返回 [`CoreError::IntegrityFailed`]，绝不修改原路径；
+    /// - 校验通过后重新获取新路径的内核只读拒写句柄（[`SourceGuard`]）与文件身份快照，
+    ///   原子持久化 `case.json` 并追加 `IMAGE_REBIND` 成功审计记录。
+    pub fn rebind_image_path(
+        &mut self,
+        new_image_path: &Path,
+        cancel: Option<&AtomicBool>,
+        progress: Option<&ProgressFn<'_>>,
+    ) -> CoreResult<RebindImageResult> {
+        self.ensure_open()?;
+        let ev = self
+            .data
+            .evidence
+            .as_ref()
+            .ok_or_else(|| CoreError::InvalidInput("当前案件尚未加载镜像，无法重新定位".to_string()))?
+            .clone();
+        let old_image = ev.path.clone();
+
+        let canon = fs::canonicalize(new_image_path).map_err(|_| {
+            CoreError::NotFound(format!("镜像文件不存在：{}", new_image_path.display()))
+        })?;
+        let image = strip_verbatim_prefix(&canon);
+        let cases_root = self.folder.parent().unwrap_or(&self.folder);
+        if !image.is_file() || is_within(&image, &self.folder) || is_within(&image, cases_root) {
+            return Err(CoreError::InvalidInput(
+                "镜像必须是案件库目录之外的普通文件".to_string(),
+            ));
+        }
+        let new_image_str = image.to_string_lossy().into_owned();
+
+        let ext = image
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        let new_is_ewf = ext.eq_ignore_ascii_case("e01");
+        if EWF_NUMBERED_EXT_RE.is_match(ext) && !new_is_ewf {
+            return Err(CoreError::InvalidInput("请从首段 E01 打开".to_string()));
+        }
+        let orig_is_ewf = ev.is_ewf();
+        if new_is_ewf != orig_is_ewf {
+            let expected_fmt = ev.format_label();
+            let actual_fmt = if new_is_ewf { "EWF" } else { "RAW" };
+            let err = CoreError::IntegrityFailed(format!(
+                "重绑镜像格式不兼容：案件原格式为 {expected_fmt}，目标文件为 {actual_fmt}"
+            ));
+            self.log_rebind_failure(&old_image, &new_image_str, ev.sha256.as_deref(), None, &err);
+            return Err(err);
+        }
+
+        let mut ewf_parts: Vec<PathBuf> = Vec::new();
+        let mut ewf_stamp_before: Vec<FileStamp> = Vec::new();
+        let logical_size = if new_is_ewf {
+            ewf_parts = ewf::discover_segments(&image)?;
+            ewf_stamp_before = SourceGuard::snapshot(&ewf_parts)?;
+            match ewf::EwfMediaReader::open(&image) {
+                Ok(reader) => reader.media_size(),
+                Err(_) => {
+                    let tool = TskCli::discover(None)?;
+                    let (sz, sector_size) = tool.img_stat_ewf(&image)?;
+                    if sector_size != 512 {
+                        return Err(CoreError::InvalidInput(
+                            "无法确定受支持的 EWF 逻辑大小或扇区大小".to_string(),
+                        ));
+                    }
+                    sz
+                }
+            }
+        } else {
+            fs::metadata(&image)?.len()
+        };
+
+        if logical_size != ev.size {
+            let err = CoreError::IntegrityFailed(format!(
+                "重绑镜像逻辑大小不一致：原镜像 {} 字节，目标镜像 {} 字节",
+                ev.size, logical_size
+            ));
+            self.log_rebind_failure(&old_image, &new_image_str, ev.sha256.as_deref(), None, &err);
+            return Err(err);
+        }
+
+        let expected_sha = ev
+            .sha256
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
+        let (verified, result_sha256, new_segments) = if let Some(exp_sha) = expected_sha {
+            if new_is_ewf {
+                let mut phys_total: u64 = 0;
+                for p in &ewf_parts {
+                    phys_total = phys_total.saturating_add(fs::metadata(p)?.len());
+                }
+                let combined_total = logical_size.saturating_add(phys_total);
+                let logical_cb = |done: u64, _t: u64| {
+                    if let Some(p) = progress {
+                        p(done, combined_total);
+                    }
+                };
+                let logical_ref: Option<&ProgressFn<'_>> = progress.map(|_| &logical_cb as _);
+                let actual_sha = match ewf::hash_logical_ewf1_parallel(
+                    &image,
+                    logical_size,
+                    cancel,
+                    logical_ref,
+                ) {
+                    Ok(digest) => digest,
+                    Err(err) if err.is_cancelled() => {
+                        let _ = self.log("IMAGE_REBIND", &new_image_str, "已取消", Map::new());
+                        return Err(CoreError::Engine(err));
+                    }
+                    Err(_) => {
+                        let tool = TskCli::discover(None)?;
+                        match ewf::hash_logical_stream(
+                            &tool,
+                            &image,
+                            logical_size,
+                            cancel,
+                            logical_ref,
+                        ) {
+                            Ok(digest) => digest,
+                            Err(err) if err.is_cancelled() => {
+                                let _ = self.log("IMAGE_REBIND", &new_image_str, "已取消", Map::new());
+                                return Err(CoreError::Engine(err));
+                            }
+                            Err(err) => {
+                                let ce = CoreError::Engine(err);
+                                self.log_rebind_failure(
+                                    &old_image,
+                                    &new_image_str,
+                                    Some(exp_sha),
+                                    None,
+                                    &ce,
+                                );
+                                return Err(ce);
+                            }
+                        }
+                    }
+                };
+
+                if !actual_sha.eq_ignore_ascii_case(exp_sha) {
+                    let err = CoreError::IntegrityFailed(format!(
+                        "重绑镜像逻辑 SHA-256 不匹配：预期 {exp_sha}，实际 {actual_sha}"
+                    ));
+                    self.log_rebind_failure(
+                        &old_image,
+                        &new_image_str,
+                        Some(exp_sha),
+                        Some(&actual_sha),
+                        &err,
+                    );
+                    return Err(err);
+                }
+
+                let phys_cb = |done: u64, _t: u64| {
+                    if let Some(p) = progress {
+                        p(logical_size.saturating_add(done), combined_total);
+                    }
+                };
+                let phys_ref: Option<&ProgressFn<'_>> = progress.map(|_| &phys_cb as _);
+                let segs = match ewf::hash_physical_segments(&ewf_parts, cancel, phys_ref) {
+                    Ok(s) => s,
+                    Err(err) if err.is_cancelled() => {
+                        let _ = self.log("IMAGE_REBIND", &new_image_str, "已取消", Map::new());
+                        return Err(CoreError::Engine(err));
+                    }
+                    Err(err) => {
+                        let ce = CoreError::Engine(err);
+                        self.log_rebind_failure(
+                            &old_image,
+                            &new_image_str,
+                            Some(exp_sha),
+                            Some(&actual_sha),
+                            &ce,
+                        );
+                        return Err(ce);
+                    }
+                };
+
+                let latest_parts = ewf::discover_segments(&image)?;
+                if SourceGuard::snapshot(&latest_parts)? != ewf_stamp_before {
+                    let err = CoreError::IntegrityFailed(
+                        "重绑校验期间 EWF 分段发生变化".to_string(),
+                    );
+                    self.log_rebind_failure(
+                        &old_image,
+                        &new_image_str,
+                        Some(exp_sha),
+                        Some(&actual_sha),
+                        &err,
+                    );
+                    return Err(err);
+                }
+                (true, actual_sha, Some(segs))
+            } else {
+                let actual_sha = match sha256_file(&image, cancel, progress) {
+                    Ok(digest) => digest,
+                    Err(err) if err.is_cancelled() => {
+                        let _ = self.log("IMAGE_REBIND", &new_image_str, "已取消", Map::new());
+                        return Err(CoreError::Engine(err));
+                    }
+                    Err(err) => {
+                        let ce = CoreError::Engine(err);
+                        self.log_rebind_failure(
+                            &old_image,
+                            &new_image_str,
+                            Some(exp_sha),
+                            None,
+                            &ce,
+                        );
+                        return Err(ce);
+                    }
+                };
+                if !actual_sha.eq_ignore_ascii_case(exp_sha) {
+                    let err = CoreError::IntegrityFailed(format!(
+                        "重绑镜像 SHA-256 不匹配：预期 {exp_sha}，实际 {actual_sha}"
+                    ));
+                    self.log_rebind_failure(
+                        &old_image,
+                        &new_image_str,
+                        Some(exp_sha),
+                        Some(&actual_sha),
+                        &err,
+                    );
+                    return Err(err);
+                }
+                (true, actual_sha, None)
+            }
+        } else {
+            // 尚未固定 SHA-256 的大镜像：校验格式、逻辑大小与分区表结构后允许重绑（标记 verified = false）。
+            let tool = TskCli::discover(None)?;
+            let (new_layout, new_partitions) = tool.inspect(&image)?;
+            let partitions_match = new_layout == ev.layout
+                && new_partitions.len() == ev.partitions.len()
+                && new_partitions
+                    .iter()
+                    .zip(ev.partitions.iter())
+                    .all(|(a, b)| a.offset == b.offset);
+            if !partitions_match {
+                let err = CoreError::IntegrityFailed(
+                    "重绑镜像的分区表布局或分区偏移与原案件不一致".to_string(),
+                );
+                self.log_rebind_failure(&old_image, &new_image_str, None, None, &err);
+                return Err(err);
+            }
+            let segs = if new_is_ewf {
+                let latest_parts = ewf::discover_segments(&image)?;
+                if SourceGuard::snapshot(&latest_parts)? != ewf_stamp_before {
+                    let err = CoreError::IntegrityFailed(
+                        "重绑校验期间 EWF 分段发生变化".to_string(),
+                    );
+                    self.log_rebind_failure(&old_image, &new_image_str, None, None, &err);
+                    return Err(err);
+                }
+                let mut list = Vec::with_capacity(ewf_parts.len());
+                for p in &ewf_parts {
+                    list.push(SegmentDigest {
+                        name: p
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        size: fs::metadata(p)?.len(),
+                        sha256: String::new(),
+                    });
+                }
+                Some(list)
+            } else {
+                None
+            };
+            (false, String::new(), segs)
+        };
+
+        let new_paths = if new_is_ewf {
+            ewf_parts
+        } else {
+            vec![image.clone()]
+        };
+        let segment_count = new_paths.len();
+        let new_guard = SourceGuard::acquire(&new_paths)?;
+        let new_stamp_rows = stamps_to_rows(&SourceGuard::snapshot(&new_paths)?);
+        if !new_is_ewf && new_stamp_rows[0].1 != logical_size {
+            let err = CoreError::IntegrityFailed("重绑期间镜像大小发生变化".to_string());
+            self.log_rebind_failure(
+                &old_image,
+                &new_image_str,
+                expected_sha,
+                (!result_sha256.is_empty()).then_some(result_sha256.as_str()),
+                &err,
+            );
+            return Err(err);
+        }
+
+        // 先构造新状态并暂存旧状态；若 `case.json` 落盘失败则完整回滚，确保内存与磁盘一致。
+        let mut updated_ev = ev;
+        updated_ev.path = new_image_str.clone();
+        updated_ev.source_stamp = Some(new_stamp_rows.clone());
+        if new_is_ewf {
+            updated_ev.segments = new_segments;
+        }
+        let next_verification = if verified {
+            Some(VerificationInfo {
+                time: now(),
+                actual: Some(result_sha256.clone()),
+                ok: true,
+                method: if new_is_ewf {
+                    "重绑源镜像并复算 EWF 逻辑 SHA-256".to_string()
+                } else {
+                    "重绑源镜像并复算 RAW SHA-256".to_string()
+                },
+            })
+        } else {
+            self.data.verification.clone()
+        };
+
+        let prev_evidence = self.data.evidence.replace(updated_ev);
+        let prev_verification = std::mem::replace(&mut self.data.verification, next_verification);
+        let prev_guard = self.source_guard.replace(new_guard);
+        let prev_source_paths = std::mem::replace(&mut self.source_paths, new_paths);
+        let prev_session_stamp = self.session_stamp.replace(new_stamp_rows);
+        let prev_session_verified = std::mem::replace(&mut self.session_verified, verified);
+
+        if let Err(err) = self.save_internal(false, None) {
+            self.data.evidence = prev_evidence;
+            self.data.verification = prev_verification;
+            self.source_guard = prev_guard;
+            self.source_paths = prev_source_paths;
+            self.session_stamp = prev_session_stamp;
+            self.session_verified = prev_session_verified;
+            return Err(err);
+        }
+        // `case.json` 落盘成功后再释放旧的 `SourceGuard` 句柄。
+        drop(prev_guard);
+
+        self.directory_cache.clear();
+        self.directory_cache_total = 0;
+
+        let mut details = Map::new();
+        details.insert("old_image".to_string(), Value::String(old_image.clone()));
+        details.insert("new_image".to_string(), Value::String(new_image_str.clone()));
+        details.insert("sha256".to_string(), Value::String(result_sha256.clone()));
+        details.insert("verified".to_string(), Value::Bool(verified));
+        details.insert("segment_count".to_string(), Value::from(segment_count as u64));
+        self.log("IMAGE_REBIND", &new_image_str, "成功", details)?;
+
+        Ok(RebindImageResult {
+            old_image,
+            new_image: new_image_str,
+            sha256: result_sha256,
+            verified,
+            segment_count,
+        })
     }
 
     /// 返回大镜像校验状态说明；常规（`< 1 GiB`）镜像返回空字符串。
@@ -2166,17 +3058,51 @@ impl Case {
                 ));
             }
             let count = entries.len();
-            // 持久化前暂存旧状态，若保存失败或被取消则完整回滚内存，防止内存与磁盘脱节。
-            let prev_inventory = std::mem::replace(&mut self.data.inventory, entries.clone());
-            let prev_fsstat = self.data.fsstat.replace(info);
-            let prev_offset = self.data.offset.replace(Some(offset));
-            let prev_scans = self.data.partition_scans.replace(vec![PartitionScan {
+            // 增量合并当前分区条目：保留其他已扫描分区的条目并按分区偏移升序拼接，
+            // 仅将本次扫描的 `offset` 标记为脏分区以复用未变更分区的 `.jsonl.gz` 文件。
+            let mut by_part: BTreeMap<u64, Vec<InventoryEntry>> = BTreeMap::new();
+            for item in &self.data.inventory {
+                if item.offset != offset {
+                    by_part.entry(item.offset).or_default().push(item.clone());
+                }
+            }
+            if !entries.is_empty() {
+                by_part.insert(offset, entries.clone());
+            }
+            let total_merged: usize = by_part.values().map(Vec::len).sum();
+            let mut merged_inventory = Vec::with_capacity(total_merged);
+            for (_, mut part_entries) in by_part {
+                merged_inventory.append(&mut part_entries);
+            }
+
+            let mut next_scans = self.data.partition_scans.clone().unwrap_or_default();
+            let new_scan = PartitionScan {
                 offset,
                 status: "ready".to_string(),
                 count,
                 error: None,
-            }]);
-            if let Err(err) = self.save_internal(true, cancel) {
+            };
+            if let Some(existing) = next_scans.iter_mut().find(|s| s.offset == offset) {
+                *existing = new_scan;
+            } else {
+                next_scans.push(new_scan);
+                next_scans.sort_by_key(|s| s.offset);
+            }
+            let next_offset = if next_scans.len() == 1 {
+                Some(offset)
+            } else {
+                None
+            };
+
+            let mut dirty_offsets = HashSet::with_capacity(1);
+            dirty_offsets.insert(offset);
+
+            // 持久化前暂存旧状态，若保存失败或被取消则完整回滚内存，防止内存与磁盘脱节。
+            let prev_inventory = std::mem::replace(&mut self.data.inventory, merged_inventory);
+            let prev_fsstat = self.data.fsstat.replace(info);
+            let prev_offset = self.data.offset.replace(next_offset);
+            let prev_scans = self.data.partition_scans.replace(next_scans);
+            if let Err(err) = self.save_with_dirty_partitions(Some(&dirty_offsets), cancel) {
                 self.data.inventory = prev_inventory;
                 self.data.fsstat = prev_fsstat;
                 self.data.offset = prev_offset;
@@ -2313,7 +3239,7 @@ impl Case {
             let prev_offset = self.data.offset.replace(None);
             let prev_index_ver = self.data.index_verification.replace(index_note);
             let prev_fsstat = self.data.fsstat.replace(sections.join("\n\n"));
-            if let Err(err) = self.save_internal(true, cancel) {
+            if let Err(err) = self.save_with_dirty_partitions(None, cancel) {
                 self.data.inventory = prev_inventory;
                 self.data.partition_scans = prev_scans;
                 self.data.offset = prev_offset;
@@ -2849,5 +3775,86 @@ impl Case {
 impl Drop for Case {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_entry(path: &str, offset: u64, inode: &str) -> InventoryEntry {
+        InventoryEntry {
+            path: path.to_string(),
+            inode: inode.to_string(),
+            mode: "r/rrwxrwxrwx".to_string(),
+            size: 16,
+            deleted: false,
+            reallocated: false,
+            atime: 1_700_000_000,
+            mtime: 1_700_000_000,
+            ctime: 0,
+            crtime: 1_700_000_000,
+            directory: false,
+            offset,
+            filesystem: "FAT16".to_string(),
+            start_cluster_allocated: None,
+            extents: None,
+        }
+    }
+
+    #[test]
+    fn dirty_partition_save_rollback_on_cancel_leaves_no_orphan_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut case = Case::create(
+            tmp.path(),
+            "CANCEL-PART-001",
+            "取证员",
+            "取消回滚测试",
+            None,
+            None,
+            AuditOrigin::Manual,
+        )
+        .expect("create case");
+        case.data.inventory = vec![
+            sample_entry("A.TXT", 2048, "1"),
+            sample_entry("B.TXT", 40960, "2"),
+        ];
+        case.save_with_dirty_partitions(None, None)
+            .expect("initial multi-partition save");
+        let orig_files = case.inventory_files.clone();
+        assert_eq!(orig_files.len(), 2);
+
+        // 预设取消标志后再写入脏分区：必须返回 Cancelled 且不残留任何新 `.jsonl.gz` 文件。
+        let cancel = AtomicBool::new(true);
+        let mut dirty = HashSet::new();
+        dirty.insert(2048);
+        let err = case
+            .save_with_dirty_partitions(Some(&dirty), Some(&cancel))
+            .expect_err("should cancel");
+        assert!(err.is_cancelled());
+        assert_eq!(case.inventory_files, orig_files);
+
+        let gz_names: HashSet<String> = fs::read_dir(case.folder())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".jsonl.gz"))
+            .collect();
+        let expected_names: HashSet<String> = orig_files.values().cloned().collect();
+        assert_eq!(gz_names, expected_names, "取消回滚后不应残留未引用的 .jsonl.gz 文件");
+    }
+
+    #[test]
+    fn is_safe_case_child_rejects_traversal_and_separators() {
+        assert!(is_safe_case_child(
+            "inventory-p2048-0123456789abcdef0123456789abcdef.jsonl.gz"
+        ));
+        assert!(!is_safe_case_child(""));
+        assert!(!is_safe_case_child("."));
+        assert!(!is_safe_case_child(".."));
+        assert!(!is_safe_case_child("../evil.jsonl.gz"));
+        assert!(!is_safe_case_child("sub/evil.jsonl.gz"));
+        assert!(!is_safe_case_child(r"sub\evil.jsonl.gz"));
+        assert!(!is_safe_case_child("C:\\evil.jsonl.gz"));
     }
 }

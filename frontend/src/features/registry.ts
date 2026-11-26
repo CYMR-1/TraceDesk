@@ -85,6 +85,7 @@ export const AUDIT_ACTION_TITLES: Readonly<Record<string, string>> = {
   CASE_OPEN: '打开案件',
   IMAGE_LOAD_BEGIN: '开始载入镜像',
   IMAGE_LOAD: '载入镜像',
+  IMAGE_REBIND: '重绑源镜像路径',
   HASH_FIXED: '固定镜像摘要',
   HASH_VERIFY: '校验镜像完整性',
   FILE_BROWSE: '读取分区文件',

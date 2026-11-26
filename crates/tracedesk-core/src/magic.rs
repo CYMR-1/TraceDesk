@@ -6,7 +6,9 @@
 //! - OOXML（DOCX/XLSX/PPTX）仅在前 4 KiB 原始字节中执行只读子串扫描以识别内部目录结构。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -17,14 +19,18 @@ use serde::{Deserialize, Serialize};
 use tracedesk_engines::{
     EngineError, InventoryEntry, MediaReader, TskCli, VolumeReader, can_export, open_media,
 };
+use uuid::Uuid;
 
 use crate::case::Case;
 use crate::error::{CoreError, CoreResult};
+use crate::formatting;
 
 /// 单个文件魔数识别最多读取的头部字节数（4 KiB）。
 pub const MAGIC_HEADER_BYTES: usize = 4096;
 /// 展示给界面的文件头十六进制预览字节数上限（16 字节）。
 pub const MAGIC_HEX_PREVIEW_BYTES: usize = 16;
+/// 魔数扫描磁盘缓存格式版本号。
+pub const MAGIC_CACHE_VERSION: u32 = 1;
 /// 有界 `icat` 回退并发上限（控制子进程数量）。
 const MAGIC_ICAT_THREADS: usize = 4;
 
@@ -130,6 +136,22 @@ pub struct MagicScanReport {
     pub type_counts: Vec<MagicTypeCount>,
     /// 检出的所有扩展名伪装条目列表（高危优先，其次按分区与路径确定性排序）。
     pub mismatches: Vec<MagicMismatchEntry>,
+}
+
+/// 魔数伪装扫描结果磁盘缓存文件结构（保存于 `<case_folder>/.cache/magic-scan.json`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MagicScanCacheFile {
+    /// 缓存格式版本号（当前为 [`MAGIC_CACHE_VERSION`]）。
+    pub version: u32,
+    /// 案件清单指纹（由调用方传入 `case.inventory_cache_key()`）。
+    pub cache_key: String,
+    /// 证据镜像 SHA-256 摘要（用于防止源镜像替换后误命中旧缓存）。
+    pub image_sha256: String,
+    /// 缓存落盘时间（UTC+8 ISO-8601 字符串）。
+    pub saved_at: String,
+    /// 完整的魔数与扩展名伪装扫描汇总报告。
+    pub report: MagicScanReport,
 }
 
 /// 静态魔数类型规格定义。
@@ -1151,6 +1173,89 @@ pub fn scan_case_magic_mismatches(
     scan_entries_magic_mismatches(&image, entries, &partition_offsets, cancel)
 }
 
+/// 返回案件魔数扫描结果的磁盘缓存路径（`<case_folder>/.cache/magic-scan.json`）。
+pub fn magic_cache_path(case_folder: &Path) -> PathBuf {
+    case_folder.join(".cache").join("magic-scan.json")
+}
+
+/// 将魔数伪装扫描报告原子落盘至 `<case_folder>/.cache/magic-scan.json`。
+///
+/// - 若 `report.cancelled` 为 `true`，拒绝写盘（直接返回 `Ok(())` 且绝不覆盖已有有效缓存）；
+/// - 自动创建 `<case_folder>/.cache`，经由唯一随机 `.tmp` 文件 + `flush()` + `sync_all()` +
+///   原子 `rename` 写盘，不触碰 `case.json`、`audit.jsonl`、`exports/` 与 `reports/`。
+pub fn save_magic_scan_cache(
+    case_folder: &Path,
+    cache_key: &str,
+    image_sha256: &str,
+    report: &MagicScanReport,
+) -> CoreResult<()> {
+    if report.cancelled {
+        return Ok(());
+    }
+    let target = magic_cache_path(case_folder);
+    let cache_dir = target
+        .parent()
+        .ok_or_else(|| CoreError::InvalidInput("无效的魔数缓存目录路径".to_string()))?;
+    fs::create_dir_all(cache_dir)?;
+
+    let cache_file = MagicScanCacheFile {
+        version: MAGIC_CACHE_VERSION,
+        cache_key: cache_key.to_string(),
+        image_sha256: image_sha256.to_string(),
+        saved_at: formatting::now(),
+        report: report.clone(),
+    };
+    let raw = serde_json::to_vec_pretty(&cache_file)?;
+
+    let tmp_path = cache_dir.join(format!("magic-scan.{}.tmp", Uuid::new_v4().simple()));
+    let write_res = (|| -> CoreResult<()> {
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        f.write_all(&raw)?;
+        f.flush()?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(err) = write_res {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    if let Err(err) = fs::rename(&tmp_path, &target) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(CoreError::Io(err));
+    }
+    Ok(())
+}
+
+/// 读取并校验 `<case_folder>/.cache/magic-scan.json` 中的魔数扫描缓存。
+///
+/// 当缓存文件不存在、JSON 损坏、版本号不符、`report.cancelled` 为 `true`、或
+/// `cache_key` / `image_sha256` 与期望不匹配时，静默返回 `None`；全部一致时返回 `Some(report)`。
+pub fn load_magic_scan_cache(
+    case_folder: &Path,
+    expected_cache_key: &str,
+    expected_image_sha256: &str,
+) -> Option<MagicScanReport> {
+    let path = magic_cache_path(case_folder);
+    let raw = fs::read(&path).ok()?;
+    let cached: MagicScanCacheFile = serde_json::from_slice(&raw).ok()?;
+    if cached.version != MAGIC_CACHE_VERSION
+        || cached.report.cancelled
+        || cached.cache_key != expected_cache_key
+        || cached.image_sha256 != expected_image_sha256
+    {
+        return None;
+    }
+    Some(cached.report)
+}
+
+/// 安静删除 `<case_folder>/.cache/magic-scan.json` 缓存文件（不存在时忽略错误）。
+pub fn clear_magic_scan_cache(case_folder: &Path) {
+    let _ = fs::remove_file(magic_cache_path(case_folder));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1474,5 +1579,115 @@ mod tests {
         assert!(json_val.get("elapsedMs").is_some());
         assert!(json_val.get("typeCounts").is_some());
         assert!(json_val.get("mismatches").is_some());
+    }
+
+    /// 构造用于磁盘缓存单测的示例扫描报告。
+    fn sample_scan_report(cancelled: bool) -> MagicScanReport {
+        MagicScanReport {
+            scanned_count: 12,
+            skipped_count: 3,
+            mismatch_count: 1,
+            elapsed_ms: 42,
+            cancelled,
+            type_counts: vec![MagicTypeCount {
+                detected_type: "PE".to_string(),
+                detected_family: "EXECUTABLE".to_string(),
+                label: "Windows 可执行文件 (PE)".to_string(),
+                count: 1,
+            }],
+            mismatches: vec![MagicMismatchEntry {
+                entry_key: "2048:101-128-1:0:DCIM/holiday.jpg".to_string(),
+                offset: 2048,
+                inode: "101-128-1".to_string(),
+                path: "DCIM/holiday.jpg".to_string(),
+                deleted: false,
+                size: 4096,
+                extension: ".jpg".to_string(),
+                detected_type: "PE".to_string(),
+                detected_family: "EXECUTABLE".to_string(),
+                detected_label: "Windows 可执行文件 (PE)".to_string(),
+                severity: "high".to_string(),
+                reason: "声明后缀 .jpg，实际文件头为 Windows 可执行文件 (PE)".to_string(),
+                magic_hex: "4D 5A 90 00".to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn magic_cache_save_load_invalidation_and_corrupt_tolerance() {
+        let tmp = tempfile::tempdir().expect("创建临时案件目录");
+        let case_folder = tmp.path();
+        let cache_key = "inv-key-v1-abcdef0123456789";
+        let image_sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let report = sample_scan_report(false);
+
+        // 1. 缓存路径位于独立的 `.cache/magic-scan.json` 子目录。
+        let cache_path = magic_cache_path(case_folder);
+        assert_eq!(cache_path, case_folder.join(".cache").join("magic-scan.json"));
+        assert!(load_magic_scan_cache(case_folder, cache_key, image_sha).is_none());
+
+        // 2. 正常落盘与读取命中，且使用 camelCase 键名，不污染 case.json / audit.jsonl。
+        save_magic_scan_cache(case_folder, cache_key, image_sha, &report).expect("写入魔数缓存");
+        assert!(cache_path.is_file());
+        assert!(!case_folder.join("case.json").exists());
+        assert!(!case_folder.join("audit.jsonl").exists());
+
+        let raw_val: serde_json::Value =
+            serde_json::from_slice(&fs::read(&cache_path).expect("读取缓存文件"))
+                .expect("解析缓存 JSON");
+        assert_eq!(raw_val["version"].as_u64(), Some(u64::from(MAGIC_CACHE_VERSION)));
+        assert_eq!(raw_val["cacheKey"].as_str(), Some(cache_key));
+        assert_eq!(raw_val["imageSha256"].as_str(), Some(image_sha));
+        assert!(raw_val["savedAt"].as_str().is_some_and(|s| s.ends_with("+08:00")));
+
+        let loaded = load_magic_scan_cache(case_folder, cache_key, image_sha).expect("应命中缓存");
+        assert_eq!(loaded, report);
+
+        // 3. cache_key 变更自动失效。
+        assert!(load_magic_scan_cache(case_folder, "inv-key-v2-changed", image_sha).is_none());
+
+        // 4. image_sha256 变更自动失效。
+        assert!(load_magic_scan_cache(case_folder, cache_key, "deadbeef").is_none());
+
+        // 5. cancelled = true 报告拒绝落盘，且不得覆盖既有有效缓存。
+        let cancelled_report = sample_scan_report(true);
+        save_magic_scan_cache(case_folder, cache_key, image_sha, &cancelled_report)
+            .expect("取消报告应静默跳过");
+        let still_valid =
+            load_magic_scan_cache(case_folder, cache_key, image_sha).expect("原有缓存不应被覆盖");
+        assert_eq!(still_valid, report);
+
+        // 在空目录对 cancelled 报告写缓存时，不应生成缓存文件。
+        let empty_case = tempfile::tempdir().expect("创建空案件目录");
+        save_magic_scan_cache(empty_case.path(), cache_key, image_sha, &cancelled_report)
+            .expect("空目录取消报告应直接 Ok(())");
+        assert!(!magic_cache_path(empty_case.path()).exists());
+
+        // 6. 版本号不符或磁盘中强行篡改为 cancelled = true 时自动失效。
+        let mut wrong_ver = raw_val.clone();
+        wrong_ver["version"] = serde_json::json!(MAGIC_CACHE_VERSION + 1);
+        fs::write(
+            &cache_path,
+            serde_json::to_vec(&wrong_ver).expect("序列化错误版本缓存"),
+        )
+        .expect("覆盖错误版本缓存");
+        assert!(load_magic_scan_cache(case_folder, cache_key, image_sha).is_none());
+
+        let mut disk_cancelled = raw_val;
+        disk_cancelled["report"]["cancelled"] = serde_json::json!(true);
+        fs::write(
+            &cache_path,
+            serde_json::to_vec(&disk_cancelled).expect("序列化取消态缓存"),
+        )
+        .expect("覆盖取消态缓存");
+        assert!(load_magic_scan_cache(case_folder, cache_key, image_sha).is_none());
+
+        // 7. 损坏 JSON 静默返回 None，且 clear_magic_scan_cache 安全删除缓存文件。
+        fs::write(&cache_path, "{corrupt json").expect("写入损坏 JSON");
+        assert!(load_magic_scan_cache(case_folder, cache_key, image_sha).is_none());
+        clear_magic_scan_cache(case_folder);
+        assert!(!cache_path.exists());
+        // 二次清理不存在的文件也不得报错或 panic。
+        clear_magic_scan_cache(case_folder);
     }
 }

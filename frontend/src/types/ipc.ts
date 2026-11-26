@@ -138,6 +138,14 @@ export interface RecentCaseDto {
   hasEvidence: boolean;
   inventoryCount: number;
   exportsCount: number;
+  /** 最近打开时间（ISO 字符串，缺省时回退使用 created） */
+  lastOpenedAt?: string | null;
+  /** 是否来自持久化最近案件历史记录（为 true 时允许从列表移除） */
+  inHistory?: boolean;
+  /** 是否在最近列表中置顶 */
+  pinned?: boolean;
+  /** 案件已登记的源镜像路径在磁盘上是否失效/缺失 */
+  evidenceMissing?: boolean;
 }
 
 /** 案件历史内容搜索记录摘要（用于内容搜索页下拉回放） */
@@ -175,6 +183,18 @@ export interface CaseSnapshot {
   quickLocation: QuickLocation | null;
   /** 案件内可用于回放的历史内容搜索记录列表（最新在前） */
   searchRecords?: SearchRecordSummaryDto[];
+  /** 当前案件已登记的源证据镜像在磁盘上是否缺失/路径失效 */
+  evidenceMissing?: boolean;
+}
+
+/** 重新定位源镜像路径返回结果 */
+export interface RebindImagePathResponse {
+  snapshot: CaseSnapshot;
+  oldImage: string;
+  newImage: string;
+  sha256: string;
+  verified: boolean;
+  segmentCount: number;
 }
 
 export interface EntryView {

@@ -7,7 +7,8 @@
 //! - 紧凑 `u64` MACB 时间线及多核并行排序与过滤（`timeline`）
 //! - 单文件哈希/比对/笔记工具（`file_tools`）与分组研判记录及导出（`findings`）
 //! - 9 种编码跨页预览、HEX 格式化与安全图片预览（`preview`）
-//! - 只读文件头魔数（Magic Bytes）识别与扩展名伪装检测（`magic`）
+//! - 只读文件头魔数（Magic Bytes）识别、扩展名伪装检测与磁盘缓存（`magic`）
+//! - 跨目录「最近案件」历史持久化与合并管理（`recent_cases`）
 //! - 多核 AVX2 SIMD 精确字节搜索及确定性排序（`content_search`）
 //! - 10 节 Markdown 取证报告生成（`reporting`）
 //! - ZIP64 可核验复核包构建器与原生 Rust 校验器（`review`）
@@ -23,6 +24,7 @@ pub mod formatting;
 pub mod magic;
 pub mod paths;
 pub mod preview;
+pub mod recent_cases;
 pub mod reporting;
 pub mod review;
 pub mod timeline;
@@ -64,10 +66,12 @@ pub use formatting::{
     truncate_utf16_units, utf16_unit_len, windows_filename,
 };
 pub use magic::{
-    MAGIC_HEADER_BYTES, MAGIC_HEX_PREVIEW_BYTES, MagicCheckItem, MagicMismatchEntry,
-    MagicScanReport, MagicTypeCount, MagicTypeInfo, detect_magic_bytes, evaluate_magic_mismatch,
-    extract_extension, format_magic_hex, inspect_entry_magic, inspect_entry_magic_at_image,
-    magic_entry_key, scan_case_magic_mismatches, scan_entries_magic_mismatches,
+    MAGIC_CACHE_VERSION, MAGIC_HEADER_BYTES, MAGIC_HEX_PREVIEW_BYTES, MagicCheckItem,
+    MagicMismatchEntry, MagicScanCacheFile, MagicScanReport, MagicTypeCount, MagicTypeInfo,
+    clear_magic_scan_cache, detect_magic_bytes, evaluate_magic_mismatch, extract_extension,
+    format_magic_hex, inspect_entry_magic, inspect_entry_magic_at_image, load_magic_scan_cache,
+    magic_cache_path, magic_entry_key, save_magic_scan_cache, scan_case_magic_mismatches,
+    scan_entries_magic_mismatches,
 };
 pub use paths::{AppPaths, is_within, resolve_clean, strip_verbatim_prefix};
 pub use preview::{
@@ -78,6 +82,12 @@ pub use preview::{
 };
 #[cfg(feature = "image-preview")]
 pub use preview::{ImagePreviewResult, decode_image_preview, preview_entry_image};
+pub use recent_cases::{
+    MAX_RECENT_CASES, MergedRecentCase, RECENT_CASES_VERSION, RecentCaseRecord,
+    default_recent_cases_path, list_recent_case_records, list_recent_case_records_at,
+    merge_recent_case_folders, merge_recent_case_folders_at, record_recent_case,
+    record_recent_case_at, remove_recent_case, remove_recent_case_at,
+};
 pub use reporting::render_report;
 pub use review::{
     BuildBundleOptions, BuildBundleResult, BundleExportRow, BundleSearchRow,

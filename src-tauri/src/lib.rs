@@ -167,8 +167,10 @@ pub fn run() {
             commands::release_case_lock,
             commands::get_case_snapshot,
             commands::list_recent_cases,
+            commands::remove_recent_case,
             // §3.2 证据镜像与文件浏览命令
             commands::load_image,
+            commands::rebind_image_path,
             commands::verify_integrity,
             commands::fix_hash,
             commands::cancel_verify_integrity,
@@ -183,6 +185,7 @@ pub fn run() {
             commands::query_files_page,
             commands::locate_file_in_scope,
             commands::scan_magic_mismatches,
+            commands::load_cached_magic_scan,
             commands::inspect_entry_magic,
             // §3.3 文件预览、导出与取证发现命令
             commands::preview_file_page,

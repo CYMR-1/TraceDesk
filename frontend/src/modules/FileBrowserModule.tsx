@@ -92,10 +92,13 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
   const [loadingList, setLoadingList] = useState(false);
   const [scrollToRowIndex, setScrollToRowIndex] = useState<number | null>(null);
 
-  // 文件魔数伪装检测缓存与筛选状态（切换案件/镜像时自动清空）
+  // 文件魔数伪装检测缓存与筛选状态（切换案件/镜像时自动清空，随后静默尝试恢复本地缓存）
   const [magicScanResult, setMagicScanResult] = useState<ScanMagicMismatchesResponse | null>(null);
+  const [magicFromCache, setMagicFromCache] = useState(false);
   const [scanningMagic, setScanningMagic] = useState(false);
   const [onlyMagicMismatch, setOnlyMagicMismatch] = useState(false);
+  const magicFromCacheRef = useRef(false);
+  const magicCacheReqSeqRef = useRef(0);
 
   // 跨模块定位附带的十六进制精确字节高亮目标
   const [previewLocateSpec, setPreviewLocateSpec] = useState<{
@@ -253,6 +256,9 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
     setScrollToRowIndex(null);
     setSelectedTreeId('__image__');
     setMagicScanResult(null);
+    magicFromCacheRef.current = false;
+    setMagicFromCache(false);
+    magicCacheReqSeqRef.current += 1;
     setScanningMagic(false);
     setOnlyMagicMismatch(false);
     setPreviewLocateSpec(null);
@@ -273,6 +279,43 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
     }
     setExpandedIds(initialExpanded);
   }, [caseIdentity, isQuickMode, partitions, scanMap, evidence, loadTreeBranch]);
+
+  // 打开/切换案件或文件清单/镜像摘要变化时，静默恢复本地缓存的魔数伪装检测结果
+  const caseFolder = snapshot?.caseDir ?? '';
+  const inventoryCountKey = snapshot?.inventoryCount ?? 0;
+  const evidenceSha256Key = evidence?.sha256 ?? '';
+  const hasEvidenceForMagic = Boolean(evidence);
+  useEffect(() => {
+    if (!caseFolder || !hasEvidenceForMagic) {
+      return;
+    }
+    let active = true;
+    const reqSeq = ++magicCacheReqSeqRef.current;
+    const gen = caseGenRef.current;
+    void tauriApi
+      .loadCachedMagicScan()
+      .then((cached) => {
+        if (!active || reqSeq !== magicCacheReqSeqRef.current || gen !== caseGenRef.current) {
+          return;
+        }
+        if (cached) {
+          setMagicScanResult(cached);
+          magicFromCacheRef.current = true;
+          setMagicFromCache(true);
+        } else if (magicFromCacheRef.current) {
+          setMagicScanResult(null);
+          setOnlyMagicMismatch(false);
+          magicFromCacheRef.current = false;
+          setMagicFromCache(false);
+        }
+      })
+      .catch(() => {
+        // 静默忽略缓存读取异常，不影响正常文件浏览
+      });
+    return () => {
+      active = false;
+    };
+  }, [caseFolder, inventoryCountKey, evidenceSha256Key, hasEvidenceForMagic]);
 
   // 记录大镜像快速浏览时的父目录 inode 路径，并在目录切换时重置页号为 0 避免沿用旧目录页码
   useEffect(() => {
@@ -331,12 +374,16 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
   const handleScanMagicMismatches = useCallback(async () => {
     if (!evidence || busy || scanningMagic) return;
     const gen = caseGenRef.current;
+    // 使在途的缓存恢复请求失效，确保本次新扫描结果不被旧缓存覆盖
+    magicCacheReqSeqRef.current += 1;
     setScanningMagic(true);
     onDetailChange('正在扫描文件头魔数（Magic Bytes）与扩展名伪装…');
     try {
       const res = await tauriApi.scanMagicMismatches();
       if (gen !== caseGenRef.current) return;
       setMagicScanResult(res);
+      magicFromCacheRef.current = false;
+      setMagicFromCache(false);
       setOnlyMagicMismatch(false);
       onDetailChange(
         `魔数伪装检测完成：已扫描 ${res.scannedCount} 项（跳过 ${res.skippedCount} 项），发现 ${res.mismatchCount} 处疑似伪装（耗时 ${res.elapsedMs} ms）`
@@ -1599,9 +1646,10 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
             <span
               className="td-muted-text"
               style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}
-              title={`已扫描 ${magicScanResult.scannedCount} 项，跳过 ${magicScanResult.skippedCount} 项，耗时 ${magicScanResult.elapsedMs} ms`}
+              title={`已扫描 ${magicScanResult.scannedCount} 项，跳过 ${magicScanResult.skippedCount} 项，耗时 ${magicScanResult.elapsedMs} ms${magicFromCache ? '（已从案件本地缓存恢复，可点击「魔数伪装检测」重新扫描）' : ''}`}
             >
               已扫 {magicScanResult.scannedCount} 项 · {magicScanResult.elapsedMs}ms
+              {magicFromCache && <span className="td-magic-cache-tag">（已恢复缓存）</span>}
             </span>
             {magicScanResult.mismatchCount > 0 ? (
               <button

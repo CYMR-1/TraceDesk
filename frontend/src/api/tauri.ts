@@ -33,6 +33,7 @@ import type {
   PreviewPageResponse,
   QueryFilesPageResponse,
   QueryTimelinePageResponse,
+  RebindImagePathResponse,
   RecentCaseDto,
   ScanMagicMismatchesResponse,
   SearchEncoding,
@@ -121,10 +122,20 @@ export const tauriApi = {
     return callCommand<RecentCaseDto[]>('list_recent_cases', {});
   },
 
+  /** 从最近案件历史记录中移除指定案件（仅移出列表，不删除磁盘案件文件） */
+  removeRecentCase(params: { folder: string }): Promise<{ removed: boolean }> {
+    return callCommand<{ removed: boolean }>('remove_recent_case', params);
+  },
+
   /* ---------- 3.2 证据镜像与文件浏览命令 ---------- */
 
   loadImage(params: { imagePath: string }): Promise<CaseSnapshot> {
     return callCommand<CaseSnapshot>('load_image', params);
+  },
+
+  /** 校验并重新绑定源证据镜像路径（含 SHA-256 基线强制核验） */
+  rebindImagePath(params: { newImagePath: string }): Promise<RebindImagePathResponse> {
+    return callCommand<RebindImagePathResponse>('rebind_image_path', params);
   },
 
   verifyIntegrity(): Promise<{ ok: boolean; initialFixed: boolean; snapshot: CaseSnapshot }> {
@@ -334,6 +345,11 @@ export const tauriApi = {
   /** 全案扫描文件魔数（Magic Bytes）与扩展名伪装不匹配项 */
   scanMagicMismatches(): Promise<ScanMagicMismatchesResponse> {
     return callCommand<ScanMagicMismatchesResponse>('scan_magic_mismatches', {});
+  },
+
+  /** 读取当前案件已缓存的文件魔数伪装检测结果（无有效缓存时返回 null） */
+  loadCachedMagicScan(): Promise<ScanMagicMismatchesResponse | null> {
+    return callCommand<ScanMagicMismatchesResponse | null>('load_cached_magic_scan', {});
   },
 
   /** 探测单个文件条目的真实文件头魔数与前 16B HEX */

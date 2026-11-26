@@ -19,9 +19,10 @@ use tracedesk_desktop_lib::commands::{
     cmd_generate_html_report, cmd_generate_report, cmd_get_app_paths, cmd_get_case_snapshot,
     cmd_get_guide_pages, cmd_get_mcp_status, cmd_get_tree_children, cmd_inspect_bundle_materials,
     cmd_inspect_entry_magic, cmd_list_audit_log, cmd_list_findings, cmd_list_mcp_activities,
-    cmd_list_recent_cases, cmd_load_image, cmd_load_search_record, cmd_locate_file_in_scope,
-    cmd_open_case, cmd_preview_file_image, cmd_preview_file_page, cmd_query_files_page,
-    cmd_query_timeline_page, cmd_record_finding_note, cmd_register_source, cmd_scan_all_partitions,
+    cmd_list_recent_cases, cmd_load_cached_magic_scan, cmd_load_image, cmd_load_search_record,
+    cmd_locate_file_in_scope, cmd_open_case, cmd_preview_file_image, cmd_preview_file_page,
+    cmd_query_files_page, cmd_query_timeline_page, cmd_rebind_image_path, cmd_record_finding_note,
+    cmd_register_source, cmd_remove_recent_case, cmd_scan_all_partitions,
     cmd_scan_magic_mismatches, cmd_start_content_search, cmd_start_mcp_http, cmd_stop_mcp_http,
     cmd_suggest_case_dir, cmd_verify_integrity, cmd_verify_review_bundle,
 };
@@ -2357,6 +2358,371 @@ fn magic_scan_single_entry_inspection_and_cross_module_locate() {
         cmd_inspect_entry_magic(&state, &root_key).expect("inspect normal root file magic");
     assert!(!normal_magic.mismatch);
     assert_eq!(normal_magic.severity, "none");
+
+    state.shutdown_all();
+}
+
+/// Stage B-1 集成测试 1：跨目录案件打开/记录到最近历史、`list_recent_cases` 合并返回、
+/// `remove_recent_case` 仅移除历史清单而绝不删除磁盘案件文件。
+#[test]
+fn cross_directory_recent_cases_history_merge_and_remove_without_deleting_files() {
+    let tmp = tempdir().expect("create tempdir");
+    let cases_dir = tmp.path().join("cases");
+    let external_dir = tmp.path().join("external_drive_cases");
+    std::fs::create_dir_all(&cases_dir).expect("mkdir cases");
+    std::fs::create_dir_all(&external_dir).expect("mkdir external");
+    let state = make_test_state(cases_dir.clone());
+    let demo_dd = demo_image_path();
+
+    // 1. 直接在默认 `cases_dir` 下创建一个未通过桌面端打开过的案件（验证合并后 `inHistory == false`）。
+    let mut unrecorded = tracedesk_core::Case::create(
+        &cases_dir,
+        "ROOT-ONLY-01",
+        "取证员甲",
+        "默认目录案件",
+        None,
+        None,
+        tracedesk_core::AuditOrigin::Manual,
+    )
+    .expect("create unrecorded case");
+    let unrecorded_folder = unrecorded.folder().to_path_buf();
+    unrecorded.close();
+
+    // 2. 通过桌面端在默认 `cases_dir` 新建案件并关闭。
+    let default_snap = cmd_create_case(
+        &state,
+        &cases_dir.to_string_lossy(),
+        "DEFAULT-HIST-02",
+        "取证员乙",
+        "默认目录历史案件",
+        None,
+    )
+    .expect("create default case");
+    cmd_close_case(&state).expect("close default case");
+
+    std::thread::sleep(Duration::from_millis(20));
+
+    // 3. 通过桌面端在跨目录 `external_dir` 新建案件、加载镜像并扫描分区（生成分分区 `inventory_files`）。
+    let ext_snap = cmd_create_case(
+        &state,
+        &external_dir.to_string_lossy(),
+        "EXT-HIST-03",
+        "取证员丙",
+        "跨目录外部案件",
+        None,
+    )
+    .expect("create external case");
+    cmd_load_image(&state, &demo_dd.to_string_lossy(), None).expect("load image");
+    let scan_res = cmd_scan_all_partitions(&state, None).expect("scan partitions");
+    assert!(scan_res.snapshot.inventory_count > 0);
+    cmd_close_case(&state).expect("close external case");
+
+    // 4. `list_recent_cases` 应合并返回全部 3 个案件，且跨目录最新打开者排首位。
+    let recent = cmd_list_recent_cases(&state).expect("list_recent_cases");
+    assert_eq!(recent.len(), 3, "应合并返回历史案件与默认目录案件");
+    assert_eq!(recent[0].number, "EXT-HIST-03");
+    assert!(recent[0].in_history);
+    assert!(!recent[0].pinned);
+    assert!(recent[0].last_opened_at.is_some());
+    assert!(recent[0].has_evidence);
+    assert!(!recent[0].evidence_missing);
+    assert_eq!(recent[0].inventory_count, scan_res.snapshot.inventory_count);
+
+    let default_item = recent
+        .iter()
+        .find(|c| c.number == "DEFAULT-HIST-02")
+        .expect("default history case present");
+    assert!(default_item.in_history);
+    assert!(default_item.last_opened_at.is_some());
+    assert!(!default_item.evidence_missing);
+
+    let root_only_item = recent
+        .iter()
+        .find(|c| c.number == "ROOT-ONLY-01")
+        .expect("unrecorded cases_dir case present");
+    assert!(!root_only_item.in_history);
+    assert!(root_only_item.last_opened_at.is_none());
+    assert!(!root_only_item.pinned);
+
+    // 校验 camelCase JSON 契约字段名。
+    let first_json = serde_json::to_value(&recent[0]).expect("serialize RecentCaseDto");
+    for key in [
+        "folder",
+        "name",
+        "number",
+        "examiner",
+        "target",
+        "created",
+        "hasEvidence",
+        "inventoryCount",
+        "exportsCount",
+        "lastOpenedAt",
+        "inHistory",
+        "pinned",
+        "evidenceMissing",
+    ] {
+        assert!(
+            first_json.get(key).is_some(),
+            "RecentCaseDto 缺少约定 JSON 键：{key}"
+        );
+    }
+
+    // 5. 重新打开 `default_snap` 应将其置顶到历史最前。
+    std::thread::sleep(Duration::from_millis(20));
+    cmd_open_case(&state, &default_snap.case_dir).expect("reopen default case");
+    cmd_close_case(&state).expect("close reopened default case");
+    let recent_after_reopen = cmd_list_recent_cases(&state).expect("list after reopen");
+    assert_eq!(recent_after_reopen[0].number, "DEFAULT-HIST-02");
+
+    // 6. 移除跨目录案件历史记录：返回 `removed: true`，列表不再包含该跨目录案件，但磁盘文件毫发无损。
+    let rem_res = cmd_remove_recent_case(&state, &ext_snap.case_dir).expect("remove_recent_case");
+    let rem_json = serde_json::to_value(&rem_res).expect("serialize RemoveRecentCaseResponse");
+    assert_eq!(rem_json["removed"], true);
+
+    let rem_again =
+        cmd_remove_recent_case(&state, &ext_snap.case_dir).expect("remove_recent_case again");
+    assert!(!rem_again.removed);
+
+    let recent_after_remove = cmd_list_recent_cases(&state).expect("list after remove");
+    assert!(
+        recent_after_remove
+            .iter()
+            .all(|c| c.number != "EXT-HIST-03"),
+        "移出历史后跨目录案件不应再出现在最近列表"
+    );
+    assert_eq!(recent_after_remove.len(), 2);
+
+    // 确认磁盘上的跨目录案件与默认目录案件均完好无损。
+    let ext_folder_path = PathBuf::from(&ext_snap.case_dir);
+    assert!(ext_folder_path.is_dir(), "移出历史绝不能删除案件目录");
+    assert!(ext_folder_path.join("case.json").is_file(), "case.json 必须保留");
+    assert!(ext_folder_path.join("audit.jsonl").is_file(), "audit.jsonl 必须保留");
+    assert!(unrecorded_folder.join("case.json").is_file());
+
+    state.shutdown_all();
+}
+
+/// Stage B-1 集成测试 2：`evidence_missing` 检测与受 SHA-256 强制校验保护的 `rebind_image_path`
+/// （正常重绑成功 + 篡改镜像拦截拒绝且保留原路径）。
+#[test]
+fn evidence_missing_detection_and_rebind_image_path_with_sha256_guard() {
+    let tmp = tempdir().expect("create tempdir");
+    let cases_dir = tmp.path().join("cases");
+    let orig_drive = tmp.path().join("drive_e");
+    let new_drive = tmp.path().join("drive_f");
+    std::fs::create_dir_all(&cases_dir).expect("mkdir cases");
+    std::fs::create_dir_all(&orig_drive).expect("mkdir orig_drive");
+    std::fs::create_dir_all(&new_drive).expect("mkdir new_drive");
+    let state = make_test_state(cases_dir.clone());
+
+    let orig_img = orig_drive.join("demo_case.dd");
+    let relocated_img = new_drive.join("demo_case_moved.dd");
+    let tampered_img = new_drive.join("demo_case_tampered.dd");
+
+    let raw_bytes = std::fs::read(demo_image_path()).expect("read demo.dd");
+    std::fs::write(&orig_img, &raw_bytes).expect("write orig_img");
+    std::fs::write(&relocated_img, &raw_bytes).expect("write relocated_img");
+    let mut bad_bytes = raw_bytes.clone();
+    let mid = bad_bytes.len() / 2;
+    bad_bytes[mid] ^= 0xFF;
+    std::fs::write(&tampered_img, &bad_bytes).expect("write tampered_img");
+
+    // 1. 新建案件、加载镜像并扫描分区：此时 `evidence_missing == false`。
+    let created = cmd_create_case(
+        &state,
+        &cases_dir.to_string_lossy(),
+        "REBIND-01",
+        "取证员",
+        "镜像重绑测试",
+        None,
+    )
+    .expect("create_case");
+    assert!(!created.evidence_missing);
+
+    let loaded = cmd_load_image(&state, &orig_img.to_string_lossy(), None).expect("load_image");
+    assert!(!loaded.evidence_missing);
+    let loaded_json = serde_json::to_value(&loaded).expect("serialize CaseSnapshot");
+    assert_eq!(loaded_json["evidenceMissing"], false);
+    let expected_sha = loaded
+        .evidence
+        .as_ref()
+        .and_then(|e| e.sha256.clone())
+        .expect("fixed sha256");
+
+    cmd_scan_all_partitions(&state, None).expect("scan_all_partitions");
+    let orig_recorded_path = loaded.evidence.as_ref().unwrap().path.clone();
+
+    // 2. 关闭案件并移除原路径镜像，模拟移动盘符或迁移目录导致的源镜像缺失。
+    cmd_close_case(&state).expect("close_case");
+    std::fs::remove_file(&orig_img).expect("remove orig_img to simulate missing evidence");
+
+    // 最近案件列表应立即识别 `evidenceMissing == true`。
+    let recent = cmd_list_recent_cases(&state).expect("list_recent_cases");
+    let rec = recent
+        .iter()
+        .find(|c| c.number == "REBIND-01")
+        .expect("case in recent");
+    assert!(rec.has_evidence);
+    assert!(rec.evidence_missing, "源镜像缺失时最近案件必须标记 evidenceMissing = true");
+
+    // 重开案件后 `CaseSnapshot.evidence_missing` 也应为 `true`。
+    let reopened = cmd_open_case(&state, &created.case_dir).expect("reopen case with missing image");
+    assert!(reopened.evidence_missing);
+    let reopened_json = serde_json::to_value(&reopened).expect("serialize reopened snapshot");
+    assert_eq!(reopened_json["evidenceMissing"], true);
+
+    // 3. 尝试重绑到单字节篡改镜像：必须被 SHA-256 校验拦截拒绝，且保留原路径不覆盖。
+    let bad_err = cmd_rebind_image_path(&state, &tampered_img.to_string_lossy(), None)
+        .expect_err("tampered image must be rejected by SHA-256 verification");
+    assert!(
+        bad_err.contains("SHA-256") || bad_err.contains("不匹配"),
+        "错误信息应明确指出 SHA-256 校验不匹配，实际：{bad_err}"
+    );
+    let snap_after_reject = cmd_get_case_snapshot(&state)
+        .expect("get_case_snapshot")
+        .expect("case still open");
+    assert!(snap_after_reject.evidence_missing);
+    assert_eq!(
+        snap_after_reject.evidence.as_ref().unwrap().path,
+        orig_recorded_path,
+        "重绑失败后必须完整保留原镜像路径"
+    );
+
+    // 4. 重绑到字节完全一致的新路径镜像：必须通过 SHA-256 校验并刷新快照。
+    let rebind_res = cmd_rebind_image_path(&state, &relocated_img.to_string_lossy(), None)
+        .expect("rebind to identical image must succeed");
+    assert!(rebind_res.verified);
+    assert_eq!(rebind_res.sha256, expected_sha);
+    assert_eq!(rebind_res.segment_count, 1);
+    assert_eq!(rebind_res.old_image, orig_recorded_path);
+    assert!(!rebind_res.snapshot.evidence_missing);
+    assert_eq!(
+        rebind_res.snapshot.evidence.as_ref().unwrap().path,
+        rebind_res.new_image
+    );
+
+    // 校验 `RebindImageResponse` camelCase JSON 契约字段名。
+    let rebind_json = serde_json::to_value(&rebind_res).expect("serialize RebindImageResponse");
+    for key in [
+        "snapshot",
+        "oldImage",
+        "newImage",
+        "sha256",
+        "verified",
+        "segmentCount",
+    ] {
+        assert!(
+            rebind_json.get(key).is_some(),
+            "RebindImageResponse 缺少约定 JSON 键：{key}"
+        );
+    }
+    assert_eq!(rebind_json["snapshot"]["evidenceMissing"], false);
+
+    // 重绑后最近案件列表的 `evidence_missing` 恢复为 `false`，且文件预览可从新路径正常读取。
+    let recent_after = cmd_list_recent_cases(&state).expect("list_recent_cases after rebind");
+    let rec_after = recent_after
+        .iter()
+        .find(|c| c.number == "REBIND-01")
+        .expect("case in recent after rebind");
+    assert!(!rec_after.evidence_missing);
+
+    let page = cmd_query_files_page(&state, None, None, ".txt", "CASE", "active", 0, 50, Some(false))
+        .expect("query CASE.TXT after rebind");
+    assert_eq!(page.total, 1);
+    let preview = cmd_preview_file_page(&state, &page.items[0].entry_id, 0, Some(4096), "UTF-8")
+        .expect("preview CASE.TXT from relocated image");
+    assert!(preview.text.contains("Case note inside a nested directory."));
+
+    // 审计日志应记录失败与成功两条 `IMAGE_REBIND` 记录且哈希链校验通过。
+    let audit = cmd_list_audit_log(&state, "", None, None, Some("IMAGE_REBIND"), None, "seq", false)
+        .expect("list IMAGE_REBIND audit");
+    assert!(audit.valid);
+    assert_eq!(audit.records.len(), 2);
+    assert_eq!(audit.records[0].result, "失败");
+    assert_eq!(audit.records[0].action_title, "重绑源镜像路径");
+    assert_eq!(audit.records[1].result, "成功");
+    assert_eq!(audit.records[1].action_title, "重绑源镜像路径");
+
+    state.shutdown_all();
+}
+
+/// Stage B-1 集成测试 3：`scan_magic_mismatches` 自动写入 `.cache/magic-scan.json`，
+/// 经 `load_cached_magic_scan` 秒级恢复（重开案件同样命中缓存）。
+#[test]
+fn magic_scan_disk_cache_persistence_and_reopen_hit() {
+    let tmp = tempdir().expect("create tempdir");
+    let cases_dir = tmp.path().join("cases");
+    std::fs::create_dir_all(&cases_dir).expect("mkdir cases");
+    let state = make_test_state(cases_dir.clone());
+
+    // 构造含真实 PNG-in-TXT 魔数伪装的镜像副本。
+    let mut img_bytes = std::fs::read(demo_image_path()).expect("read demo.dd");
+    let marker = b"Case note inside a nested directory.";
+    let pos = img_bytes
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .expect("locate DOCS/CASE.TXT payload");
+    let png_header: [u8; 16] = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52,
+    ];
+    img_bytes[pos..pos + png_header.len()].copy_from_slice(&png_header);
+    let spoof_img = tmp.path().join("demo_magic_cache.dd");
+    std::fs::write(&spoof_img, &img_bytes).expect("write spoof image");
+
+    let snap = cmd_create_case(
+        &state,
+        &cases_dir.to_string_lossy(),
+        "MAGIC-CACHE-01",
+        "取证员",
+        "魔数扫描缓存测试",
+        None,
+    )
+    .expect("create_case");
+    cmd_load_image(&state, &spoof_img.to_string_lossy(), None).expect("load_image");
+    cmd_scan_all_partitions(&state, None).expect("scan_all_partitions");
+
+    // 1. 首次扫描前缓存不存在，返回 `None`。
+    assert!(
+        cmd_load_cached_magic_scan(&state)
+            .expect("load_cached before scan")
+            .is_none()
+    );
+
+    // 2. 执行扫描后自动落盘 `<case_folder>/.cache/magic-scan.json`。
+    let report = cmd_scan_magic_mismatches(&state).expect("scan_magic_mismatches");
+    assert!(!report.cancelled);
+    assert!(report.mismatch_count >= 1);
+    let cache_file = PathBuf::from(&snap.case_dir)
+        .join(".cache")
+        .join("magic-scan.json");
+    assert!(cache_file.is_file(), "魔数扫描完成后应落盘 .cache/magic-scan.json");
+
+    // 3. 当次会话直接读取缓存命中且内容完全一致。
+    let cached_now = cmd_load_cached_magic_scan(&state)
+        .expect("load_cached after scan")
+        .expect("cache hit in same session");
+    assert_eq!(cached_now, report);
+
+    // 4. 关闭案件后读取缓存安全返回 `None`；重新打开案件后立即命中同一份磁盘缓存。
+    cmd_close_case(&state).expect("close_case");
+    assert!(
+        cmd_load_cached_magic_scan(&state)
+            .expect("load_cached when closed")
+            .is_none()
+    );
+
+    cmd_open_case(&state, &snap.case_dir).expect("reopen_case");
+    let cached_reopen = cmd_load_cached_magic_scan(&state)
+        .expect("load_cached after reopen")
+        .expect("cache hit after reopen");
+    assert_eq!(cached_reopen, report);
+    assert!(
+        cached_reopen
+            .mismatches
+            .iter()
+            .any(|m| m.path == "DOCS/CASE.TXT" && m.detected_type == "PNG")
+    );
 
     state.shutdown_all();
 }

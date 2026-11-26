@@ -312,7 +312,8 @@ fn case_lock_isolation_and_legacy_inline_inventory_migration() {
     migrated.close();
 
     let after: Value = serde_json::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
-    assert!(after.get("inventory_file").is_some());
+    assert!(after.get("inventory_files").is_some());
+    assert!(after.get("inventory_file").is_none());
     assert_eq!(after["inventory_count"], json!(1));
     assert!(after.get("inventory").is_none());
 }
@@ -1468,4 +1469,409 @@ fn preview_direct_volume_routing_for_small_and_deleted_ntfs_plus_route3_truncati
     assert!(capped_page.read_note.contains("截断"));
     let capped_json = serde_json::to_value(&capped_page).expect("serialize capped page");
     assert_eq!(capped_json.get("truncated"), Some(&json!(true)));
+}
+
+#[test]
+fn audit_head_atomic_sync_and_case_json_bak_generation() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut case = Case::create(
+        tmp.path(),
+        "BAK-001",
+        "取证员B",
+        "原子刷盘与容灾备份测试",
+        None,
+        None,
+        AuditOrigin::Manual,
+    )
+    .expect("create case");
+
+    let case_dir = case.folder().to_path_buf();
+    let case_json = case_dir.join("case.json");
+    let case_bak = case_dir.join("case.json.bak");
+    // 首次新建案件时 `case.json` 之前不存在，因此尚未生成 `.bak`。
+    assert!(!case_bak.exists());
+    let first_case_json = fs::read_to_string(&case_json).expect("read first case.json");
+
+    // 再次保存 `case.json`：必须在覆盖前原子生成包含上一版有效内容的 `case.json.bak`。
+    case.save(false, None).expect("second save");
+    assert!(case_bak.is_file(), "覆盖 case.json 后应自动生成 case.json.bak");
+    let bak_content = fs::read_to_string(&case_bak).expect("read case.json.bak");
+    assert_eq!(bak_content, first_case_json);
+
+    // 连续写入足够多的审计记录（使 `audit.jsonl` 超过 64 KiB 块边界），
+    // 验证流式 `audit_fast_check` 与 `write_bytes_atomic_sync` 均稳定且无临时文件残留。
+    let pad = "X".repeat(2048);
+    for i in 0..45u64 {
+        let mut details = Map::new();
+        details.insert("idx".to_string(), json!(i));
+        details.insert("payload".to_string(), json!(pad));
+        case.log("FILE_FILTER", "*.log", "成功", details)
+            .expect("log large audit entry");
+    }
+    let audit_len = fs::metadata(case_dir.join("audit.jsonl")).unwrap().len();
+    assert!(
+        audit_len > 64 * 1024,
+        "audit.jsonl 应超过 64 KiB 以覆盖多块流式 SHA-256 校验（当前 {audit_len} 字节）"
+    );
+
+    let raw_head = fs::read(case_dir.join("audit.head")).expect("read audit.head");
+    assert_eq!(raw_head.len(), 64);
+    assert!(!raw_head.contains(&b'\n'));
+    assert!(!raw_head.contains(&b'\r'));
+
+    // 目录中不应残留任何 `.tmp` / `.head.tmp` / `.bak.tmp` 临时文件。
+    for entry in fs::read_dir(&case_dir).expect("read case dir") {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        assert!(
+            !name.ends_with(".tmp"),
+            "案件目录不应残留临时文件：{name}"
+        );
+    }
+
+    let records = case.check_audit().expect("verify full audit chain");
+    assert_eq!(records.len(), 46);
+    case.close();
+}
+
+#[test]
+fn legacy_single_file_inventory_case_opens_and_migrates_cleanly() {
+    use tracedesk_core::write_inventory_gz;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut case = Case::create(
+        tmp.path(),
+        "LEGACY-GZ-001",
+        "取证员C",
+        "旧版单文件清单兼容测试",
+        None,
+        None,
+        AuditOrigin::Manual,
+    )
+    .expect("create case");
+    let folder = case.folder().to_path_buf();
+    case.close();
+
+    // 构造旧版单文件 `inventory-<32hex>.jsonl.gz` 与对应的 `case.json`。
+    let legacy_name = "inventory-0123456789abcdef0123456789abcdef.jsonl.gz";
+    let entries = vec![
+        make_entry("A.TXT", 2048, "10", 64, false, false),
+        make_entry("B.TXT", 40960, "20", 128, false, false),
+    ];
+    write_inventory_gz(&folder.join(legacy_name), &entries, None).expect("write legacy gz");
+
+    let meta_path = folder.join("case.json");
+    let mut raw: Value = serde_json::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
+    let obj = raw.as_object_mut().unwrap();
+    obj.remove("inventory");
+    obj.remove("inventory_files");
+    obj.insert("inventory_file".to_string(), json!(legacy_name));
+    obj.insert("inventory_count".to_string(), json!(2));
+    save_json_atomic(&meta_path, &raw).expect("save legacy single-file case.json");
+
+    // 1. 打开旧版单文件案件：100% 兼容且不破坏旧文件。
+    let mut reopened = Case::open(&folder, None, AuditOrigin::Manual).expect("open legacy case");
+    assert_eq!(reopened.data().inventory.len(), 2);
+    assert_eq!(reopened.data().inventory[0].path, "A.TXT");
+    assert_eq!(reopened.data().inventory[1].path, "B.TXT");
+    let legacy_key = reopened.inventory_cache_key();
+    assert_eq!(legacy_key.len(), 16);
+
+    // 仅保存元数据时仍保留旧版单文件引用。
+    reopened.save(false, None).expect("save metadata only");
+    assert!(folder.join(legacy_name).is_file());
+    let mid_doc: Value = serde_json::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
+    assert_eq!(mid_doc["inventory_file"], json!(legacy_name));
+
+    // 2. 触发全量清单重写：升级为分分区 `inventory_files` 并自动清理旧单文件。
+    reopened.save(true, None).expect("migrate to partitioned");
+    assert!(
+        !folder.join(legacy_name).exists(),
+        "迁移为分分区清单后应清理旧单文件"
+    );
+    assert_eq!(reopened.inventory_files().len(), 2);
+    assert!(reopened.inventory_files().contains_key(&2048));
+    assert!(reopened.inventory_files().contains_key(&40960));
+    let new_key = reopened.inventory_cache_key();
+    assert_ne!(legacy_key, new_key);
+    reopened.close();
+
+    // 3. 重新打开分分区案件（触发 rayon 并行解压），清单与指纹完全一致。
+    let mut reopened2 = Case::open(&folder, None, AuditOrigin::Manual).expect("reopen partitioned");
+    assert_eq!(reopened2.data().inventory, entries);
+    assert_eq!(reopened2.inventory_cache_key(), new_key);
+    reopened2.close();
+}
+
+#[test]
+fn partitioned_inventory_single_partition_scan_preserves_untouched_partition_file_and_mtime() {
+    use std::time::{Duration, SystemTime};
+    use tracedesk_core::write_inventory_gz;
+
+    let paths = AppPaths::discover();
+    let demo_dd = paths.evidence_dir.join("demo.dd");
+    assert!(demo_dd.is_file(), "demo.dd missing at {}", demo_dd.display());
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut case = Case::create(
+        tmp.path(),
+        "PART-INC-001",
+        "取证员D",
+        "单分区增量扫描不重压未变更分区测试",
+        None,
+        None,
+        AuditOrigin::Manual,
+    )
+    .expect("create case");
+    case.load_image(&demo_dd, None, None, None)
+        .expect("load demo.dd");
+    let scanned = case
+        .scan_partitions(None, None, None)
+        .expect("initial scan_partitions");
+    assert_eq!(scanned.len(), 13);
+    assert_eq!(case.inventory_files().len(), 1);
+    let orig_p2048_file = case.inventory_files()[&2048].clone();
+    let folder = case.folder().to_path_buf();
+    case.close();
+
+    // 在 `case.json` 中注入一个已存在的第二分区清单文件（offset = 99999），模拟多分区已扫描案件，
+    // 并将其 mtime 设为 60 秒前以精确验证增量扫描不会重写或触碰该分区文件。
+    let untouched_offset: u64 = 99999;
+    let untouched_name = "inventory-p99999-abcdef0123456789abcdef0123456789.jsonl.gz";
+    let untouched_entries = vec![
+        make_entry("PART2/ALPHA.TXT", untouched_offset, "501", 42, false, false),
+        make_entry("PART2/BETA.TXT", untouched_offset, "502", 84, false, false),
+    ];
+    let untouched_path = folder.join(untouched_name);
+    write_inventory_gz(&untouched_path, &untouched_entries, None).expect("write part2 gz");
+    let past_mtime = SystemTime::now() - Duration::from_secs(60);
+    {
+        let f = OpenOptions::new().write(true).open(&untouched_path).unwrap();
+        f.set_modified(past_mtime).unwrap();
+    }
+    let expected_untouched_mtime = fs::metadata(&untouched_path).unwrap().modified().unwrap();
+
+    let meta_path = folder.join("case.json");
+    let mut doc: Value = serde_json::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
+    doc["inventory_files"][untouched_offset.to_string()] = json!(untouched_name);
+    doc["inventory_count"] = json!(15);
+    doc["partition_scans"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "offset": untouched_offset,
+            "status": "ready",
+            "count": 2
+        }));
+    save_json_atomic(&meta_path, &doc).expect("save 2-partition case.json");
+
+    // 重新打开：rayon 并行加载 2 个分区共 15 条记录，且按 offset 升序拼接。
+    let mut case2 = Case::open(&folder, None, AuditOrigin::Manual).expect("open 2-part case");
+    assert_eq!(case2.data().inventory.len(), 15);
+    assert_eq!(case2.inventory_files().len(), 2);
+    assert_eq!(case2.inventory_files()[&2048], orig_p2048_file);
+    assert_eq!(case2.inventory_files()[&untouched_offset], untouched_name);
+
+    // 仅增量扫描分区 2048：
+    // - 分区 2048 应写出新的 `.jsonl.gz` 并删除旧的 `orig_p2048_file`；
+    // - 未变更分区 99999 的文件名、mtime 与全部条目必须保持 100% 不变！
+    let rescan = case2.scan_partition(2048, None, None).expect("scan_partition 2048");
+    assert_eq!(rescan.len(), 13);
+    assert_eq!(case2.data().inventory.len(), 15);
+    let new_p2048_file = case2.inventory_files()[&2048].clone();
+    assert_ne!(new_p2048_file, orig_p2048_file);
+    assert!(!folder.join(&orig_p2048_file).exists(), "旧 2048 分区文件应被清理");
+    assert!(folder.join(&new_p2048_file).is_file());
+
+    assert_eq!(case2.inventory_files()[&untouched_offset], untouched_name);
+    let actual_untouched_mtime = fs::metadata(&untouched_path).unwrap().modified().unwrap();
+    assert_eq!(
+        actual_untouched_mtime, expected_untouched_mtime,
+        "未变更分区的 .jsonl.gz 文件 mtime 必须保持不变"
+    );
+    let expected_inventory = case2.data().inventory.clone();
+    let expected_cache_key = case2.inventory_cache_key();
+    case2.close();
+
+    // 再次重开验证并行加载完整一致。
+    let mut case3 = Case::open(&folder, None, AuditOrigin::Manual).expect("reopen after inc scan");
+    assert_eq!(case3.data().inventory, expected_inventory);
+    assert_eq!(case3.inventory_cache_key(), expected_cache_key);
+    case3.close();
+
+    // 路径穿越防御：篡改 `inventory_files` 指向父目录文件时必须被 `CorruptCase` 拦截。
+    let mut bad_doc: Value = serde_json::from_str(&fs::read_to_string(&meta_path).unwrap()).unwrap();
+    bad_doc["inventory_files"]["2048"] = json!("../escape.jsonl.gz");
+    save_json_atomic(&meta_path, &bad_doc).expect("write traversal case.json");
+    let err = Case::open(&folder, None, AuditOrigin::Manual).err().expect("reject traversal");
+    assert!(matches!(err, CoreError::CorruptCase(_)));
+}
+
+#[test]
+fn rebind_image_path_enforces_sha256_and_restores_all_operations() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tracedesk_core::action_title;
+
+    let paths = AppPaths::discover();
+    let demo_dd = paths.evidence_dir.join("demo.dd");
+    assert!(demo_dd.is_file(), "demo.dd missing at {}", demo_dd.display());
+
+    let cases_root = tempfile::tempdir().expect("cases root");
+    let external_dir = tempfile::tempdir().expect("external evidence dir");
+
+    let mut case = Case::create(
+        cases_root.path(),
+        "REBIND-001",
+        "取证员E",
+        "重绑源镜像强制 SHA-256 校验测试",
+        None,
+        None,
+        AuditOrigin::Manual,
+    )
+    .expect("create case");
+    assert!(!case.evidence_exists());
+    // 未加载镜像时调用重绑必须返回 InvalidInput。
+    assert!(matches!(
+        case.rebind_image_path(&demo_dd, None, None),
+        Err(CoreError::InvalidInput(_))
+    ));
+
+    // 拷贝一份作为原始加载镜像，以便后续模拟原路径失效/移动。
+    let orig_img = external_dir.path().join("original_demo.dd");
+    fs::copy(&demo_dd, &orig_img).expect("copy orig demo");
+    case.load_image(&orig_img, None, None, None)
+        .expect("load original image");
+    assert!(case.evidence_exists());
+    let orig_sha = case
+        .data()
+        .evidence
+        .as_ref()
+        .and_then(|e| e.sha256.clone())
+        .expect("fixed sha256");
+    let inventory = case
+        .scan_partitions(None, None, None)
+        .expect("scan partitions");
+    let readme = inventory
+        .iter()
+        .find(|e| e.path == "README.TXT" && !e.deleted)
+        .expect("README.TXT")
+        .clone();
+    let orig_bound_path = case.image_path().expect("orig path");
+
+    // 1. 案件库内部路径必须被隔离边界拒绝。
+    let inside_img = cases_root.path().join("inside_copy.dd");
+    fs::copy(&demo_dd, &inside_img).expect("copy inside");
+    assert!(matches!(
+        case.rebind_image_path(&inside_img, None, None),
+        Err(CoreError::InvalidInput(_))
+    ));
+    assert_eq!(case.image_path().unwrap(), orig_bound_path);
+
+    // 2. 同大小但内容被篡改 1 字节的镜像：必须返回 IntegrityFailed，写入失败审计且绝不修改原路径！
+    let tampered_img = external_dir.path().join("tampered_demo.dd");
+    let mut tampered_bytes = fs::read(&demo_dd).expect("read demo.dd");
+    tampered_bytes[4096] ^= 0xFF;
+    fs::write(&tampered_img, &tampered_bytes).expect("write tampered");
+
+    let err_tampered = case
+        .rebind_image_path(&tampered_img, None, None)
+        .expect_err("tampered image must be rejected");
+    assert!(
+        matches!(err_tampered, CoreError::IntegrityFailed(_)),
+        "expected IntegrityFailed, got: {err_tampered:?}"
+    );
+    assert_eq!(
+        case.image_path().unwrap(),
+        orig_bound_path,
+        "校验失败绝不能修改原镜像路径"
+    );
+
+    // 3. 不同大小的镜像：同样必须返回 IntegrityFailed 且不修改原路径。
+    let different_size_img = external_dir.path().join("small_other.dd");
+    fs::write(&different_size_img, vec![0u8; 4096]).expect("write other");
+    assert!(matches!(
+        case.rebind_image_path(&different_size_img, None, None),
+        Err(CoreError::IntegrityFailed(_))
+    ));
+    assert_eq!(case.image_path().unwrap(), orig_bound_path);
+
+    // 验证失败审计已落盘且操作标题已注册。
+    assert_eq!(action_title("IMAGE_REBIND"), "重绑源镜像路径");
+    let records_after_fail = case.check_audit().expect("check audit after fail");
+    let fail_rebinds: Vec<_> = records_after_fail
+        .iter()
+        .filter(|r| r.action == "IMAGE_REBIND" && r.result == "失败")
+        .collect();
+    assert_eq!(fail_rebinds.len(), 2);
+
+    // 4. 模拟原镜像被移动到新路径（关闭释放句柄后移动，再重新打开检查 evidence_exists == false）。
+    let case_dir = case.folder().to_path_buf();
+    case.close();
+    let moved_img = external_dir.path().join("relocated").join("moved_demo.dd");
+    fs::create_dir_all(moved_img.parent().unwrap()).expect("mkdir relocated");
+    fs::rename(&orig_img, &moved_img).expect("move orig_img");
+
+    let mut reopened = Case::open(&case_dir, None, AuditOrigin::Manual).expect("reopen case");
+    assert!(
+        !reopened.evidence_exists(),
+        "原镜像已移动后 evidence_exists 应返回 false"
+    );
+
+    // 5. 合法重绑到新路径：验证进度回调、返回值、审计记录以及后续校验/预览/导出全部正常！
+    let max_seen = AtomicU64::new(0);
+    let progress_cb = |done: u64, _total: u64| {
+        max_seen.fetch_max(done, Ordering::Relaxed);
+    };
+    let rebind_res = reopened
+        .rebind_image_path(&moved_img, None, Some(&progress_cb))
+        .expect("rebind to valid moved image");
+    assert_eq!(rebind_res.sha256, orig_sha);
+    assert!(rebind_res.verified);
+    assert_eq!(rebind_res.segment_count, 1);
+    assert_eq!(rebind_res.old_image, orig_bound_path.to_string_lossy());
+    assert!(rebind_res.new_image.ends_with("moved_demo.dd"));
+    assert!(max_seen.load(Ordering::Relaxed) > 0, "应触发流式哈希进度回调");
+    assert!(reopened.evidence_exists());
+    assert!(reopened.is_session_verified());
+
+    // 重绑后：完整性校验、预览、导出均应正常工作。
+    assert!(
+        reopened
+            .verify_integrity(None, None, None)
+            .expect("verify after rebind")
+    );
+    let new_img_path = reopened.image_path().expect("new image path");
+    let mut sess = PreviewSession::open(&new_img_path, &readme, None).expect("preview after rebind");
+    let page = sess
+        .read_page(0, 4096, PreviewEncoding::Utf8)
+        .expect("read preview page");
+    assert!(page.text.contains("TraceDesk"));
+    drop(sess);
+
+    let exported = reopened.export(&readme, None).expect("export after rebind");
+    assert!(exported.is_file());
+
+    // 审计链包含 IMAGE_REBIND 成功记录且携带关键字段。
+    let final_records = reopened.check_audit().expect("final audit check");
+    let ok_rebind = final_records
+        .iter()
+        .find(|r| r.action == "IMAGE_REBIND" && r.result == "成功")
+        .expect("IMAGE_REBIND success record");
+    assert_eq!(ok_rebind.details["sha256"], json!(orig_sha));
+    assert_eq!(ok_rebind.details["verified"], json!(true));
+    assert_eq!(
+        ok_rebind.details["old_image"],
+        json!(orig_bound_path.to_string_lossy())
+    );
+    assert_eq!(ok_rebind.details["new_image"], json!(rebind_res.new_image));
+    reopened.close();
+
+    // 重新打开后持久化路径保持有效。
+    let mut reopened2 = Case::open(&case_dir, None, AuditOrigin::Manual).expect("reopen after rebind");
+    assert!(reopened2.evidence_exists());
+    assert_eq!(
+        reopened2.image_path().unwrap().to_string_lossy(),
+        rebind_res.new_image
+    );
+    reopened2.check_audit().expect("reopen audit check");
+    reopened2.close();
 }

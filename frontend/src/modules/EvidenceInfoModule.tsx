@@ -16,6 +16,8 @@ interface EvidenceInfoModuleProps {
   snapshot: CaseSnapshot | null;
   busy: boolean;
   onRegisterSource: () => void;
+  /** 重新定位/重绑源证据镜像路径（含 SHA-256 基线核验） */
+  onRebindImagePath: () => void;
   onExportFsstat: (offset: number) => void;
   /** 大镜像按需模式下对指定偏移分区执行“仅索引此分区” */
   onScanPartition: (offset: number) => void;
@@ -86,6 +88,7 @@ const EvidenceInfoModuleInner: React.FC<EvidenceInfoModuleProps> = ({
   snapshot,
   busy,
   onRegisterSource,
+  onRebindImagePath,
   onExportFsstat,
   onScanPartition,
 }) => {
@@ -219,12 +222,28 @@ const EvidenceInfoModuleInner: React.FC<EvidenceInfoModuleProps> = ({
     ? `${partitions.length} 个分区 · ${snapshot?.inventoryCount ?? 0} 个条目 · 应用层只读`
     : '加载 RAW 镜像或 E01 首段后查看摘要与覆盖范围。';
 
+  const evidenceMissing = Boolean(snapshot?.evidenceMissing && evidence);
+
   return (
     <div className="td-panel">
       <div className="td-panel-top-bar">
         <span className="td-section-title" style={{ flex: 1 }}>
           镜像摘要与证据来源
         </span>
+        <button
+          type="button"
+          className="td-btn"
+          disabled={busy || !evidence}
+          title="重新指定源镜像磁盘路径（换盘符或迁移目录后，需通过 SHA-256 核验方可更新）"
+          onClick={onRebindImagePath}
+        >
+          <UiIcon
+            name="locate"
+            size={14}
+            color={busy || !evidence ? 'var(--text-disabled)' : 'var(--text-secondary)'}
+          />
+          重绑镜像路径
+        </button>
         <button
           type="button"
           className="td-btn td-btn--soft"
@@ -234,6 +253,30 @@ const EvidenceInfoModuleInner: React.FC<EvidenceInfoModuleProps> = ({
           登记证据来源
         </button>
       </div>
+
+      {/* 源证据镜像路径失效柔和告警条：支持一键校验重绑 */}
+      {evidenceMissing && evidence && (
+        <div className="td-evidence-missing-banner" role="alert">
+          <span className="td-evidence-missing-icon" aria-hidden="true">
+            <UiIcon name="warning" size={16} color="var(--warn-fg)" />
+          </span>
+          <div className="td-evidence-missing-copy">
+            <div className="td-evidence-missing-title">源证据镜像路径已失效，当前无法读取原镜像字节内容</div>
+            <div className="td-evidence-missing-desc">
+              原路径：<span className="td-mono">{evidence.path}</span> · 若镜像已迁移目录或更换盘符，请重新定位并由系统核验 SHA-256 一致后安全重绑。
+            </div>
+          </div>
+          <button
+            type="button"
+            className="td-btn td-btn--warningAction"
+            disabled={busy}
+            onClick={onRebindImagePath}
+          >
+            <UiIcon name="locate" size={14} color="var(--warn-fg)" />
+            重新定位源镜像…
+          </button>
+        </div>
+      )}
 
       <SplitPane
         direction="vertical"

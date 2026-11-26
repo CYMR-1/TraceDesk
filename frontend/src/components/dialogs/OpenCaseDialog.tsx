@@ -164,6 +164,14 @@ export const OpenCaseDialog: React.FC<OpenCaseDialogProps> = ({
             <div className="td-recent-list td-recent-list--dialog">
               {recentCases.map((item) => {
                 const isOpening = submitting && openingPath === item.folder;
+                // 优先展示最近打开时间，缺省时回退展示创建时间
+                const displayTimeRaw = item.lastOpenedAt || item.created;
+                const formattedTime = formatCaseTimestamp(displayTimeRaw);
+                const timeTooltip = item.lastOpenedAt
+                  ? `最近打开：${item.lastOpenedAt}`
+                  : item.created
+                    ? `创建时间：${item.created}`
+                    : undefined;
                 return (
                   <button
                     key={item.folder}
@@ -175,25 +183,35 @@ export const OpenCaseDialog: React.FC<OpenCaseDialogProps> = ({
                   >
                     <div className="td-recent-card-head">
                       <span className="td-recent-card-number td-mono">{item.number || item.name}</span>
-                      <span
-                        className={`td-recent-badge ${item.hasEvidence ? 'td-recent-badge--ready' : 'td-recent-badge--empty'}`}
-                      >
-                        {isOpening
-                          ? '正在打开…'
-                          : item.hasEvidence
-                            ? `已载入镜像 · ${item.inventoryCount.toLocaleString()} 项`
-                            : '待载入镜像'}
-                      </span>
+                      <div className="td-recent-card-badges">
+                        {item.evidenceMissing && (
+                          <span
+                            className="td-recent-badge td-recent-badge--missing"
+                            title="原证据镜像路径已失效，打开案件后可一键重新定位并校验重绑"
+                          >
+                            镜像路径失效
+                          </span>
+                        )}
+                        <span
+                          className={`td-recent-badge ${item.hasEvidence ? 'td-recent-badge--ready' : 'td-recent-badge--empty'}`}
+                        >
+                          {isOpening
+                            ? '正在打开…'
+                            : item.hasEvidence
+                              ? `已载入镜像 · ${item.inventoryCount.toLocaleString()} 项`
+                              : '待载入镜像'}
+                        </span>
+                      </div>
                     </div>
                     <div className="td-recent-card-meta">
                       <span>对象：{item.target || '—'}</span>
                       <span>·</span>
                       <span>人员：{item.examiner || '—'}</span>
-                      {item.created && (
+                      {formattedTime && (
                         <>
                           <span>·</span>
-                          <span className="td-mono" title={item.created}>
-                            {formatCaseTimestamp(item.created)}
+                          <span className="td-mono" title={timeTooltip}>
+                            {formattedTime}
                           </span>
                         </>
                       )}

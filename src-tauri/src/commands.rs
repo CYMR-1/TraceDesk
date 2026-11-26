@@ -14,7 +14,12 @@ use rayon::prelude::*;
 use serde_json::{Map, Value, json};
 use tauri::{AppHandle, Emitter, State};
 use tracedesk_core::magic::{
-    MagicCheckItem, MagicScanReport, inspect_entry_magic_at_image, scan_entries_magic_mismatches,
+    MagicCheckItem, MagicScanReport, inspect_entry_magic_at_image, load_magic_scan_cache,
+    save_magic_scan_cache, scan_entries_magic_mismatches,
+};
+use tracedesk_core::recent_cases::{
+    list_recent_case_records_at, merge_recent_case_folders_at, record_recent_case_at,
+    remove_recent_case_at,
 };
 use tracedesk_core::review::verify_bundle_detailed;
 use tracedesk_mcp::McpActivitySnapshot;
@@ -37,7 +42,6 @@ use tracedesk_engines::{
 };
 use uuid::Uuid;
 
-use crate::mcp_http::mcp_list_cases;
 use crate::state::{
     AppPathsDto, AppState, AuditFilterOptionsDto, AuditRecordDto, BookmarkSearchHitsResponse,
     BrowseDirectoryResponse, BuildTimelineResponse, BundleCrossCheckDto, BundleExportRowDto,
@@ -47,12 +51,13 @@ use crate::state::{
     FindingGroupDto, FindingRecordDto, GuidePageDto, HashFinishedEvent, HashProgressEvent,
     HexRowDto, HtmlReportDto, ListAuditLogResponse, ListFindingsResponse, LocateFileResponse,
     McpStatus, OpenInOsResponse, PathAndSnapshotResponse, PathResponse, PreviewImageResponse,
-    PreviewPageResponse, QueryFilesPageResponse, QueryTimelinePageResponse, RecentCaseDto,
-    ScanPartitionsResponse, SearchFinishedEvent, SearchHitDto, SearchHitsEvent,
-    SearchProgressEvent, SearchSessionState, SnapshotResponse, StartContentSearchResponse,
-    StoredSearchHit, SuggestCaseDirResponse, TaskFinishedEvent, TaskProgressEvent,
-    TaskStartedEvent, TimelineFilterOptionsDto, TimelineRowDto, TreeChildrenResponse,
-    TreeNodeIpcDto, VerifyIntegrityResponse, entry_to_view, infer_entry_icon_kind,
+    PreviewPageResponse, QueryFilesPageResponse, QueryTimelinePageResponse, RebindImageResponse,
+    RecentCaseDto, RemoveRecentCaseResponse, ScanPartitionsResponse, SearchFinishedEvent,
+    SearchHitDto, SearchHitsEvent, SearchProgressEvent, SearchSessionState, SnapshotResponse,
+    StartContentSearchResponse, StoredSearchHit, SuggestCaseDirResponse, TaskFinishedEvent,
+    TaskProgressEvent, TaskStartedEvent, TimelineFilterOptionsDto, TimelineRowDto,
+    TreeChildrenResponse, TreeNodeIpcDto, VerifyIntegrityResponse, entry_to_view,
+    infer_entry_icon_kind,
 };
 
 /* ==========================================================================================
@@ -178,6 +183,7 @@ pub fn cmd_create_case(
     // 切换至新建案件前清理旧案件残留的搜索会话与热刷新脏标记，避免内存泄漏或跨案误存书签。
     state.clear_search_sessions();
     state.clear_disk_dirty();
+    let case_folder = new_case.folder().to_path_buf();
     let mut view = state
         .view
         .write()
@@ -185,6 +191,10 @@ pub fn cmd_create_case(
     view.sync_from_case(&new_case, true);
     let snap = view.snapshot.clone().expect("snapshot created");
     *case_guard = Some(new_case);
+    drop(view);
+    drop(case_guard);
+    // 将新建案件记录至跨目录最近案件历史清单（写入失败绝不阻断建案）。
+    let _ = record_recent_case_at(&state.recent_cases_path(), &case_folder);
     Ok(snap)
 }
 
@@ -250,6 +260,7 @@ pub fn cmd_open_case(state: &Arc<AppState>, case_path: &str) -> Result<CaseSnaps
     state.clear_search_sessions();
     state.clear_disk_dirty();
 
+    let opened_folder = opened.folder().to_path_buf();
     let mut view = state
         .view
         .write()
@@ -257,6 +268,10 @@ pub fn cmd_open_case(state: &Arc<AppState>, case_path: &str) -> Result<CaseSnaps
     view.sync_from_case(&opened, true);
     let snap = view.snapshot.clone().expect("snapshot created");
     *case_guard = Some(opened);
+    drop(view);
+    drop(case_guard);
+    // 将已打开案件记录至跨目录最近案件历史清单（写入失败绝不阻断开案）。
+    let _ = record_recent_case_at(&state.recent_cases_path(), &opened_folder);
     Ok(snap)
 }
 
@@ -294,61 +309,149 @@ pub fn cmd_get_case_snapshot(state: &Arc<AppState>) -> Result<Option<CaseSnapsho
     Ok(view.snapshot.clone())
 }
 
-pub fn cmd_list_recent_cases(state: &Arc<AppState>) -> Result<Vec<RecentCaseDto>, String> {
-    let val = mcp_list_cases(state, None, 50, 0)?;
-    let mut list = Vec::new();
-    if let Some(items) = val.get("items").and_then(Value::as_array) {
-        for item in items {
-            if item.get("status").and_then(Value::as_str) != Some("ok") {
-                continue;
-            }
-            list.push(RecentCaseDto {
-                folder: item
-                    .get("folder")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                name: item
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                number: item
-                    .get("number")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                examiner: item
-                    .get("examiner")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                target: item
-                    .get("target")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                created: item
-                    .get("created")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                has_evidence: item
-                    .get("has_evidence")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                inventory_count: item
-                    .get("inventory_count")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as usize,
-                exports_count: item
-                    .get("exports_count")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as usize,
-            });
-        }
+/// 轻量检查 `case.json` 中记录的源镜像路径在磁盘上是否存在（EWF 格式同步校验连续分段）。
+fn check_evidence_path_exists(raw_path: &str, is_ewf: bool) -> bool {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return false;
     }
+    let path = Path::new(trimmed);
+    if !path.is_file() {
+        return false;
+    }
+    if is_ewf {
+        let is_e01 = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("e01"));
+        if !is_e01 {
+            return false;
+        }
+        return ewf::discover_segments(path)
+            .map(|parts| !parts.is_empty() && parts.iter().all(|p| p.is_file()))
+            .unwrap_or(false);
+    }
+    true
+}
+
+/// 合并跨目录最近案件历史与默认 `cases/` 根目录，逐个轻量读取 `case.json` 摘要元数据
+/// （绝不解压 `.jsonl.gz` 清单文件），兼容 `inventory_files`、`inventory_file`、`inventory_count` 与 `inventory`。
+pub fn cmd_list_recent_cases(state: &Arc<AppState>) -> Result<Vec<RecentCaseDto>, String> {
+    let merged = merge_recent_case_folders_at(
+        &state.recent_cases_path(),
+        &state.app_paths.cases_dir,
+        50,
+    );
+    let mut list = Vec::with_capacity(merged.len());
+
+    for entry in merged {
+        let meta_path = entry.folder.join("case.json");
+        let parsed: Option<Value> = fs::read_to_string(&meta_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok());
+        let Some(Value::Object(data)) = parsed else {
+            continue;
+        };
+
+        let folder_str = entry.folder.to_string_lossy().into_owned();
+        let name_str = entry
+            .folder
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let ev_obj = data.get("evidence").and_then(Value::as_object);
+        let has_evidence = ev_obj.is_some();
+        let evidence_missing = ev_obj.is_some_and(|ev| {
+            let image_path = ev.get("path").and_then(Value::as_str).unwrap_or("");
+            let is_ewf = ev
+                .get("format")
+                .and_then(Value::as_str)
+                .is_some_and(|fmt| fmt.eq_ignore_ascii_case("EWF"));
+            !check_evidence_path_exists(image_path, is_ewf)
+        });
+
+        // 仅从 case.json 元数据读取清单条目数（不解压任何外部 `.jsonl.gz` 分分区或单文件清单）。
+        let inventory_count = data
+            .get("inventory_count")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize)
+            .unwrap_or_else(|| {
+                if let Some(arr) = data.get("inventory").and_then(Value::as_array) {
+                    arr.len()
+                } else if let Some(scans) = data.get("partition_scans").and_then(Value::as_array) {
+                    let has_external_inventory = data
+                        .get("inventory_files")
+                        .and_then(Value::as_object)
+                        .is_some_and(|m| !m.is_empty())
+                        || data
+                            .get("inventory_file")
+                            .and_then(Value::as_str)
+                            .is_some_and(|s| !s.is_empty());
+                    if has_external_inventory {
+                        scans
+                            .iter()
+                            .filter_map(|s| s.get("count").and_then(Value::as_u64))
+                            .map(|n| n as usize)
+                            .sum()
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            });
+
+        let exports_count = data
+            .get("exports")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        let created_raw = data.get("created").and_then(Value::as_str).unwrap_or("");
+
+        list.push(RecentCaseDto {
+            folder: folder_str,
+            name: name_str,
+            number: data
+                .get("number")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            examiner: data
+                .get("examiner")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            target: data
+                .get("target")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            created: display_iso_time(created_raw, false),
+            has_evidence,
+            inventory_count,
+            exports_count,
+            last_opened_at: entry.last_opened_at,
+            in_history: entry.in_history,
+            pinned: entry.pinned,
+            evidence_missing,
+        });
+    }
+
     Ok(list)
+}
+
+/// 仅从跨目录「最近案件」历史清单中移除指定案件路径（绝不删除磁盘上的任何案件文件）。
+pub fn cmd_remove_recent_case(
+    state: &Arc<AppState>,
+    folder: &str,
+) -> Result<RemoveRecentCaseResponse, String> {
+    let trimmed = folder.trim();
+    if trimmed.is_empty() {
+        return Ok(RemoveRecentCaseResponse { removed: false });
+    }
+    let removed = remove_recent_case_at(&state.recent_cases_path(), Path::new(trimmed))
+        .map_err(|e| e.to_string())?;
+    Ok(RemoveRecentCaseResponse { removed })
 }
 
 /* ==========================================================================================
@@ -401,6 +504,66 @@ pub fn cmd_load_image(
     let snap = view.snapshot.clone().expect("snapshot updated");
     emit_task_finished(app, "打开镜像并识别分区", true, None);
     Ok(snap)
+}
+
+/// 在 SHA-256 强制校验保护下重新定位源镜像路径（支持取消与实时字节进度推送）。
+pub fn cmd_rebind_image_path(
+    state: &Arc<AppState>,
+    new_image_path: &str,
+    app: Option<&AppHandle>,
+) -> Result<RebindImageResponse, String> {
+    let trimmed = new_image_path.trim();
+    if trimmed.is_empty() {
+        return Err("请选择有效的源镜像文件路径".to_string());
+    }
+    state.task_cancel.store(false, Ordering::Relaxed);
+    let cancel = Arc::clone(&state.task_cancel);
+
+    let mut case_guard = state
+        .case_lock
+        .lock()
+        .map_err(|_| "案件状态锁异常".to_string())?;
+    let case = case_guard
+        .as_mut()
+        .ok_or_else(|| "请先新建或打开案件".to_string())?;
+
+    let stage = "校验并重绑源镜像路径";
+    emit_task_started(app, stage);
+    let progress_cb = |done: u64, total: u64| {
+        emit_task_progress(app, "复算镜像 SHA-256", done, total);
+    };
+
+    let res = match case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+        c.rebind_image_path(Path::new(trimmed), Some(&cancel), Some(&progress_cb))
+    }) {
+        Ok(r) => r,
+        Err(err) => {
+            let msg = err.to_string();
+            emit_task_finished(app, stage, false, Some(msg.clone()));
+            return Err(msg);
+        }
+    };
+
+    let mut view = match state.view.write() {
+        Ok(v) => v,
+        Err(_) => {
+            let msg = "视图缓存锁异常".to_string();
+            emit_task_finished(app, stage, false, Some(msg.clone()));
+            return Err(msg);
+        }
+    };
+    view.sync_from_case(case, false);
+    let snapshot = view.snapshot.clone().expect("snapshot updated");
+    emit_task_finished(app, stage, true, None);
+
+    Ok(RebindImageResponse {
+        snapshot,
+        old_image: res.old_image,
+        new_image: res.new_image,
+        sha256: res.sha256,
+        verified: res.verified,
+        segment_count: res.segment_count,
+    })
 }
 
 pub fn cmd_verify_integrity(
@@ -1323,13 +1486,14 @@ pub fn cmd_locate_file_in_scope(
     })
 }
 
-/// 扫描当前案件清单中的文件头魔数与扩展名伪装情况（短锁提取快照数据后释放 `case_lock`，无锁并行扫描）。
+/// 扫描当前案件清单中的文件头魔数与扩展名伪装情况（短锁提取快照数据后释放 `case_lock`，无锁并行扫描，
+/// 扫描完成且未被取消时自动持久化缓存至 `<case_folder>/.cache/magic-scan.json`）。
 pub fn cmd_scan_magic_mismatches(state: &Arc<AppState>) -> Result<MagicScanReport, String> {
     state.task_cancel.store(false, Ordering::Relaxed);
     let cancel = Arc::clone(&state.task_cancel);
 
-    // 仅持短锁提取镜像路径、清单克隆与分区偏移列表，随即立即释放 `case_lock` 避免阻塞桌面与 MCP 协同。
-    let (image_path, entries, partition_offsets) = {
+    // 仅持短锁提取案件目录、缓存指纹、镜像路径、清单克隆与分区偏移列表，随即立即释放 `case_lock`。
+    let (case_folder, cache_key, image_sha256, image_path, entries, partition_offsets) = {
         let case_guard = state
             .case_lock
             .lock()
@@ -1342,6 +1506,9 @@ pub fn cmd_scan_magic_mismatches(state: &Arc<AppState>) -> Result<MagicScanRepor
             .evidence
             .as_ref()
             .ok_or_else(|| "请先加载镜像".to_string())?;
+        let case_folder = case.folder().to_path_buf();
+        let cache_key = case.inventory_cache_key();
+        let image_sha256 = ev.sha256.clone().unwrap_or_default();
         let image_path = PathBuf::from(&ev.path);
         // 常规模式扫描完整清单；大镜像按需目录浏览模式下若完整清单尚未建立，则扫描当前已展示目录条目。
         let entries = if !case.data().inventory.is_empty() {
@@ -1350,16 +1517,59 @@ pub fn cmd_scan_magic_mismatches(state: &Arc<AppState>) -> Result<MagicScanRepor
             case.displayed_entries().to_vec()
         };
         let partition_offsets: Vec<u64> = ev.partitions.iter().map(|p| p.offset).collect();
-        (image_path, entries, partition_offsets)
+        (
+            case_folder,
+            cache_key,
+            image_sha256,
+            image_path,
+            entries,
+            partition_offsets,
+        )
     };
 
-    scan_entries_magic_mismatches(
+    let report = scan_entries_magic_mismatches(
         &image_path,
         &entries,
         &partition_offsets,
         Some(cancel.as_ref()),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    // 未取消时将扫描结果原子落盘至 `.cache/magic-scan.json`（缓存写入失败绝不阻断扫描返回）。
+    if !report.cancelled {
+        let _ = save_magic_scan_cache(&case_folder, &cache_key, &image_sha256, &report);
+    }
+
+    Ok(report)
+}
+
+/// 读取当前案件磁盘缓存的魔数伪装扫描报告（短锁提取指纹后无锁校验读取，未命中返回 `None`）。
+pub fn cmd_load_cached_magic_scan(
+    state: &Arc<AppState>,
+) -> Result<Option<MagicScanReport>, String> {
+    let (case_folder, cache_key, image_sha256) = {
+        let case_guard = state
+            .case_lock
+            .lock()
+            .map_err(|_| "案件状态锁异常".to_string())?;
+        let Some(case) = case_guard.as_ref() else {
+            return Ok(None);
+        };
+        let Some(ev) = case.data().evidence.as_ref() else {
+            return Ok(None);
+        };
+        (
+            case.folder().to_path_buf(),
+            case.inventory_cache_key(),
+            ev.sha256.clone().unwrap_or_default(),
+        )
+    };
+
+    Ok(load_magic_scan_cache(
+        &case_folder,
+        &cache_key,
+        &image_sha256,
+    ))
 }
 
 /// 只读识别单个文件的前 4096 字节魔数并与扩展名比对（短锁解析条目后释放读锁再执行镜像 I/O）。
@@ -4000,7 +4210,7 @@ pub fn cmd_open_in_os(
         return Ok(OpenInOsResponse { ok: false });
     }
 
-    // 安全边界校验：仅允许打开当前案件目录、cases_dir 或工作区根目录内的文件与文件夹。
+    // 安全边界校验：仅允许打开当前案件目录、cases_dir、工作区根目录或已记录最近案件历史内的路径。
     let allowed = {
         let view = state
             .view
@@ -4012,7 +4222,10 @@ pub fn cmd_open_in_os(
             .is_some_and(|cf| is_within(&resolved, cf));
         let in_cases = is_within(&resolved, &state.app_paths.cases_dir);
         let in_root = is_within(&resolved, &state.app_paths.root);
-        in_active_case || in_cases || in_root
+        let in_recent = list_recent_case_records_at(&state.recent_cases_path())
+            .iter()
+            .any(|rec| is_within(&resolved, Path::new(&rec.folder)));
+        in_active_case || in_cases || in_root || in_recent
     };
     if !allowed {
         return Err("出于安全边界限制，仅允许打开案件与工作区目录内的导出结果".to_string());
@@ -4066,7 +4279,7 @@ pub fn cmd_get_guide_pages() -> Result<Vec<GuidePageDto>, String> {
             index: 2,
             title: "创建案件、加载镜像与登记来源".to_string(),
             nav_label: "建案、加载与来源".to_string(),
-            summary: "从全屏启动首页或顶栏分段控件组快速建案/开案，支持最近案件实时筛选、拖入文件快速打开与动态窗口标题；在“镜像与文件系统”页核对固定摘要与来源登记。".to_string(),
+            summary: "从全屏启动首页或顶栏分段控件组快速建案/开案，支持跨目录最近案件持久化、悬停快捷管理、拖入打开与源镜像 SHA-256 安全重绑；在“镜像与文件系统”页核对固定摘要与来源登记。".to_string(),
             image: "/assets/guide/02_case_and_source.webp".to_string(),
             caption: "图 2 · 镜像与文件系统页：固定摘要、覆盖范围评估与来源登记（点击查看大图）".to_string(),
         },
@@ -4074,7 +4287,7 @@ pub fn cmd_get_guide_pages() -> Result<Vec<GuidePageDto>, String> {
             index: 3,
             title: "大镜像、按需索引与 SHA-256".to_string(),
             nav_label: "大镜像与 SHA-256".to_string(),
-            summary: "逻辑容量达到 1 GiB 时自动切换为按需目录浏览，支持单分区或全案按需建索引，边浏览边在后台校验 SHA-256 并实时展示已耗时与 ETA。".to_string(),
+            summary: "逻辑容量达到 1 GiB 时自动切换为按需目录浏览，支持单分区或全案分分区增量建索引与并行加载，边浏览边在后台校验 SHA-256 并实时展示已耗时与 ETA。".to_string(),
             image: "/assets/guide/03_large_image.webp".to_string(),
             caption: "图 3 · 大容量镜像按需目录浏览、完整索引与后台校验入口（点击查看大图）".to_string(),
         },
@@ -4082,7 +4295,7 @@ pub fn cmd_get_guide_pages() -> Result<Vec<GuidePageDto>, String> {
             index: 4,
             title: "浏览、魔数伪装检测与多格式预览".to_string(),
             nav_label: "浏览、筛选与预览".to_string(),
-            summary: "左侧完整目录树支持深层路径水平滚动浏览，支持一键文件头魔数伪装检测与胶囊过滤；下方支持多编码文本、图片与可跳转高亮的十六进制分页预览。".to_string(),
+            summary: "左侧完整目录树支持深层路径水平滚动浏览，支持一键文件头魔数伪装检测、缓存自动恢复与胶囊过滤；下方支持多编码文本、图片与可跳转高亮的十六进制分页预览。".to_string(),
             image: "/assets/guide/04_browse_preview.webp".to_string(),
             caption: "图 4 · 文件树、条件筛选栏与十六进制/多编码分页预览（点击查看大图）".to_string(),
         },
@@ -4228,6 +4441,17 @@ pub async fn list_recent_cases(
 }
 
 #[tauri::command]
+pub async fn remove_recent_case(
+    state: State<'_, Arc<AppState>>,
+    folder: String,
+) -> Result<RemoveRecentCaseResponse, String> {
+    let st = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || cmd_remove_recent_case(&st, &folder))
+        .await
+        .map_err(|e| format!("后台任务执行异常：{e}"))?
+}
+
+#[tauri::command]
 pub async fn load_image(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
@@ -4237,6 +4461,20 @@ pub async fn load_image(
     tauri::async_runtime::spawn_blocking(move || cmd_load_image(&st, &image_path, Some(&app)))
         .await
         .map_err(|e| format!("后台任务执行异常：{e}"))?
+}
+
+#[tauri::command]
+pub async fn rebind_image_path(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    new_image_path: String,
+) -> Result<RebindImageResponse, String> {
+    let st = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        cmd_rebind_image_path(&st, &new_image_path, Some(&app))
+    })
+    .await
+    .map_err(|e| format!("后台任务执行异常：{e}"))?
 }
 
 #[tauri::command]
@@ -4415,6 +4653,16 @@ pub async fn scan_magic_mismatches(
 ) -> Result<MagicScanReport, String> {
     let st = Arc::clone(&state);
     tauri::async_runtime::spawn_blocking(move || cmd_scan_magic_mismatches(&st))
+        .await
+        .map_err(|e| format!("后台任务执行异常：{e}"))?
+}
+
+#[tauri::command]
+pub async fn load_cached_magic_scan(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<MagicScanReport>, String> {
+    let st = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || cmd_load_cached_magic_scan(&st))
         .await
         .map_err(|e| format!("后台任务执行异常：{e}"))?
 }

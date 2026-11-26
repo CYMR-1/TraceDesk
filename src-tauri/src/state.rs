@@ -55,6 +55,12 @@ pub struct CloseCaseResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RemoveRecentCaseResponse {
+    pub removed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CancelResponse {
     pub cancelled: bool,
 }
@@ -234,6 +240,20 @@ pub struct CaseSnapshot {
     /// 案件内可用于回放的历史内容搜索记录列表（按时间倒序，最新在前）。
     #[serde(default)]
     pub search_records: Vec<SearchRecordSummaryDto>,
+    /// 当案件已载入镜像但磁盘上源镜像文件（或 EWF 分段）不存在时为 `true`。
+    #[serde(default)]
+    pub evidence_missing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebindImageResponse {
+    pub snapshot: CaseSnapshot,
+    pub old_image: String,
+    pub new_image: String,
+    pub sha256: String,
+    pub verified: bool,
+    pub segment_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -724,6 +744,10 @@ pub struct RecentCaseDto {
     pub has_evidence: bool,
     pub inventory_count: usize,
     pub exports_count: usize,
+    pub last_opened_at: Option<String>,
+    pub in_history: bool,
+    pub pinned: bool,
+    pub evidence_missing: bool,
 }
 
 /* ---------- 流式事件载荷（ui-contract.md §3.6） ---------- */
@@ -1180,6 +1204,7 @@ pub fn build_case_snapshot(case: &Case) -> CaseSnapshot {
     } else {
         data.inventory.len()
     };
+    let evidence_missing = data.evidence.is_some() && !case.evidence_exists();
 
     CaseSnapshot {
         case_dir: case.folder().to_string_lossy().into_owned(),
@@ -1202,6 +1227,7 @@ pub fn build_case_snapshot(case: &Case) -> CaseSnapshot {
         fsstat: data.fsstat.clone().unwrap_or_default(),
         quick_location,
         search_records: collect_search_records(case.folder()),
+        evidence_missing,
     }
 }
 
@@ -1596,6 +1622,11 @@ impl AppState {
     /// 返回当前应用对应的 MCP 遥测日志路径（`<logs_dir>/mcp-activity.jsonl`）。
     pub fn activity_log_path(&self) -> PathBuf {
         self.app_paths.logs_dir.join(ACTIVITY_LOG_FILENAME)
+    }
+
+    /// 返回当前应用对应的跨目录「最近案件」历史文件路径（`<logs_dir>/recent-cases.json`）。
+    pub fn recent_cases_path(&self) -> PathBuf {
+        self.app_paths.logs_dir.join("recent-cases.json")
     }
 
     /// 注册 Tauri `AppHandle`（在应用 `setup` 阶段调用），开启前端实时事件推送。

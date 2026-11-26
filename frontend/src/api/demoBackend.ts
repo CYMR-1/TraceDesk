@@ -32,6 +32,7 @@ import type {
   PreviewPageResponse,
   QueryFilesPageResponse,
   QueryTimelinePageResponse,
+  RebindImagePathResponse,
   RecentCaseDto,
   ScanMagicMismatchesResponse,
   SearchEncoding,
@@ -363,6 +364,7 @@ function buildInitialCase(): CaseSnapshot {
         time: '2026-03-10 09:40:00',
       },
     ],
+    evidenceMissing: false,
   };
 }
 
@@ -372,6 +374,10 @@ let mcpPort = 8765;
 let searchCounter = 0;
 const activeSearchTimers = new Map<string, number>();
 const searchHitsStore = new Map<string, SearchHitDto[]>();
+/** 演示模式：记录已被移出最近列表的案件目录，用于模拟 remove_recent_case */
+const removedDemoRecentFolders = new Set<string>();
+/** 演示模式：按案件目录缓存魔数伪装检测结果，用于模拟 load_cached_magic_scan */
+const demoMagicScanCache = new Map<string, ScanMagicMismatchesResponse>();
 
 const INITIAL_DEMO_FINDINGS: FindingGroupDto[] = [
   {
@@ -935,6 +941,7 @@ export const demoBackend = {
       verification: null,
       fsstat: '',
       quickLocation: null,
+      evidenceMissing: false,
     };
     currentCase = snap;
     demoFindings = [];
@@ -977,6 +984,9 @@ export const demoBackend = {
 
   async list_recent_cases(): Promise<RecentCaseDto[]> {
     const base = currentCase ?? buildInitialCase();
+    if (removedDemoRecentFolders.has(base.caseDir)) {
+      return [];
+    }
     return [
       {
         folder: base.caseDir,
@@ -985,11 +995,24 @@ export const demoBackend = {
         examiner: base.examiner,
         target: base.target,
         created: base.created,
+        lastOpenedAt: '2026-03-10 10:18:00',
+        inHistory: true,
+        pinned: false,
+        evidenceMissing: Boolean(base.evidenceMissing),
         hasEvidence: Boolean(base.evidence),
         inventoryCount: base.inventoryCount,
         exportsCount: base.exportsCount,
       },
     ];
+  },
+
+  async remove_recent_case(args: { folder: string }): Promise<{ removed: boolean }> {
+    const target = (args.folder || '').trim();
+    if (!target) {
+      return { removed: false };
+    }
+    removedDemoRecentFolders.add(target);
+    return { removed: true };
   },
 
   async load_image(): Promise<CaseSnapshot> {
@@ -1004,6 +1027,56 @@ export const demoBackend = {
     }
     currentCase = base;
     return currentCase;
+  },
+
+  async rebind_image_path(args: { newImagePath: string }): Promise<RebindImagePathResponse> {
+    if (!currentCase || !currentCase.evidence) {
+      throw new Error('当前案件尚未加载证据镜像，无法重绑路径');
+    }
+    const newImage = (args.newImagePath || '').trim();
+    if (!newImage) {
+      throw new Error('请选择有效的源证据镜像文件');
+    }
+    if (/tamper|mismatch|篡改|不符/i.test(newImage)) {
+      throw new Error('目标镜像 SHA-256 与案件基线不符，已拒绝覆盖原路径');
+    }
+    const oldImage = currentCase.evidence.path;
+    const sha256 = currentCase.evidence.sha256 || DEMO_SHA256;
+    const verified = Boolean(currentCase.evidence.sha256);
+    const segmentCount = currentCase.evidence.segments?.length ?? 1;
+    const nextSeq = demoAuditRecords.length + 1;
+    const nowStr = '2026-03-10 10:35:00';
+    currentCase = {
+      ...currentCase,
+      custodyState: verified ? 'verified' : 'active',
+      evidenceMissing: false,
+      evidence: {
+        ...currentCase.evidence,
+        path: newImage,
+      },
+    };
+    demoAuditRecords.push({
+      seq: nextSeq,
+      timestamp: nowStr,
+      origin: 'manual',
+      originLabel: '人工',
+      actor: currentCase.examiner,
+      action: 'IMAGE_REBIND',
+      actionTitle: '重绑源镜像路径',
+      result: '成功',
+      subject: newImage,
+      details: { old_image: oldImage, new_image: newImage, sha256, verified },
+      previous: demoAuditRecords[demoAuditRecords.length - 1]?.hash || '0'.repeat(64),
+      hash: `${nextSeq.toString(16).padStart(2, '0')}b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef1`,
+    });
+    return {
+      snapshot: currentCase,
+      oldImage,
+      newImage,
+      sha256,
+      verified,
+      segmentCount,
+    };
   },
 
   async verify_integrity(): Promise<{ ok: boolean; initialFixed: boolean; snapshot: CaseSnapshot }> {
@@ -1854,7 +1927,7 @@ export const demoBackend = {
     if (!currentCase?.evidence) {
       throw new Error('请先加载镜像');
     }
-    return {
+    const result: ScanMagicMismatchesResponse = {
       scannedCount: 4,
       skippedCount: 3,
       mismatchCount: 1,
@@ -1882,6 +1955,15 @@ export const demoBackend = {
         },
       ],
     };
+    demoMagicScanCache.set(currentCase.caseDir, result);
+    return result;
+  },
+
+  async load_cached_magic_scan(): Promise<ScanMagicMismatchesResponse | null> {
+    if (!currentCase?.evidence) {
+      return null;
+    }
+    return demoMagicScanCache.get(currentCase.caseDir) ?? null;
   },
 
   async inspect_entry_magic(args: { entryKey: string }): Promise<InspectEntryMagicResponse> {

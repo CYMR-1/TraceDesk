@@ -653,6 +653,8 @@ export const App: React.FC = () => {
         requiresCase?: boolean;
         blocksBackground?: boolean;
         onSuccess?: (val: T) => void | Promise<void>;
+        /** 可选自定义错误文案转换器（如重绑镜像 SHA-256 不符时展示更清晰提示） */
+        formatErrorMessage?: (err: unknown) => string;
       }
     ): Promise<T | null> => {
       const requiresCase = options?.requiresCase ?? true;
@@ -686,7 +688,8 @@ export const App: React.FC = () => {
         setTaskStageText('');
         setProgressPercent(null);
         setStatusText(`${label}失败`);
-        showAlert(`${label}失败`, formatError(err), 'error');
+        const errMsg = options?.formatErrorMessage ? options.formatErrorMessage(err) : formatError(err);
+        showAlert(`${label}失败`, errMsg, 'error');
         return null;
       }
 
@@ -896,6 +899,119 @@ export const App: React.FC = () => {
     }
     await loadImageByPath(imagePath);
   };
+
+  /** 在系统资源管理器中打开最近案件所在目录 */
+  const handleOpenRecentCaseFolder = useCallback(
+    async (item: RecentCaseDto) => {
+      try {
+        await tauriApi.openInOs({ path: item.folder, revealFolder: false });
+      } catch (err) {
+        showAlert('打开案件目录失败', formatError(err), 'error');
+      }
+    },
+    [showAlert]
+  );
+
+  /** 从最近案件历史列表移除（仅移出记录，不删除磁盘案件文件） */
+  const handleRemoveRecentCase = useCallback(
+    async (item: RecentCaseDto) => {
+      try {
+        const res = await tauriApi.removeRecentCase({ folder: item.folder });
+        await refreshRecentCases();
+        if (res.removed) {
+          setDetailText(
+            `已从最近列表移出「${item.number || item.name}」（仅移除历史记录，未删除磁盘上的案件目录与文件）。`
+          );
+          setStatusText('已从最近列表移除（未删除磁盘文件）');
+        }
+      } catch (err) {
+        showAlert('移除最近案件记录失败', formatError(err), 'error');
+      }
+    },
+    [refreshRecentCases, showAlert]
+  );
+
+  /** 重新定位并校验重绑源证据镜像路径（支持 SHA-256 基线核验与防篡改拦截） */
+  const handleRebindImagePath = useCallback(async () => {
+    const currentSnap = snapshotRef.current;
+    if (!currentSnap) {
+      showAlert('提示', '请先新建或打开案件。', 'info');
+      return;
+    }
+    if (!currentSnap.evidence) {
+      showAlert('提示', '当前案件尚未加载证据镜像，请先使用「加载镜像」。', 'info');
+      return;
+    }
+    if (backgroundBusyRef.current) {
+      openBusyDialog('重绑源镜像路径前请先取消后台完整性校验或内容搜索，或等待完成。');
+      return;
+    }
+    if (busyRef.current) {
+      openBusyDialog('请等待当前任务完成后再重新定位源镜像。');
+      return;
+    }
+
+    let newImagePath: string | null = null;
+    if (inTauri) {
+      newImagePath = await tauriApi.pickFile({
+        title: '重新定位源证据镜像（RAW 或 E01 首段）',
+        defaultPath: appPaths.evidenceDir || undefined,
+        filters: [{ name: 'RAW 或 EWF 首段', extensions: RAW_IMAGE_EXTENSIONS }],
+      });
+      if (!newImagePath) return;
+    } else {
+      newImagePath = 'C:\\TraceDesk\\evidence\\demo_relocated.dd';
+    }
+
+    const res = await runTask(
+      '校验并重绑源镜像路径',
+      () => tauriApi.rebindImagePath({ newImagePath: newImagePath! }),
+      {
+        requiresCase: true,
+        blocksBackground: true,
+        formatErrorMessage: (err) => {
+          const raw = formatError(err);
+          const isHashMismatch =
+            /sha-?256|摘要|不一致|不符|完整性|integrity|mismatch/i.test(raw);
+          if (isHashMismatch) {
+            return raw.includes('目标镜像 SHA-256 与案件基线不符，已拒绝覆盖原路径')
+              ? raw
+              : `目标镜像 SHA-256 与案件基线不符，已拒绝覆盖原路径。\n\n详细原因：${raw}`;
+          }
+          return raw;
+        },
+      }
+    );
+
+    if (res) {
+      applySnapshot(res.snapshot);
+      void refreshRecentCases();
+      setStatusText(
+        res.verified ? '源镜像重绑成功 · SHA-256 核验一致' : '源镜像重绑成功 · 待完成基线固定'
+      );
+      const summaryLines = [
+        `新镜像路径：${res.newImage}`,
+        `原镜像路径：${res.oldImage}`,
+        res.verified
+          ? `SHA-256 核验结论：通过（与案件初始固定基线完全一致）\n基线摘要：${res.sha256}`
+          : 'SHA-256 核验结论：已完成格式与逻辑大小校验（当前大镜像尚未固定初始 SHA-256，请随后执行完整性校验固定摘要）',
+        ...(res.segmentCount > 1 ? [`EWF 分段数量：${res.segmentCount} 段`] : []),
+      ];
+      showAlert('重新定位源镜像成功', summaryLines.join('\n'), 'ok');
+      if (!res.snapshot.evidenceMissing && (res.snapshot.needsPartitionScan || res.snapshot.browsingDirectories)) {
+        await resumePartitions(res.snapshot);
+      }
+    }
+  }, [
+    appPaths.evidenceDir,
+    applySnapshot,
+    inTauri,
+    openBusyDialog,
+    refreshRecentCases,
+    resumePartitions,
+    runTask,
+    showAlert,
+  ]);
 
   const handleVerifyIntegrity = async () => {
     if (hashingImageRef.current) {
@@ -1366,6 +1482,11 @@ export const App: React.FC = () => {
   const isStandaloneMcp = !snapshot && activeTab === 'mcp';
 
   const custodyState = snapshot?.custodyState ?? 'idle';
+  const effectiveCustodyState = snapshot?.evidenceMissing
+    ? custodyState === 'error'
+      ? 'error'
+      : 'warning'
+    : custodyState;
   const showProgressBar = busy || hashingImage || contentSearching;
 
   // 当仅存在后台内容搜索时，底栏进度条与文案同步显示后台内容搜索进度
@@ -1791,16 +1912,42 @@ export const App: React.FC = () => {
           </header>
 
           {/* 2. 案件与证据保管状态条（单行左右排布 + 3px 左侧语义指示边框） */}
-          <section className="td-custody-bar" data-state={custodyState} aria-label="案件保管状态">
+          <section className="td-custody-bar" data-state={effectiveCustodyState} aria-label="案件保管状态">
             <div className="td-custody-lines">
               <div className="td-custody-line td-custody-primary" title={snapshot.summaryLine1}>
                 {snapshot.summaryLine1}
               </div>
-              {snapshot.summaryLine2 && (
-                <div className="td-custody-line td-custody-secondary" title={snapshot.summaryLine2}>
-                  <span className="td-custody-dot" aria-hidden="true" />
-                  <span className="td-custody-secondary-text">{snapshot.summaryLine2}</span>
+              {snapshot.evidenceMissing ? (
+                <div className="td-custody-missing-group">
+                  <span
+                    className="td-custody-missing-pill"
+                    title={
+                      snapshot.evidence?.path
+                        ? `原证据镜像路径在磁盘上不存在：${snapshot.evidence.path}`
+                        : snapshot.summaryLine2 || '原证据镜像路径已失效'
+                    }
+                  >
+                    <UiIcon name="warning" size={12.5} color="var(--warn-fg)" />
+                    <span>源镜像路径失效</span>
+                  </span>
+                  <button
+                    type="button"
+                    className="td-btn td-btn--compact td-btn--warningAction td-custody-rebind-btn"
+                    disabled={busy}
+                    title="重新定位源证据镜像文件并校验 SHA-256 一致性"
+                    onClick={() => void handleRebindImagePath()}
+                  >
+                    <UiIcon name="locate" size={12} color="var(--warn-fg)" />
+                    <span>重新定位镜像…</span>
+                  </button>
                 </div>
+              ) : (
+                snapshot.summaryLine2 && (
+                  <div className="td-custody-line td-custody-secondary" title={snapshot.summaryLine2}>
+                    <span className="td-custody-dot" aria-hidden="true" />
+                    <span className="td-custody-secondary-text">{snapshot.summaryLine2}</span>
+                  </div>
+                )
               )}
             </div>
           </section>
@@ -2092,7 +2239,14 @@ export const App: React.FC = () => {
                           <div className="td-welcome-case-scroll">
                             <div className="td-welcome-case-list" role="list">
                               {filteredRecentCases.map((item) => {
-                                const formattedTime = formatCaseTimestamp(item.created);
+                                // 优先展示最近打开时间，缺省时回退展示创建时间
+                                const displayTimeRaw = item.lastOpenedAt || item.created;
+                                const formattedTime = formatCaseTimestamp(displayTimeRaw);
+                                const timeTooltip = item.lastOpenedAt
+                                  ? `最近打开：${item.lastOpenedAt}`
+                                  : item.created
+                                    ? `创建时间：${item.created}`
+                                    : undefined;
                                 const leafDir = extractPathLeafName(item.folder);
                                 const metaSummary = [
                                   `对象 ${item.target || '—'}`,
@@ -2102,13 +2256,21 @@ export const App: React.FC = () => {
                                   .filter(Boolean)
                                   .join(' · ');
                                 return (
-                                  <button
+                                  <div
                                     key={item.folder}
-                                    type="button"
                                     role="listitem"
-                                    className="td-welcome-case-row"
-                                    disabled={busy}
-                                    onClick={() => void openCaseByPath(item.folder)}
+                                    tabIndex={busy ? -1 : 0}
+                                    aria-disabled={busy || undefined}
+                                    className={`td-welcome-case-row ${busy ? 'td-welcome-case-row--disabled' : ''}`}
+                                    onClick={() => {
+                                      if (!busy) void openCaseByPath(item.folder);
+                                    }}
+                                    onKeyDown={(e) => {
+                                      if (!busy && (e.key === 'Enter' || e.key === ' ')) {
+                                        e.preventDefault();
+                                        void openCaseByPath(item.folder);
+                                      }
+                                    }}
                                     title={`点击打开案件：${item.folder}`}
                                   >
                                     {/* 左侧柔和圆角图标徽章：区分已载入镜像与待载入状态 */}
@@ -2158,17 +2320,60 @@ export const App: React.FC = () => {
                                       </span>
                                     </span>
 
-                                    {/* 右侧固定对齐区：镜像状态胶囊、等宽时间戳与轻量悬停箭头 */}
+                                    {/* 右侧固定对齐区：悬停快捷图标按钮 + 镜像状态胶囊与等宽时间戳 + 轻量悬停箭头 */}
                                     <span className="td-welcome-case-right">
-                                      <span className="td-welcome-case-status-col">
-                                        <span
-                                          className={`td-recent-badge ${item.hasEvidence ? 'td-recent-badge--ready' : 'td-recent-badge--empty'}`}
+                                      <span
+                                        className="td-welcome-case-actions"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        <button
+                                          type="button"
+                                          className="td-welcome-row-icon-btn"
+                                          disabled={busy}
+                                          title="打开所在目录"
+                                          aria-label={`打开案件 ${item.number || item.name} 所在目录`}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            void handleOpenRecentCaseFolder(item);
+                                          }}
                                         >
-                                          {item.hasEvidence
-                                            ? `已载入镜像 · ${item.inventoryCount.toLocaleString()} 项`
-                                            : '待载入镜像'}
+                                          <UiIcon name="case_open" size={13.5} color="currentColor" />
+                                        </button>
+                                        {item.inHistory && (
+                                          <button
+                                            type="button"
+                                            className="td-welcome-row-icon-btn td-welcome-row-icon-btn--remove"
+                                            disabled={busy}
+                                            title="从最近列表移除（仅移出记录，不删除磁盘案件文件）"
+                                            aria-label={`从最近列表移除案件 ${item.number || item.name}`}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              void handleRemoveRecentCase(item);
+                                            }}
+                                          >
+                                            <UiIcon name="x_circle" size={13.5} color="currentColor" />
+                                          </button>
+                                        )}
+                                      </span>
+                                      <span className="td-welcome-case-status-col">
+                                        <span className="td-welcome-case-badges">
+                                          {item.evidenceMissing && (
+                                            <span
+                                              className="td-recent-badge td-recent-badge--missing"
+                                              title="原证据镜像路径已失效，打开案件后可一键重新定位并校验重绑"
+                                            >
+                                              镜像路径失效
+                                            </span>
+                                          )}
+                                          <span
+                                            className={`td-recent-badge ${item.hasEvidence ? 'td-recent-badge--ready' : 'td-recent-badge--empty'}`}
+                                          >
+                                            {item.hasEvidence
+                                              ? `已载入镜像 · ${item.inventoryCount.toLocaleString()} 项`
+                                              : '待载入镜像'}
+                                          </span>
                                         </span>
-                                        <span className="td-welcome-case-time" title={item.created || undefined}>
+                                        <span className="td-welcome-case-time" title={timeTooltip}>
                                           {formattedTime && (
                                             <UiIcon name="clock" size={11.5} color="var(--text-disabled)" />
                                           )}
@@ -2179,7 +2384,7 @@ export const App: React.FC = () => {
                                         <UiIcon name="arrow_right" size={14} color="currentColor" />
                                       </span>
                                     </span>
-                                  </button>
+                                  </div>
                                 );
                               })}
                             </div>
@@ -2398,6 +2603,7 @@ export const App: React.FC = () => {
             snapshot={snapshot}
             busy={busy}
             onRegisterSource={handleOpenRegisterSource}
+            onRebindImagePath={handleRebindImagePath}
             onExportFsstat={handleExportFsstatClick}
             onScanPartition={handleScanPartitionClick}
           />
