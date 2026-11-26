@@ -58,8 +58,9 @@ pub fn verify_bundle_strict(zip_path: &Path, expected_sha256: Option<&str>) -> C
         serde_json::from_str(&raw)?
     };
 
-    // 解析 audit.jsonl 记录，提取最新一次 REPORT_GENERATE 及全部 CONTENT_SEARCH 摘要。
-    let mut last_report_sha: Option<String> = None;
+    // 解析 audit.jsonl 记录，区分 Markdown 与 HTML 报告分别提取最新 REPORT_GENERATE 及全部 CONTENT_SEARCH 摘要。
+    let mut last_md_report_sha: Option<String> = None;
+    let mut last_html_report_sha: Option<String> = None;
     let mut audit_searches: HashMap<String, String> = HashMap::new();
     {
         let entry = archive.by_name("audit.jsonl")?;
@@ -68,17 +69,28 @@ pub fn verify_bundle_strict(zip_path: &Path, expected_sha256: Option<&str>) -> C
             let line = line_res?;
             let rec: Value = serde_json::from_str(&line)?;
             let action = rec.get("action").and_then(Value::as_str).unwrap_or("");
+            let result = rec.get("result").and_then(Value::as_str).unwrap_or("");
             let subject = rec.get("subject").and_then(Value::as_str).unwrap_or("");
-            let sha = rec
-                .get("details")
+            let details = rec.get("details").and_then(Value::as_object);
+            let sha = details
                 .and_then(|d| d.get("sha256"))
                 .and_then(Value::as_str);
 
             if action == "REPORT_GENERATE"
+                && result == "成功"
                 && let Some(s) = sha
                 && !s.is_empty()
             {
-                last_report_sha = Some(s.to_string());
+                let is_html = details
+                    .and_then(|d| d.get("format"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|fmt| fmt.trim().eq_ignore_ascii_case("html"))
+                    || subject.trim().to_ascii_lowercase().ends_with(".html");
+                if is_html {
+                    last_html_report_sha = Some(s.to_string());
+                } else {
+                    last_md_report_sha = Some(s.to_string());
+                }
             } else if action == "CONTENT_SEARCH"
                 && let Some(s) = sha
                 && !s.is_empty()
@@ -89,7 +101,7 @@ pub fn verify_bundle_strict(zip_path: &Path, expected_sha256: Option<&str>) -> C
         }
     }
 
-    let expected_report_sha = last_report_sha.ok_or_else(|| {
+    let expected_report_sha = last_md_report_sha.ok_or_else(|| {
         CoreError::IntegrityFailed(
             "审计链缺少有效的 REPORT_GENERATE 摘要记录，无法核验 report.md".to_string(),
         )
@@ -97,6 +109,14 @@ pub fn verify_bundle_strict(zip_path: &Path, expected_sha256: Option<&str>) -> C
     if checks.get("report.md") != Some(&expected_report_sha) {
         return Err(CoreError::IntegrityFailed(
             "报告摘要不匹配：report.md 与审计链记录不一致".to_string(),
+        ));
+    }
+    if let Some(actual_html_sha) = checks.get("report.html")
+        && let Some(ref expected_html_sha) = last_html_report_sha
+        && actual_html_sha != expected_html_sha
+    {
+        return Err(CoreError::IntegrityFailed(
+            "HTML 报告摘要不匹配：report.html 与审计链记录不一致".to_string(),
         ));
     }
 

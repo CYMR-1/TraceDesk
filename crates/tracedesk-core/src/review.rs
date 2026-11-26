@@ -18,7 +18,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 use crate::case::{Case, ExportRecord, GENESIS_HASH};
 use crate::coverage::source_status;
 use crate::error::{CoreError, CoreResult};
-use crate::findings::{AuditRecord, operation_title};
+use crate::findings::operation_title;
 use crate::formatting::{canonical_json_value, format_commas, hex_lower, sha256_hex};
 use crate::paths::{is_within, resolve_clean, strip_verbatim_prefix};
 
@@ -149,12 +149,6 @@ pub struct BundleVerificationDetail {
     pub errors: Vec<String>,
 }
 
-/// 打包时检测到的可选离线 HTML 报告信息。
-struct HtmlReportBundleCandidate {
-    path: PathBuf,
-    expected_sha256: Option<String>,
-}
-
 /// 判断 `REPORT_GENERATE` 审计记录是否对应 HTML 格式报告。
 fn is_html_report_audit_record(subject: &str, details: &Map<String, Value>) -> bool {
     if let Some(fmt) = details.get("format").and_then(Value::as_str)
@@ -163,82 +157,6 @@ fn is_html_report_audit_record(subject: &str, details: &Map<String, Value>) -> b
         return true;
     }
     subject.trim().to_ascii_lowercase().ends_with(".html")
-}
-
-/// 在 `<case_dir>/reports/` 下定位最新生成的 HTML 报告（`report_*.html`）。
-///
-/// 优先匹配审计链中最新一条成功的 HTML `REPORT_GENERATE` 记录（附带审计摘要供强校验）；
-/// 若无审计记录（例如手工放置的历史报告），则回退扫描 `reports/report_*.html`。
-fn find_latest_html_report(
-    case: &Case,
-    records: &[AuditRecord],
-) -> CoreResult<Option<HtmlReportBundleCandidate>> {
-    let reports_root = resolve_clean(&case.folder().join("reports"));
-
-    for rec in records.iter().rev() {
-        if rec.action != "REPORT_GENERATE" || rec.result != "成功" {
-            continue;
-        }
-        if !is_html_report_audit_record(&rec.subject, &rec.details) {
-            continue;
-        }
-        let Some(file_name) = Path::new(&rec.subject).file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let lower = file_name.to_ascii_lowercase();
-        if !lower.starts_with("report_") || !lower.ends_with(".html") {
-            continue;
-        }
-        let candidate = resolve_clean(&reports_root.join(file_name));
-        if is_within(&candidate, &reports_root) && candidate.is_file() {
-            let expected_sha256 = rec
-                .details
-                .get("sha256")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_ascii_lowercase());
-            return Ok(Some(HtmlReportBundleCandidate {
-                path: candidate,
-                expected_sha256,
-            }));
-        }
-    }
-
-    // 回退扫描 `reports/` 下的 `report_*.html`，按修改时间降序、文件名降序取最新文件。
-    let Ok(read_dir) = fs::read_dir(&reports_root) else {
-        return Ok(None);
-    };
-    let mut candidates: Vec<(std::time::SystemTime, String, PathBuf)> = Vec::new();
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let lower = name.to_ascii_lowercase();
-        if !lower.starts_with("report_") || !lower.ends_with(".html") {
-            continue;
-        }
-        let resolved = resolve_clean(&path);
-        if !is_within(&resolved, &reports_root) {
-            continue;
-        }
-        let modified = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        candidates.push((modified, name.to_string(), resolved));
-    }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-    Ok(candidates.into_iter().next().map(|(_, _, path)| {
-        HtmlReportBundleCandidate {
-            path,
-            expected_sha256: None,
-        }
-    }))
 }
 
 /// 解析导出记录在 `<case_dir>/exports/` 下的本地文件路径，即使案件目录曾被整体移动仍可定位。
@@ -407,8 +325,9 @@ pub fn format_missing_materials(
 /// 构建可核验 ZIP64 复核包（`reports/report_<12hex>.zip`）及配套 `.zip.sha256` 摘要文件，
 /// 并追加 `REVIEW_EXPORT` 审计记录（对应 `core-contract.md` §2.5）。
 ///
-/// 若案件 `reports/` 下存在最新生成的 HTML 取证报告（`report_*.html`），
-/// 将一并打包为 `report.html` 并纳入 `SHA256SUMS.json` 与 `manifest.json` 保护。
+/// 构建期间仅执行一次完整性前置校验，并同步生成配套的最新 Markdown（`report.md`）与
+/// 离线单文件 HTML 报告（`report.html`），确保两份报告内容同源且均纳入 `audit.jsonl`、
+/// `SHA256SUMS.json` 与 `manifest.json.html_report` 交叉核验保护。
 pub fn build_bundle(
     case: &mut Case,
     options: &BuildBundleOptions,
@@ -477,7 +396,9 @@ pub fn build_bundle(
         )));
     }
 
-    let report_path = case.report(tsk)?;
+    // 一次性执行完整性校验并同步生成配套的最新 report.md 与离线 HTML 报告，
+    // 校验未通过时立即中止，避免产生孤立报告且不重复做整镜像哈希。
+    let (report_path, html_report) = case.generate_bundle_reports(tsk)?;
     if !case
         .data()
         .verification
@@ -514,13 +435,34 @@ pub fn build_bundle(
         .and_then(Value::as_str)
         .ok_or_else(|| CoreError::Other("无法获取最新报告的审计摘要".to_string()))?
         .to_string();
+
+    let html_path_str = html_report.path.to_string_lossy();
+    let html_record = records
+        .iter()
+        .rev()
+        .find(|r| {
+            r.action == "REPORT_GENERATE"
+                && r.result == "成功"
+                && r.subject == html_path_str.as_ref()
+                && is_html_report_audit_record(&r.subject, &r.details)
+        })
+        .ok_or_else(|| CoreError::Other("无法获取最新 HTML 报告的审计摘要".to_string()))?;
+    let html_sha256 = html_record
+        .details
+        .get("sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CoreError::Other("无法获取最新 HTML 报告的审计摘要".to_string()))?
+        .to_string();
+    if html_sha256 != html_report.sha256 {
+        return Err(CoreError::IntegrityFailed(
+            "最新 HTML 报告摘要与审计链记录不一致".to_string(),
+        ));
+    }
+
     let audit_head = records
         .last()
         .map(|r| r.hash.clone())
         .ok_or_else(|| CoreError::Other("审计链为空".to_string()))?;
-
-    // 检查是否存在最新离线 HTML 报告（存在则一并打包，不存在时保持完全向后兼容）。
-    let html_candidate = find_latest_html_report(case, &records)?;
 
     let discovered;
     let tool = match tsk {
@@ -613,18 +555,16 @@ pub fn build_bundle(
             Some(&report_sha256),
         )?;
 
-        // 1b. 可选 report.html（若存在最新离线 HTML 报告则一并打包并纳入哈希保护）
-        if let Some(ref html_cand) = html_candidate {
-            let (html_sha, html_len) = copy_streaming(
-                &mut archive,
-                &mut checksums,
-                &mut copy_buf,
-                &html_cand.path,
-                "report.html",
-                html_cand.expected_sha256.as_deref(),
-            )?;
-            bundled_html_meta = Some((html_sha, html_len));
-        }
+        // 1b. report.html（与本次 report.md 同步生成的最新离线 HTML 报告，始终打包并纳入哈希保护）
+        let (html_sha, html_len) = copy_streaming(
+            &mut archive,
+            &mut checksums,
+            &mut copy_buf,
+            &html_report.path,
+            "report.html",
+            Some(&html_sha256),
+        )?;
+        bundled_html_meta = Some((html_sha, html_len));
 
         // 2. exports/<index>/<filename>
         for row in &export_rows {
@@ -747,7 +687,7 @@ pub fn build_bundle(
             EMBEDDED_VERIFY_BUNDLE_PY,
         )?;
 
-        // 7. manifest.json（保持 format_version=1 向后兼容；仅在存在 HTML 报告时附加 html_report 字段）
+        // 7. manifest.json（保持 format_version=1 向后兼容，并记录本次同步生成的 html_report 元数据）
         let data = case.data();
         let evidence = data
             .evidence
@@ -2243,6 +2183,328 @@ mod tests {
                 .output()
                 .expect("run verify_bundle.py tamper");
             assert!(!bad_out.status.success(), "verify_bundle.py 应拦截 findings 篡改");
+        }
+    }
+
+    #[test]
+    fn build_bundle_auto_generates_fresh_html_report_without_prior_call_and_syncs_updates() {
+        let paths = AppPaths::discover();
+        let demo_dd = paths.evidence_dir.join("demo.dd");
+        assert!(demo_dd.is_file(), "缺少 demo.dd 测试镜像");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut case = Case::create(
+            tmp.path(),
+            "AUTO-HTML-001",
+            "复核测试员",
+            "未预先生成HTML直接导出复核包回归测试",
+            None,
+            None,
+            AuditOrigin::Manual,
+        )
+        .expect("create case");
+        case.load_image(&demo_dd, None, None, None).expect("load demo");
+        let inventory = case
+            .scan_partitions(None, None, None)
+            .expect("scan partitions");
+        let target_entry = inventory
+            .iter()
+            .find(|e| e.path == "DOCS/CASE.TXT" && !e.deleted)
+            .cloned()
+            .expect("find CASE.TXT");
+        record_note(&mut case, &target_entry, "未预先手动生成HTML的初始笔记")
+            .expect("record initial note");
+
+        // 确认调用 build_bundle 前 reports/ 下尚未存在任何 HTML 报告文件。
+        let reports_dir = case.folder().join("reports");
+        let html_before = fs::read_dir(&reports_dir)
+            .expect("read reports dir")
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("html"))
+            })
+            .count();
+        assert_eq!(html_before, 0, "构建复核包前不应存在手工生成的 HTML 报告");
+
+        let hash_verify_before = case
+            .check_audit()
+            .expect("audit before bundle")
+            .iter()
+            .filter(|r| r.action == "HASH_VERIFY")
+            .count();
+
+        // 1. 直接调用 build_bundle（不预先调用 generate_html_report）
+        let bundle1 = build_bundle(&mut case, &BuildBundleOptions::default(), None)
+            .expect("build bundle without prior html generation");
+
+        // 确认单次 build_bundle 仅执行一次镜像完整哈希校验（未产生冗余二次哈希）。
+        let audit_after_1 = case.check_audit().expect("audit after bundle 1");
+        let hash_verify_after = audit_after_1
+            .iter()
+            .filter(|r| r.action == "HASH_VERIFY")
+            .count();
+        assert_eq!(
+            hash_verify_after,
+            hash_verify_before + 1,
+            "build_bundle 不应对小镜像重复执行完整哈希校验"
+        );
+
+        // 校验 ZIP 内部结构：必含 report.html、SHA256SUMS.json["report.html"]、manifest.json.html_report 与对应内容。
+        let read_bundle_html_info = |zip_path: &Path| -> (String, String, Value, BTreeMap<String, String>) {
+            let mut archive = ZipArchive::new(File::open(zip_path).expect("open zip")).expect("zip");
+            let mut html_text = String::new();
+            archive
+                .by_name("report.html")
+                .expect("ZIP 必须包含 report.html")
+                .read_to_string(&mut html_text)
+                .expect("read report.html");
+            let actual_sha = sha256_hex(html_text.as_bytes());
+            let mut sums_raw = String::new();
+            archive
+                .by_name("SHA256SUMS.json")
+                .expect("SHA256SUMS.json")
+                .read_to_string(&mut sums_raw)
+                .expect("read sums");
+            let sums: BTreeMap<String, String> =
+                serde_json::from_str(&sums_raw).expect("parse sums");
+            let mut manifest_raw = String::new();
+            archive
+                .by_name("manifest.json")
+                .expect("manifest.json")
+                .read_to_string(&mut manifest_raw)
+                .expect("read manifest");
+            let manifest: Value = serde_json::from_str(&manifest_raw).expect("parse manifest");
+            (html_text, actual_sha, manifest, sums)
+        };
+
+        let (html1_text, html1_sha, manifest1, sums1) = read_bundle_html_info(&bundle1.bundle_path);
+        assert!(html1_text.starts_with("<!DOCTYPE html>"));
+        assert!(html1_text.contains("AUTO-HTML-001"));
+        assert!(html1_text.contains("未预先手动生成HTML的初始笔记"));
+        assert_eq!(sums1.get("report.html"), Some(&html1_sha));
+        assert_eq!(manifest1["html_report"]["member"].as_str(), Some("report.html"));
+        assert_eq!(manifest1["html_report"]["sha256"].as_str(), Some(html1_sha.as_str()));
+        assert_eq!(
+            manifest1["html_report"]["size"].as_u64(),
+            Some(html1_text.len() as u64)
+        );
+
+        // 核验 Rust verify_bundle、verify_bundle_detailed 与 Python verify_bundle.py 全部 0 警告通过。
+        verify_bundle(&bundle1.bundle_path, Some(&bundle1.sha256))
+            .expect("verify_bundle passes on auto-generated html bundle");
+        let detail1 =
+            verify_bundle_detailed(&bundle1.bundle_path, None).expect("detailed verify 1");
+        assert!(detail1.ok, "detail1 errors: {:?}", detail1.errors);
+        assert!(detail1.errors.is_empty());
+        assert!(
+            detail1
+                .members
+                .iter()
+                .any(|m| m.path == "report.html" && m.status == "ok" && m.category == "report")
+        );
+        assert!(
+            detail1
+                .cross_checks
+                .iter()
+                .any(|c| c.name == "Markdown 报告审计摘要核对" && c.status == "ok")
+        );
+        assert!(
+            detail1
+                .cross_checks
+                .iter()
+                .any(|c| c.name == "HTML 报告审计摘要核对" && c.status == "ok")
+        );
+
+        let py_script = tmp.path().join("verify_bundle.py");
+        fs::write(&py_script, EMBEDDED_VERIFY_BUNDLE_PY).expect("write verify_bundle.py");
+        let venv_py = paths.root.join(".venv").join("Scripts").join("python.exe");
+        if venv_py.is_file() {
+            let py_out = std::process::Command::new(&venv_py)
+                .arg(&py_script)
+                .arg(&bundle1.bundle_path)
+                .output()
+                .expect("run verify_bundle.py on bundle1");
+            assert!(
+                py_out.status.success(),
+                "verify_bundle.py failed on bundle1: {}",
+                String::from_utf8_lossy(&py_out.stderr)
+            );
+        }
+
+        // 2. 新增取证发现后再次直接导出复核包：内置 report.html 必须同步刷新而非沿用旧版 HTML。
+        record_note(&mut case, &target_entry, "首次导出后新增的取证发现")
+            .expect("record second note");
+        let bundle2 = build_bundle(&mut case, &BuildBundleOptions::default(), None)
+            .expect("build second bundle");
+        case.close();
+
+        let (html2_text, html2_sha, manifest2, sums2) = read_bundle_html_info(&bundle2.bundle_path);
+        assert_ne!(html2_sha, html1_sha, "二次导出应生成全新的 HTML 报告而非复用旧文件");
+        assert!(html2_text.contains("首次导出后新增的取证发现"));
+        assert_eq!(sums2.get("report.html"), Some(&html2_sha));
+        assert_eq!(manifest2["html_report"]["sha256"].as_str(), Some(html2_sha.as_str()));
+
+        verify_bundle(&bundle2.bundle_path, Some(&bundle2.sha256))
+            .expect("verify_bundle passes on synced bundle2");
+        let detail2 =
+            verify_bundle_detailed(&bundle2.bundle_path, None).expect("detailed verify 2");
+        assert!(detail2.ok, "detail2 errors: {:?}", detail2.errors);
+        assert!(
+            detail2
+                .cross_checks
+                .iter()
+                .any(|c| c.name == "HTML 报告审计摘要核对" && c.status == "ok")
+        );
+        if venv_py.is_file() {
+            let py_out2 = std::process::Command::new(&venv_py)
+                .arg(&py_script)
+                .arg(&bundle2.bundle_path)
+                .output()
+                .expect("run verify_bundle.py on bundle2");
+            assert!(
+                py_out2.status.success(),
+                "verify_bundle.py failed on bundle2: {}",
+                String::from_utf8_lossy(&py_out2.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn build_bundle_blocks_reports_when_integrity_fails_and_verifies_legacy_bundle_without_html() {
+        let paths = AppPaths::discover();
+        let demo_dd = paths.evidence_dir.join("demo.dd");
+        assert!(demo_dd.is_file(), "缺少 demo.dd 测试镜像");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cases_root = tmp.path().join("cases");
+        fs::create_dir_all(&cases_root).expect("create cases root");
+
+        // 1. 镜像被篡改时调用 build_bundle：必须拦截且不得残留任何 report.md / report.html / zip。
+        let copied_img = tmp.path().join("tamper_demo.dd");
+        fs::copy(&demo_dd, &copied_img).expect("copy demo.dd");
+        let mut tampered_case = Case::create(
+            &cases_root,
+            "TAMPER-GATE-001",
+            "复核测试员",
+            "完整性前置拦截测试",
+            None,
+            None,
+            AuditOrigin::Manual,
+        )
+        .expect("create tampered case");
+        tampered_case
+            .load_image(&copied_img, None, None, None)
+            .expect("load copied image");
+
+        // 修改镜像末尾单字节使完整性校验失败。
+        {
+            let mut raw = fs::read(&copied_img).expect("read copied image");
+            if let Some(last) = raw.last_mut() {
+                *last ^= 0xFF;
+            }
+            fs::write(&copied_img, &raw).expect("write tampered image");
+        }
+
+        let err = build_bundle(&mut tampered_case, &BuildBundleOptions::default(), None)
+            .expect_err("镜像校验未通过时禁止生成复核包");
+        assert!(
+            matches!(err, CoreError::IntegrityFailed(_)),
+            "预期 IntegrityFailed，实际为：{err:?}"
+        );
+        let generated_reports: Vec<_> = fs::read_dir(tampered_case.folder().join("reports"))
+            .expect("read reports dir")
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            generated_reports.is_empty(),
+            "完整性校验失败时绝不应生成任何 Markdown/HTML/ZIP 文件：{generated_reports:?}"
+        );
+        tampered_case.close();
+
+        // 2. 构造不含 report.html 与 manifest.html_report 的历史风格复核包，验证三套校验器均 100% 向后兼容。
+        let mut ok_case = Case::create(
+            &cases_root,
+            "LEGACY-COMPAT-001",
+            "复核测试员",
+            "历史复核包向后兼容测试",
+            None,
+            None,
+            AuditOrigin::Manual,
+        )
+        .expect("create ok case");
+        ok_case.load_image(&demo_dd, None, None, None).expect("load demo");
+        let bundle = build_bundle(&mut ok_case, &BuildBundleOptions::default(), None)
+            .expect("build base bundle");
+        ok_case.close();
+
+        let legacy_zip = tmp.path().join("legacy_without_html.zip");
+        {
+            let mut src =
+                ZipArchive::new(File::open(&bundle.bundle_path).expect("open base zip"))
+                    .expect("zip");
+            let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+            for i in 0..src.len() {
+                let mut e = src.by_index(i).expect("entry");
+                let name = e.name().to_string();
+                if name == "report.html" || name == "SHA256SUMS.json" {
+                    continue;
+                }
+                let mut buf = Vec::new();
+                e.read_to_end(&mut buf).expect("read entry");
+                if name == "manifest.json" {
+                    let mut v: Value = serde_json::from_slice(&buf).expect("parse manifest");
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.remove("html_report");
+                    }
+                    buf = serde_json::to_vec_pretty(&v).expect("serialize manifest");
+                }
+                entries.push((name, buf));
+            }
+            let mut sums: BTreeMap<String, String> = BTreeMap::new();
+            for (name, bytes) in &entries {
+                sums.insert(name.clone(), sha256_hex(bytes));
+            }
+            entries.push((
+                "SHA256SUMS.json".to_string(),
+                serde_json::to_vec_pretty(&sums).expect("serialize sums"),
+            ));
+            let mut dst = ZipWriter::new(File::create(&legacy_zip).expect("create legacy zip"));
+            let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            for (name, bytes) in entries {
+                dst.start_file(name, opts).expect("start file");
+                dst.write_all(&bytes).expect("write bytes");
+            }
+            dst.finish().expect("finish legacy zip");
+        }
+
+        verify_bundle(&legacy_zip, None).expect("Rust verify_bundle 必须兼容不含 report.html 的旧包");
+        let legacy_detail =
+            verify_bundle_detailed(&legacy_zip, None).expect("detailed verify legacy");
+        assert!(legacy_detail.ok, "legacy errors: {:?}", legacy_detail.errors);
+        assert!(
+            legacy_detail
+                .cross_checks
+                .iter()
+                .any(|c| c.name == "HTML 报告审计摘要核对" && c.status == "skipped")
+        );
+
+        let py_script = tmp.path().join("verify_bundle.py");
+        fs::write(&py_script, EMBEDDED_VERIFY_BUNDLE_PY).expect("write verify_bundle.py");
+        let venv_py = paths.root.join(".venv").join("Scripts").join("python.exe");
+        if venv_py.is_file() {
+            let py_out = std::process::Command::new(&venv_py)
+                .arg(&py_script)
+                .arg(&legacy_zip)
+                .output()
+                .expect("run verify_bundle.py on legacy zip");
+            assert!(
+                py_out.status.success(),
+                "verify_bundle.py 必须兼容不含 report.html 的旧包：{}",
+                String::from_utf8_lossy(&py_out.stderr)
+            );
         }
     }
 }

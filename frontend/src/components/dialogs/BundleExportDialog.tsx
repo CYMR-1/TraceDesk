@@ -170,6 +170,7 @@ export const BundleExportDialog: React.FC<BundleExportDialogProps> = ({
   return (
     <Modal
       title="导出复核包 · 选择纳入材料"
+      subtitle="复核包会自动同步打包最新 Markdown（report.md）与离线 HTML（report.html）双报告、审计链及清单校验文件"
       width={920}
       height={640}
       onClose={onClose}
@@ -211,7 +212,7 @@ export const BundleExportDialog: React.FC<BundleExportDialogProps> = ({
               <UiIcon name="warning" size={18} color="var(--warn-fg)" />
               <div style={{ fontWeight: 600 }}>
                 检测到 {missingParts.join(' 与 ')} 在本地目录中缺失（可能已被手动清理或被安全软件隔离）。
-                缺失项已标红且不可勾选；您可以自由勾选现存材料继续生成复核包，未纳入项会如实记入 manifest.json：
+                缺失项已标红且不可勾选；您可以自由勾选现存材料继续生成复核包（将自动同步纳入最新 Markdown 与离线 HTML 双报告），未纳入项会如实记入 manifest.json：
               </div>
             </div>
             <pre
@@ -232,7 +233,7 @@ export const BundleExportDialog: React.FC<BundleExportDialogProps> = ({
               <UiIcon name="check_shield" size={18} color="var(--ok-fg)" />
               <span>
                 全部历史导出副本（{availableExports.length} 条）与内容搜索记录（{availableSearches.length} 条）均完整存在。
-                默认全部勾选，您可自由取消不需要打入复核包的条目。
+                复核包将自动同步打包最新 Markdown 与离线 HTML 双报告；历史材料默认全部勾选，您可自由取消不需要打入复核包的条目。
               </span>
             </div>
           </div>

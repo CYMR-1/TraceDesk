@@ -321,7 +321,7 @@ fn rust_end_to_end_demo_dd_and_dual_verify_bundle() {
     // 13A. 原生 Rust `verify_bundle` 核验
     let rust_verified =
         verify_bundle(&bundle.bundle_path, Some(&bundle.sha256)).expect("Rust verify_bundle");
-    assert_eq!(rust_verified, 12); // report.md + 4 个导出副本 + 2 份搜索记录 + audit.jsonl + audit.head + verify_bundle.py + manifest.json + 复核说明.txt
+    assert_eq!(rust_verified, 13); // report.md + report.html + 4 个导出副本 + 2 份搜索记录 + audit.jsonl + audit.head + verify_bundle.py + manifest.json + 复核说明.txt
 
     // 13B. 当本地存在 `.venv\Scripts\python.exe` 与独立脚本 `verify_bundle.py` 时，
     //      可选执行跨语言核验。
@@ -343,7 +343,7 @@ fn rust_end_to_end_demo_dd_and_dual_verify_bundle() {
             "Python verify_bundle.py failed!\nstdout: {stdout}\nstderr: {stderr}"
         );
         assert!(
-            stdout.contains("核验通过：12 份材料及审计链。"),
+            stdout.contains("核验通过：13 份材料及审计链。"),
             "unexpected verify_bundle.py stdout: {stdout}"
         );
     }

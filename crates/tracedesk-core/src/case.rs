@@ -2709,14 +2709,67 @@ impl Case {
         }
     }
 
+    /// 为复核包构建一次性核验镜像完整性并同步生成配套的 Markdown 与离线 HTML 取证报告。
+    ///
+    /// 仅执行一次完整性前置校验，避免对大小镜像重复做整盘哈希；
+    /// 若完整性校验未通过（例如镜像被修改或大镜像未在本次会话完成固定校验），
+    /// 立即返回错误且不生成任何报告或复核包文件。
+    pub(crate) fn generate_bundle_reports(
+        &mut self,
+        tsk: Option<&TskCli>,
+    ) -> CoreResult<(PathBuf, HtmlReportResult)> {
+        let conclusion = match self.evaluate_report_conclusion(tsk) {
+            Ok(c) => c,
+            Err(err) => {
+                let mut d = Map::new();
+                d.insert("format".to_string(), Value::String("markdown".to_string()));
+                d.insert("error".to_string(), Value::String(err.to_string()));
+                let _ = self.log("REPORT_GENERATE", "Markdown", "失败", d);
+                return Err(err);
+            }
+        };
+        if !self.data.verification.as_ref().is_some_and(|v| v.ok) {
+            return Err(CoreError::IntegrityFailed(
+                "当前镜像与案件固定值不符，不能生成复核包".to_string(),
+            ));
+        }
+
+        let report_path = match self.write_report_with_conclusion(&conclusion) {
+            Ok(path) => path,
+            Err(err) => {
+                let mut d = Map::new();
+                d.insert("format".to_string(), Value::String("markdown".to_string()));
+                d.insert("error".to_string(), Value::String(err.to_string()));
+                let _ = self.log("REPORT_GENERATE", "Markdown", "失败", d);
+                return Err(err);
+            }
+        };
+
+        let html_report = match self.write_html_report_with_conclusion(&conclusion) {
+            Ok(result) => result,
+            Err(err) => {
+                let mut d = Map::new();
+                d.insert("format".to_string(), Value::String("html".to_string()));
+                d.insert("error".to_string(), Value::String(err.to_string()));
+                let _ = self.log("REPORT_GENERATE", "HTML", "失败", d);
+                return Err(err);
+            }
+        };
+
+        Ok((report_path, html_report))
+    }
+
     fn write_report(&mut self, tsk: Option<&TskCli>) -> CoreResult<PathBuf> {
         let conclusion = self.evaluate_report_conclusion(tsk)?;
+        self.write_report_with_conclusion(&conclusion)
+    }
 
+    fn write_report_with_conclusion(&mut self, conclusion: &str) -> CoreResult<PathBuf> {
         let mut start_details = Map::new();
         start_details.insert("format".to_string(), Value::String("markdown".to_string()));
         self.log("REPORT_GENERATE", "Markdown", "开始", start_details)?;
         let records = self.check_audit()?;
-        let content = render_report(&self.data, &records, &conclusion);
+        let content = render_report(&self.data, &records, conclusion);
 
         let uuid_hex = Uuid::new_v4().simple().to_string();
         let destination = self
@@ -2741,13 +2794,19 @@ impl Case {
 
     fn write_html_report(&mut self, tsk: Option<&TskCli>) -> CoreResult<HtmlReportResult> {
         let conclusion = self.evaluate_report_conclusion(tsk)?;
+        self.write_html_report_with_conclusion(&conclusion)
+    }
 
+    fn write_html_report_with_conclusion(
+        &mut self,
+        conclusion: &str,
+    ) -> CoreResult<HtmlReportResult> {
         let mut start_details = Map::new();
         start_details.insert("format".to_string(), Value::String("html".to_string()));
         self.log("REPORT_GENERATE", "HTML", "开始", start_details)?;
         let records = self.check_audit()?;
         let generated_at = now();
-        let content = render_html_report_with_time(&self.data, &records, &conclusion, &generated_at);
+        let content = render_html_report_with_time(&self.data, &records, conclusion, &generated_at);
 
         let ts = Utc::now().with_timezone(&east_8()).format("%Y%m%d_%H%M%S");
         let uuid_hex = Uuid::new_v4().simple().to_string();

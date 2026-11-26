@@ -107,7 +107,7 @@ fn verify_bundle_passes_golden_case_and_detects_all_tampering() {
             .find(|p| p.extension().and_then(|s| s.to_str()) == Some("zip"))
             .expect("fallback demo bundle zip");
         let sha = sha256_file(&zip_path, None, None).expect("hash fallback bundle");
-        (zip_path, sha, 10usize)
+        (zip_path, sha, 11usize)
     };
     let expected_msg = format!("核验通过：{expected_count} 份材料及审计链。");
 
@@ -405,7 +405,7 @@ fn make_demo_and_run_demo_closed_loop_via_cli() {
     assert!(demo_stdout.contains("导出："));
     assert!(demo_stdout.contains("报告："));
     assert!(demo_stdout.contains("复核包："));
-    assert!(demo_stdout.contains("核验通过：10 份材料及审计链。"));
+    assert!(demo_stdout.contains("核验通过：11 份材料及审计链。"));
     assert!(demo_stdout.contains("耗时明细："));
 
     // 验证 `latest-demo.txt` 标记文件已写入且指向有效的案件目录
@@ -452,7 +452,7 @@ fn make_demo_and_run_demo_closed_loop_via_cli() {
     assert!(verify_out.status.success());
     assert_eq!(
         String::from_utf8_lossy(&verify_out.stdout).trim(),
-        "核验通过：10 份材料及审计链。"
+        "核验通过：11 份材料及审计链。"
     );
 }
 
