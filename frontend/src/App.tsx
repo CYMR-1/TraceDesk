@@ -756,6 +756,10 @@ export const App: React.FC = () => {
       setDetailText(DEFAULT_DETAIL);
       setStatusText(DEFAULT_STATUS);
       applySnapshot(next);
+      // 成功新建或打开案件后默认进入文件浏览主工作台（避免停留在未开案 MCP 独立页）
+      if (next) {
+        setActiveTab('files');
+      }
       void refreshRecentCases();
       if (next) {
         await resumePartitions(next);
@@ -1337,6 +1341,12 @@ export const App: React.FC = () => {
   };
 
   const brandActions = registry.actionsAt('brand');
+  const brandActionMap = useMemo(
+    () => new Map(brandActions.map((act) => [act.key, act])),
+    [brandActions]
+  );
+  const helpAction = brandActionMap.get('help');
+  const mcpAction = brandActionMap.get('mcp');
   const headerActions = registry.actionsAt('header');
   const headerActionMap = useMemo(
     () => new Map(headerActions.map((act) => [act.key, act])),
@@ -1350,6 +1360,10 @@ export const App: React.FC = () => {
   const fileNoteAction = registry.actions.file_note;
   const hasFileNoteFeature = Boolean(registry.hasFeature('file_tools') && fileNoteAction);
 
+  // 视图形态判定：未开案全屏欢迎首页 / 未开案 MCP 独立监控页 / 已开案三段式工作台
+  const isWelcomeLaunchpad = !snapshot && activeTab !== 'mcp';
+  const isStandaloneMcp = !snapshot && activeTab === 'mcp';
+
   const custodyState = snapshot?.custodyState ?? 'idle';
   const showProgressBar = busy || hashingImage || contentSearching;
 
@@ -1360,6 +1374,18 @@ export const App: React.FC = () => {
     !busy && !hashingImage && contentSearching
       ? searchLiveState.stageText || '正在后台搜索文件内容…'
       : statusText;
+
+  // 未开案时为底栏左侧提供贴合当前视图的简洁提示文案
+  const footerDetailText = useMemo(() => {
+    if (snapshot) return detailText;
+    if (detailText !== DEFAULT_DETAIL) return detailText;
+    if (isStandaloneMcp) {
+      return 'MCP 实时监控模式 · 随时可通过右上角新建或打开案件进入取证工作台。';
+    }
+    return inTauri
+      ? '选择最近案件、点击快捷入口，或直接将 case.json 拖入窗口快速开始。'
+      : '浏览器只读演示预览模式 · 可新建/打开演示案件、体验离线复核包核验与 MCP 监控。';
+  }, [snapshot, detailText, isStandaloneMcp, inTauri]);
 
   // 聚合当前活跃的前台与后台任务名称，供实时任务进度弹窗清晰展示
   const activeTaskNames = useMemo(() => {
@@ -1405,377 +1431,521 @@ export const App: React.FC = () => {
 
   return (
     <div className="td-workbench">
-      {/* 1. 顶部 48px 明净瓷白命令带 */}
-      <header className="td-header">
-        <div className="td-header-brand">
-          <BrandLogo size={28} className="td-header-logo" />
-          <span className="td-header-title">TraceDesk</span>
+      {/* 未开案进入「MCP 实时监控」时的专属简洁顶栏（隐藏禁用态报告/复核包/镜像控件与空模块标签） */}
+      {isStandaloneMcp && (
+        <header className="td-header td-header--standalone-mcp">
+          <button
+            type="button"
+            className="td-btn td-hdr-back-btn"
+            title="返回 TraceDesk 欢迎首页"
+            onClick={() => setActiveTab('files')}
+          >
+            <UiIcon name="arrow_left" size={14} color="var(--accent-soft-text)" />
+            <span>返回首页</span>
+          </button>
+
           <div className="td-header-divider" />
-          <span className="td-header-subtitle">电子数据取证工作台</span>
-          {!inTauri && (
-            <span className="td-header-demo-tag" title="当前运行在纯浏览器环境，采用内置只读演示数据">
-              演示预览
-            </span>
-          )}
-        </div>
 
-        {brandActions.length > 0 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 4 }}>
-            {brandActions.map((act) => {
-              if (act.key === 'mcp') {
-                const isRunningNow = mcpRunningCalls > 0;
-                const stateClass = isRunningNow
-                  ? 'td-hdr-mcp-btn--running'
-                  : mcpHttpRunning
-                    ? 'td-hdr-mcp-btn--online'
-                    : 'td-hdr-btn--ghost';
-                const activeClass = activeTab === 'mcp' ? 'td-hdr-mcp-btn--active' : '';
-                return (
-                  <button
-                    key={act.key}
-                    type="button"
-                    className={`td-btn td-hdr-mcp-btn ${stateClass} ${activeClass}`}
-                    title={
-                      isRunningNow
-                        ? `${mcpLiveLabel}（点击切换到 MCP 实时监控）`
-                        : mcpHttpRunning
-                          ? `本地 MCP HTTP 服务运行中：${mcpStatus?.url}（点击打开实时监控）`
-                          : '切换到 MCP 实时监控与服务配置'
-                    }
-                    onClick={() => invokeAction(act.key)}
-                  >
-                    {isRunningNow ? (
-                      <span className="td-mcp-dot td-mcp-dot--running" />
-                    ) : mcpHttpRunning ? (
-                      <span className="td-mcp-dot td-mcp-dot--online" />
-                    ) : (
-                      act.icon && <UiIcon name={act.icon} size={14} color="var(--header-muted)" />
-                    )}
-                    <span className="td-hdr-mcp-label">{mcpLiveLabel}</span>
-                  </button>
-                );
-              }
-              return (
-                <button
-                  key={act.key}
-                  type="button"
-                  className="td-btn td-hdr-btn--ghost"
-                  onClick={() => invokeAction(act.key)}
-                >
-                  {act.icon && <UiIcon name={act.icon} size={14} color="var(--header-muted)" />}
-                  {act.title}
-                </button>
-              );
-            })}
+          <div className="td-header-brand">
+            <BrandLogo size={26} className="td-header-logo td-header-logo--compact" />
+            <span className="td-header-title">TraceDesk</span>
+            <div className="td-header-divider" />
+            <span className="td-header-page-title">MCP 实时监控</span>
+            {!inTauri && (
+              <span className="td-header-demo-tag" title="当前运行在纯浏览器环境，采用内置只读演示数据">
+                演示预览
+              </span>
+            )}
           </div>
-        )}
 
-        <div className="td-header-spacer" />
+          <div className="td-header-spacer" />
 
-        <div className="td-hdr-actions">
-          {/* 案件管理分段控件组：新建案件 / 打开案件 / 关闭（已开案时显示） */}
-          {(newCaseAction || openCaseAction || snapshot) && (
-            <div className="td-hdr-segmented" role="group" aria-label="案件管理">
-              {newCaseAction && (
-                <button
-                  type="button"
-                  data-action-key="new_case"
-                  disabled={busy}
-                  className="td-hdr-seg-btn"
-                  title="新建隔离取证案件目录"
-                  onClick={() => invokeAction('new_case')}
-                >
-                  <UiIcon
-                    name={newCaseAction.icon || 'case_new'}
-                    size={14}
-                    color={busy ? 'var(--text-disabled)' : 'var(--header-icon)'}
-                  />
-                  <span>{newCaseAction.title}</span>
-                </button>
-              )}
-              {openCaseAction && (
-                <button
-                  type="button"
-                  data-action-key="open_case"
-                  disabled={busy}
-                  className="td-hdr-seg-btn"
-                  title="打开已有取证案件"
-                  onClick={() => invokeAction('open_case')}
-                >
-                  <UiIcon
-                    name={openCaseAction.icon || 'case_open'}
-                    size={14}
-                    color={busy ? 'var(--text-disabled)' : 'var(--header-icon)'}
-                  />
-                  <span>{openCaseAction.title}</span>
-                </button>
-              )}
-              {snapshot && (
-                <button
-                  type="button"
-                  data-action-key="close_case"
-                  disabled={busy}
-                  className="td-hdr-seg-btn td-hdr-seg-btn--danger"
-                  title="关闭当前打开的案件并返回欢迎工作台"
-                  onClick={() => void handleCloseCase()}
-                >
-                  <UiIcon name="x_circle" size={14} />
-                  <span>关闭</span>
-                </button>
-              )}
-            </div>
-          )}
-
-          {/* 报告输出下拉菜单：合并 Markdown 与离线 HTML 两种报告格式 */}
-          {reportAction && (
-            <>
-              <div className="td-header-divider td-header-divider--cmd" />
-              <div className="td-hdr-dropdown" ref={reportMenuRef}>
-                <button
-                  type="button"
-                  data-action-key="report_menu"
-                  disabled={busy || !snapshot}
-                  aria-haspopup="menu"
-                  aria-expanded={reportMenuOpen}
-                  className={`td-btn td-hdr-btn td-hdr-dropdown-trigger ${reportMenuOpen ? 'td-hdr-dropdown-trigger--open' : ''}`}
-                  title={
-                    snapshot
-                      ? '选择导出 Markdown 或离线单文件 HTML 取证报告'
-                      : '请先新建或打开案件后生成报告'
-                  }
-                  onClick={() => setReportMenuOpen((prev) => !prev)}
-                >
-                  <UiIcon
-                    name="report"
-                    size={14}
-                    color={busy || !snapshot ? 'var(--text-disabled)' : 'var(--header-icon)'}
-                  />
-                  <span>生成报告</span>
-                  <UiIcon
-                    name="chevron_down"
-                    size={12}
-                    className="td-hdr-dropdown-caret"
-                    color={busy || !snapshot ? 'var(--text-disabled)' : 'var(--header-muted)'}
-                  />
-                </button>
-
-                {reportMenuOpen && snapshot && !busy && (
-                  <div className="td-hdr-dropdown-menu" role="menu" aria-label="选择取证报告格式">
-                    <button
-                      type="button"
-                      role="menuitem"
-                      data-action-key="report"
-                      className="td-hdr-dropdown-item"
-                      onClick={() => {
-                        setReportMenuOpen(false);
-                        void handleGenerateReport();
-                      }}
-                    >
-                      <span className="td-hdr-dropdown-icon">
-                        <UiIcon name="report" size={15} color="var(--accent)" />
-                      </span>
-                      <span className="td-hdr-dropdown-body">
-                        <span className="td-hdr-dropdown-title-row">
-                          <span className="td-hdr-dropdown-title">Markdown 报告</span>
-                          <span className="td-hdr-dropdown-ext td-mono">.md</span>
-                        </span>
-                        <span className="td-hdr-dropdown-desc">
-                          结构化分节文本，便于归档与二次编辑
-                        </span>
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      role="menuitem"
-                      data-action-key="html_report"
-                      className="td-hdr-dropdown-item"
-                      onClick={() => {
-                        setReportMenuOpen(false);
-                        void handleGenerateHtmlReport();
-                      }}
-                    >
-                      <span className="td-hdr-dropdown-icon">
-                        <UiIcon name="html_report" size={15} color="var(--accent)" />
-                      </span>
-                      <span className="td-hdr-dropdown-body">
-                        <span className="td-hdr-dropdown-title-row">
-                          <span className="td-hdr-dropdown-title">离线 HTML 报告</span>
-                          <span className="td-hdr-dropdown-ext td-mono">.html</span>
-                        </span>
-                        <span className="td-hdr-dropdown-desc">
-                          单文件自包含排版，支持无网浏览器审阅打印
-                        </span>
-                      </span>
-                    </button>
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-
-          {/* 复核包操作组：晴空蓝主焦点「导出复核包」+ 浅蓝描边「核验复核包」 */}
-          <div className="td-header-divider td-header-divider--cmd" />
-          <div className="td-hdr-bundle-group">
-            {exportBundleAction && (
+          <div className="td-hdr-actions">
+            {helpAction && (
               <button
                 type="button"
-                data-action-key="export_bundle"
-                disabled={busy || !snapshot}
-                className="td-btn td-hdr-btn--primary"
-                title={
-                  snapshot
-                    ? '打包案件报告、导出副本、搜索记录、审计链与 SHA256SUMS 复核包'
-                    : '请先新建或打开案件后导出复核包'
-                }
-                onClick={() => invokeAction('export_bundle')}
+                className="td-btn td-hdr-btn--ghost"
+                title="查看 TraceDesk 操作说明与取证指南"
+                onClick={() => invokeAction('help')}
               >
-                <UiIcon
-                  name={exportBundleAction.icon || 'bundle'}
-                  size={14}
-                  color={busy || !snapshot ? 'var(--header-primary-disabled-fg)' : '#FFFFFF'}
-                />
-                <span>{exportBundleAction.title}</span>
+                <UiIcon name={helpAction.icon || 'help'} size={14} color="var(--header-muted)" />
+                <span>{helpAction.title}</span>
               </button>
             )}
+
+            {(newCaseAction || openCaseAction) && (
+              <>
+                {helpAction && <div className="td-header-divider td-header-divider--cmd" />}
+                <div className="td-hdr-segmented" role="group" aria-label="案件管理">
+                  {newCaseAction && (
+                    <button
+                      type="button"
+                      data-action-key="new_case"
+                      disabled={busy}
+                      className="td-hdr-seg-btn"
+                      title="新建隔离取证案件目录"
+                      onClick={() => invokeAction('new_case')}
+                    >
+                      <UiIcon
+                        name={newCaseAction.icon || 'case_new'}
+                        size={14}
+                        color={busy ? 'var(--text-disabled)' : 'var(--header-icon)'}
+                      />
+                      <span>{newCaseAction.title}</span>
+                    </button>
+                  )}
+                  {openCaseAction && (
+                    <button
+                      type="button"
+                      data-action-key="open_case"
+                      disabled={busy}
+                      className="td-hdr-seg-btn"
+                      title="打开已有取证案件"
+                      onClick={() => invokeAction('open_case')}
+                    >
+                      <UiIcon
+                        name={openCaseAction.icon || 'case_open'}
+                        size={14}
+                        color={busy ? 'var(--text-disabled)' : 'var(--header-icon)'}
+                      />
+                      <span>{openCaseAction.title}</span>
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+
             <button
               type="button"
               data-action-key="verify_bundle"
               className="td-btn td-hdr-btn td-hdr-btn--verify"
-              title="离线核验复核包 ZIP 完整性、审计哈希链与逐成员防篡改摘要（未打开案件同样可用）"
+              title="离线核验复核包 ZIP 完整性、审计哈希链与逐成员防篡改摘要"
               onClick={() => setVerifyBundleOpen(true)}
             >
               <UiIcon name="check_shield" size={14} color="var(--accent-soft-text)" />
               <span>核验复核包</span>
             </button>
           </div>
-        </div>
-      </header>
+        </header>
+      )}
 
-      {/* 2. 案件与证据保管状态条（单行左右排布 + 3px 左侧语义指示边框） */}
-      <section className="td-custody-bar" data-state={custodyState} aria-label="案件保管状态">
-        {snapshot ? (
-          <div className="td-custody-lines">
-            <div className="td-custody-line td-custody-primary" title={snapshot.summaryLine1}>
-              {snapshot.summaryLine1}
+      {/* 已打开案件时渲染完整三段式工作台顶栏：命令带 + 保管状态条 + 模块导航标签带 */}
+      {snapshot && (
+        <>
+          {/* 1. 顶部 48px 明净瓷白命令带 */}
+          <header className="td-header">
+            <div className="td-header-brand">
+              <BrandLogo size={28} className="td-header-logo" />
+              <span className="td-header-title">TraceDesk</span>
+              <div className="td-header-divider" />
+              <span className="td-header-subtitle">电子数据取证工作台</span>
+              {!inTauri && (
+                <span className="td-header-demo-tag" title="当前运行在纯浏览器环境，采用内置只读演示数据">
+                  演示预览
+                </span>
+              )}
             </div>
-            {snapshot.summaryLine2 && (
-              <div className="td-custody-line td-custody-secondary" title={snapshot.summaryLine2}>
-                <span className="td-custody-dot" aria-hidden="true" />
-                <span className="td-custody-secondary-text">{snapshot.summaryLine2}</span>
+
+            {brandActions.length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 4 }}>
+                {brandActions.map((act) => {
+                  if (act.key === 'mcp') {
+                    const isRunningNow = mcpRunningCalls > 0;
+                    const stateClass = isRunningNow
+                      ? 'td-hdr-mcp-btn--running'
+                      : mcpHttpRunning
+                        ? 'td-hdr-mcp-btn--online'
+                        : 'td-hdr-btn--ghost';
+                    const activeClass = activeTab === 'mcp' ? 'td-hdr-mcp-btn--active' : '';
+                    return (
+                      <button
+                        key={act.key}
+                        type="button"
+                        className={`td-btn td-hdr-mcp-btn ${stateClass} ${activeClass}`}
+                        title={
+                          isRunningNow
+                            ? `${mcpLiveLabel}（点击切换到 MCP 实时监控）`
+                            : mcpHttpRunning
+                              ? `本地 MCP HTTP 服务运行中：${mcpStatus?.url}（点击打开实时监控）`
+                              : '切换到 MCP 实时监控与服务配置'
+                        }
+                        onClick={() => invokeAction(act.key)}
+                      >
+                        {isRunningNow ? (
+                          <span className="td-mcp-dot td-mcp-dot--running" />
+                        ) : mcpHttpRunning ? (
+                          <span className="td-mcp-dot td-mcp-dot--online" />
+                        ) : (
+                          act.icon && <UiIcon name={act.icon} size={14} color="var(--header-muted)" />
+                        )}
+                        <span className="td-hdr-mcp-label">{mcpLiveLabel}</span>
+                      </button>
+                    );
+                  }
+                  return (
+                    <button
+                      key={act.key}
+                      type="button"
+                      className="td-btn td-hdr-btn--ghost"
+                      onClick={() => invokeAction(act.key)}
+                    >
+                      {act.icon && <UiIcon name={act.icon} size={14} color="var(--header-muted)" />}
+                      {act.title}
+                    </button>
+                  );
+                })}
               </div>
             )}
-          </div>
-        ) : (
-          <div className="td-custody-lines td-custody-lines--idle">
-            <div className="td-custody-line td-custody-idle">
-              <span className="td-custody-dot" aria-hidden="true" />
-              <span className="td-custody-idle-text">
-                尚未打开案件。新建案件并加载镜像，或打开已有案件继续分析。
-              </span>
+
+            <div className="td-header-spacer" />
+
+            <div className="td-hdr-actions">
+              {/* 案件管理分段控件组：新建案件 / 打开案件 / 关闭 */}
+              {(newCaseAction || openCaseAction || snapshot) && (
+                <div className="td-hdr-segmented" role="group" aria-label="案件管理">
+                  {newCaseAction && (
+                    <button
+                      type="button"
+                      data-action-key="new_case"
+                      disabled={busy}
+                      className="td-hdr-seg-btn"
+                      title="新建隔离取证案件目录"
+                      onClick={() => invokeAction('new_case')}
+                    >
+                      <UiIcon
+                        name={newCaseAction.icon || 'case_new'}
+                        size={14}
+                        color={busy ? 'var(--text-disabled)' : 'var(--header-icon)'}
+                      />
+                      <span>{newCaseAction.title}</span>
+                    </button>
+                  )}
+                  {openCaseAction && (
+                    <button
+                      type="button"
+                      data-action-key="open_case"
+                      disabled={busy}
+                      className="td-hdr-seg-btn"
+                      title="打开已有取证案件"
+                      onClick={() => invokeAction('open_case')}
+                    >
+                      <UiIcon
+                        name={openCaseAction.icon || 'case_open'}
+                        size={14}
+                        color={busy ? 'var(--text-disabled)' : 'var(--header-icon)'}
+                      />
+                      <span>{openCaseAction.title}</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    data-action-key="close_case"
+                    disabled={busy}
+                    className="td-hdr-seg-btn td-hdr-seg-btn--danger"
+                    title="关闭当前打开的案件并返回欢迎首页"
+                    onClick={() => void handleCloseCase()}
+                  >
+                    <UiIcon name="x_circle" size={14} />
+                    <span>关闭</span>
+                  </button>
+                </div>
+              )}
+
+              {/* 报告输出下拉菜单：合并 Markdown 与离线 HTML 两种报告格式 */}
+              {reportAction && (
+                <>
+                  <div className="td-header-divider td-header-divider--cmd" />
+                  <div className="td-hdr-dropdown" ref={reportMenuRef}>
+                    <button
+                      type="button"
+                      data-action-key="report_menu"
+                      disabled={busy}
+                      aria-haspopup="menu"
+                      aria-expanded={reportMenuOpen}
+                      className={`td-btn td-hdr-btn td-hdr-dropdown-trigger ${reportMenuOpen ? 'td-hdr-dropdown-trigger--open' : ''}`}
+                      title="选择导出 Markdown 或离线单文件 HTML 取证报告"
+                      onClick={() => setReportMenuOpen((prev) => !prev)}
+                    >
+                      <UiIcon
+                        name="report"
+                        size={14}
+                        color={busy ? 'var(--text-disabled)' : 'var(--header-icon)'}
+                      />
+                      <span>生成报告</span>
+                      <UiIcon
+                        name="chevron_down"
+                        size={12}
+                        className="td-hdr-dropdown-caret"
+                        color={busy ? 'var(--text-disabled)' : 'var(--header-muted)'}
+                      />
+                    </button>
+
+                    {reportMenuOpen && !busy && (
+                      <div className="td-hdr-dropdown-menu" role="menu" aria-label="选择取证报告格式">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          data-action-key="report"
+                          className="td-hdr-dropdown-item"
+                          onClick={() => {
+                            setReportMenuOpen(false);
+                            void handleGenerateReport();
+                          }}
+                        >
+                          <span className="td-hdr-dropdown-icon">
+                            <UiIcon name="report" size={15} color="var(--accent)" />
+                          </span>
+                          <span className="td-hdr-dropdown-body">
+                            <span className="td-hdr-dropdown-title-row">
+                              <span className="td-hdr-dropdown-title">Markdown 报告</span>
+                              <span className="td-hdr-dropdown-ext td-mono">.md</span>
+                            </span>
+                            <span className="td-hdr-dropdown-desc">
+                              结构化分节文本，便于归档与二次编辑
+                            </span>
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          role="menuitem"
+                          data-action-key="html_report"
+                          className="td-hdr-dropdown-item"
+                          onClick={() => {
+                            setReportMenuOpen(false);
+                            void handleGenerateHtmlReport();
+                          }}
+                        >
+                          <span className="td-hdr-dropdown-icon">
+                            <UiIcon name="html_report" size={15} color="var(--accent)" />
+                          </span>
+                          <span className="td-hdr-dropdown-body">
+                            <span className="td-hdr-dropdown-title-row">
+                              <span className="td-hdr-dropdown-title">离线 HTML 报告</span>
+                              <span className="td-hdr-dropdown-ext td-mono">.html</span>
+                            </span>
+                            <span className="td-hdr-dropdown-desc">
+                              单文件自包含排版，支持无网浏览器审阅打印
+                            </span>
+                          </span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {/* 复核包操作组：晴空蓝主焦点「导出复核包」+ 浅蓝描边「核验复核包」 */}
+              <div className="td-header-divider td-header-divider--cmd" />
+              <div className="td-hdr-bundle-group">
+                {exportBundleAction && (
+                  <button
+                    type="button"
+                    data-action-key="export_bundle"
+                    disabled={busy}
+                    className="td-btn td-hdr-btn--primary"
+                    title="打包案件报告、导出副本、搜索记录、审计链与 SHA256SUMS 复核包"
+                    onClick={() => invokeAction('export_bundle')}
+                  >
+                    <UiIcon
+                      name={exportBundleAction.icon || 'bundle'}
+                      size={14}
+                      color={busy ? 'var(--header-primary-disabled-fg)' : '#FFFFFF'}
+                    />
+                    <span>{exportBundleAction.title}</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  data-action-key="verify_bundle"
+                  className="td-btn td-hdr-btn td-hdr-btn--verify"
+                  title="离线核验复核包 ZIP 完整性、审计哈希链与逐成员防篡改摘要（未打开案件同样可用）"
+                  onClick={() => setVerifyBundleOpen(true)}
+                >
+                  <UiIcon name="check_shield" size={14} color="var(--accent-soft-text)" />
+                  <span>核验复核包</span>
+                </button>
+              </div>
             </div>
-          </div>
-        )}
-      </section>
+          </header>
 
-      {/* 3. 模块导航标签带（38px，薄雾浅蓝 #EFF4F9） */}
-      <nav className="td-tab-strip" aria-label="功能模块导航">
-        <div className="td-tab-list" role="tablist">
-          {registry.panels.map((panel) => {
-            const isActive = activeTab === panel.key;
-            return (
-              <button
-                key={panel.key}
-                type="button"
-                role="tab"
-                aria-selected={isActive}
-                className={`td-module-tab ${isActive ? 'td-module-tab--active' : ''}`}
-                onClick={() => {
-                  setActiveTab(panel.key);
-                  if (panel.key === 'findings' || panel.key === 'audit') {
-                    bumpRefresh();
-                  }
-                }}
-              >
-                {panel.title}
-                {panel.key === 'review' && contentSearching && (
-                  <span className="td-tab-badge" title="后台内容搜索正在运行">
-                    <span className="td-mcp-dot td-mcp-dot--running" style={{ width: 6, height: 6 }} />
-                    搜索中
-                  </span>
-                )}
-                {panel.key === 'mcp' && mcpRunningCalls > 0 && (
-                  <span className="td-tab-badge">
-                    <span className="td-mcp-dot td-mcp-dot--running" style={{ width: 6, height: 6 }} />
-                    {mcpRunningCalls}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
+          {/* 2. 案件与证据保管状态条（单行左右排布 + 3px 左侧语义指示边框） */}
+          <section className="td-custody-bar" data-state={custodyState} aria-label="案件保管状态">
+            <div className="td-custody-lines">
+              <div className="td-custody-line td-custody-primary" title={snapshot.summaryLine1}>
+                {snapshot.summaryLine1}
+              </div>
+              {snapshot.summaryLine2 && (
+                <div className="td-custody-line td-custody-secondary" title={snapshot.summaryLine2}>
+                  <span className="td-custody-dot" aria-hidden="true" />
+                  <span className="td-custody-secondary-text">{snapshot.summaryLine2}</span>
+                </div>
+              )}
+            </div>
+          </section>
 
-        <div className="td-tab-actions">
-          {evidenceActions.map((act) => {
-            const isVerify = act.key === 'verify';
-            const isLoad = act.key === 'load';
-            const verifyWarning = isVerify && hashingImage;
-            const disabled = isVerify
-              ? !hashingImage && (busy || !snapshot?.evidence)
-              : busy || !snapshot;
+          {/* 3. 模块导航标签带（38px，薄雾浅蓝 #EFF4F9） */}
+          <nav className="td-tab-strip" aria-label="功能模块导航">
+            <div className="td-tab-list" role="tablist">
+              {registry.panels.map((panel) => {
+                const isActive = activeTab === panel.key;
+                return (
+                  <button
+                    key={panel.key}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    className={`td-module-tab ${isActive ? 'td-module-tab--active' : ''}`}
+                    onClick={() => {
+                      setActiveTab(panel.key);
+                      if (panel.key === 'findings' || panel.key === 'audit') {
+                        bumpRefresh();
+                      }
+                    }}
+                  >
+                    {panel.title}
+                    {panel.key === 'review' && contentSearching && (
+                      <span className="td-tab-badge" title="后台内容搜索正在运行">
+                        <span className="td-mcp-dot td-mcp-dot--running" style={{ width: 6, height: 6 }} />
+                        搜索中
+                      </span>
+                    )}
+                    {panel.key === 'mcp' && mcpRunningCalls > 0 && (
+                      <span className="td-tab-badge">
+                        <span className="td-mcp-dot td-mcp-dot--running" style={{ width: 6, height: 6 }} />
+                        {mcpRunningCalls}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
 
-            const btnClass = verifyWarning
-              ? 'td-btn td-btn--warning'
-              : isLoad
-                ? 'td-btn td-btn--accent'
-                : 'td-btn';
+            <div className="td-tab-actions">
+              {evidenceActions.map((act) => {
+                const isVerify = act.key === 'verify';
+                const isLoad = act.key === 'load';
+                const verifyWarning = isVerify && hashingImage;
+                const disabled = isVerify
+                  ? !hashingImage && (busy || !snapshot.evidence)
+                  : busy;
 
-            const iconName = verifyWarning ? 'warning' : act.icon;
-            const iconColor = verifyWarning
-              ? 'var(--warn-fg)'
-              : isLoad
-                ? disabled
-                  ? 'var(--header-primary-disabled-fg)'
-                  : '#FFFFFF'
-                : disabled
-                  ? 'var(--text-disabled)'
-                  : 'var(--text-secondary)';
+                const btnClass = verifyWarning
+                  ? 'td-btn td-btn--warning'
+                  : isLoad
+                    ? 'td-btn td-btn--accent'
+                    : 'td-btn';
 
-            return (
-              <button
-                key={act.key}
-                type="button"
-                className={btnClass}
-                disabled={disabled}
-                onClick={() => invokeAction(act.key)}
-              >
-                {iconName && <UiIcon name={iconName} size={14} color={iconColor} />}
-                {verifyWarning ? '取消校验' : act.title}
-              </button>
-            );
-          })}
-        </div>
-      </nav>
+                const iconName = verifyWarning ? 'warning' : act.icon;
+                const iconColor = verifyWarning
+                  ? 'var(--warn-fg)'
+                  : isLoad
+                    ? disabled
+                      ? 'var(--header-primary-disabled-fg)'
+                      : '#FFFFFF'
+                    : disabled
+                      ? 'var(--text-disabled)'
+                      : 'var(--text-secondary)';
 
-      {/* 4. 纯白证据工作区 */}
+                return (
+                  <button
+                    key={act.key}
+                    type="button"
+                    className={btnClass}
+                    disabled={disabled}
+                    onClick={() => invokeAction(act.key)}
+                  >
+                    {iconName && <UiIcon name={iconName} size={14} color={iconColor} />}
+                    {verifyWarning ? '取消校验' : act.title}
+                  </button>
+                );
+              })}
+            </div>
+          </nav>
+        </>
+      )}
+
+      {/* 4. 纯白证据工作区 / 全屏欢迎首页 */}
       <main className="td-workspace">
-        {/* 未开案时展示瓷白晴空蓝取证启动工作台（仍允许切换查看 MCP 实时监控页） */}
-        {!snapshot && activeTab !== 'mcp' && (
+        {/* 未开案时以全屏瓷白晴空蓝启动台铺满窗口（集成操作说明与 MCP 实时状态入口） */}
+        {isWelcomeLaunchpad && (
           <div className="td-welcome-empty">
             <div className="td-welcome-canvas">
-              {/* 顶部克制品牌头区与核心特性微标签 */}
+              {/* 顶部品牌头区与右上角轻量工具入口 */}
               <div className="td-welcome-masthead">
-                <div className="td-welcome-brand">
-                  <div className="td-welcome-emblem">
-                    <BrandLogo size={36} />
+                <div className="td-welcome-masthead-top">
+                  <div className="td-welcome-brand">
+                    <div className="td-welcome-emblem">
+                      <BrandLogo size={36} />
+                    </div>
+                    <div className="td-welcome-hero-text">
+                      <div className="td-welcome-title-row">
+                        <h1 className="td-welcome-title">TraceDesk 电子数据取证工作台</h1>
+                        {!inTauri && (
+                          <span
+                            className="td-header-demo-tag"
+                            title="当前运行在纯浏览器环境，采用内置只读演示数据"
+                          >
+                            演示预览
+                          </span>
+                        )}
+                      </div>
+                      <p className="td-welcome-subtitle">
+                        面向本地证据镜像的无损只读勘验、流式内容检索与防篡改交付工作台
+                      </p>
+                    </div>
                   </div>
-                  <div className="td-welcome-hero-text">
-                    <h1 className="td-welcome-title">TraceDesk 电子数据取证工作台</h1>
-                    <p className="td-welcome-subtitle">
-                      面向本地证据镜像的无损只读勘验、流式内容检索与防篡改交付工作台
-                    </p>
-                  </div>
+
+                  {/* 顶部精致集成工具角：操作说明 + MCP 实时监控 */}
+                  {(helpAction || mcpAction) && (
+                    <div className="td-welcome-utilities" role="toolbar" aria-label="工作台辅助功能">
+                      {helpAction && (
+                        <button
+                          type="button"
+                          className="td-welcome-tool-btn"
+                          title="查看 TraceDesk 操作说明与标准取证流程"
+                          onClick={() => invokeAction('help')}
+                        >
+                          <UiIcon name={helpAction.icon || 'help'} size={14} color="var(--header-icon)" />
+                          <span>{helpAction.title}</span>
+                        </button>
+                      )}
+                      {mcpAction && (() => {
+                        const isRunningNow = mcpRunningCalls > 0;
+                        const mcpStateClass = isRunningNow
+                          ? 'td-welcome-mcp-btn--running'
+                          : mcpHttpRunning
+                            ? 'td-welcome-mcp-btn--online'
+                            : '';
+                        return (
+                          <button
+                            type="button"
+                            className={`td-welcome-tool-btn td-welcome-mcp-btn ${mcpStateClass}`}
+                            title={
+                              isRunningNow
+                                ? `${mcpLiveLabel}（点击进入 MCP 实时监控）`
+                                : mcpHttpRunning
+                                  ? `本地 MCP HTTP 服务运行中：${mcpStatus?.url}（点击进入实时监控）`
+                                  : '打开 MCP 实时监控与服务接入配置'
+                            }
+                            onClick={() => invokeAction('mcp')}
+                          >
+                            {isRunningNow ? (
+                              <span className="td-mcp-dot td-mcp-dot--running" />
+                            ) : mcpHttpRunning ? (
+                              <span className="td-mcp-dot td-mcp-dot--online" />
+                            ) : (
+                              <UiIcon name={mcpAction.icon || 'mcp'} size={14} color="var(--header-icon)" />
+                            )}
+                            <span className="td-welcome-mcp-label">{mcpLiveLabel}</span>
+                          </button>
+                        );
+                      })()}
+                    </div>
+                  )}
                 </div>
+
+                {/* 核心特性微标签行 */}
                 <div className="td-welcome-specs" aria-label="工作台核心能力">
                   {WORKBENCH_CAPABILITIES.map((cap) => (
                     <span key={cap} className="td-welcome-spec-chip">
@@ -1798,9 +1968,7 @@ export const App: React.FC = () => {
                   </span>
                   <span className="td-welcome-tile-body">
                     <span className="td-welcome-tile-title">新建案件</span>
-                    <span className="td-welcome-tile-desc">
-                      初始化隔离案件目录与 SHA-256 审计链起点
-                    </span>
+                    <span className="td-welcome-tile-desc">创建隔离案件目录与审计链起点</span>
                   </span>
                   <UiIcon
                     name="arrow_right"
@@ -1821,9 +1989,7 @@ export const App: React.FC = () => {
                   </span>
                   <span className="td-welcome-tile-body">
                     <span className="td-welcome-tile-title">打开已有案件</span>
-                    <span className="td-welcome-tile-desc">
-                      浏览本地 case.json 或从历史案件目录恢复勘验
-                    </span>
+                    <span className="td-welcome-tile-desc">浏览本地 case.json 或恢复历史勘验</span>
                   </span>
                   <UiIcon
                     name="arrow_right"
@@ -1843,9 +2009,7 @@ export const App: React.FC = () => {
                   </span>
                   <span className="td-welcome-tile-body">
                     <span className="td-welcome-tile-title">离线核验复核包</span>
-                    <span className="td-welcome-tile-desc">
-                      独立核验复核包 ZIP 完整性、审计链与成员摘要
-                    </span>
+                    <span className="td-welcome-tile-desc">校验复核包 ZIP 完整性与审计链</span>
                   </span>
                   <UiIcon
                     name="arrow_right"
@@ -1856,7 +2020,7 @@ export const App: React.FC = () => {
                 </button>
               </div>
 
-              {/* 主体平衡双栏：左侧最近案件档案列表 + 右侧快捷拖放区与标准取证闭环 */}
+              {/* 主体平衡双栏：左侧最近案件档案列表 + 右侧快捷拖放/点击打开区与标准取证闭环 */}
               <div className="td-welcome-split">
                 <section className="td-welcome-panel td-welcome-recent-panel" aria-label="最近案件">
                   <div className="td-welcome-panel-head">
@@ -1962,18 +2126,27 @@ export const App: React.FC = () => {
                 </section>
 
                 <aside className="td-welcome-aside" aria-label="文件拖放与标准取证流程">
-                  {/* 精致虚线拖放引导区 */}
-                  <div className="td-welcome-dropzone">
+                  {/* 可点击与拖放双模式虚线引导区 */}
+                  <button
+                    type="button"
+                    className="td-welcome-dropzone"
+                    disabled={busy}
+                    title="点击选择本地 case.json 打开案件，或直接拖入窗口"
+                    onClick={handleOpenCase}
+                  >
                     <div className="td-welcome-dropzone-head">
                       <span className="td-welcome-dropzone-icon">
                         <UiIcon name="import_disk" size={17} color="var(--accent)" />
                       </span>
                       <div className="td-welcome-dropzone-copy">
-                        <div className="td-welcome-dropzone-title">拖入文件快速打开</div>
+                        <div className="td-welcome-dropzone-title-row">
+                          <span className="td-welcome-dropzone-title">拖入文件快速打开</span>
+                          <span className="td-welcome-dropzone-hint">点击选择</span>
+                        </div>
                         <div className="td-welcome-dropzone-desc">
                           {inTauri
-                            ? '将 case.json 拖入窗口即可打开案件；开案后拖入镜像文件自动识别分区。'
-                            : '桌面端支持将 case.json 或常见磁盘镜像直接拖入窗口快速载入。'}
+                            ? '将 case.json 拖入窗口或点击此处打开案件；开案后拖入镜像文件自动识别分区。'
+                            : '点击此处打开演示案件；桌面端支持将 case.json 或磁盘镜像直接拖入窗口。'}
                         </div>
                       </div>
                     </div>
@@ -1986,7 +2159,7 @@ export const App: React.FC = () => {
                       <span className="td-welcome-fmt-pill td-mono">.raw</span>
                       <span className="td-welcome-fmt-pill td-mono">.img</span>
                     </div>
-                  </div>
+                  </button>
 
                   {/* 四步标准取证闭环速览 */}
                   <div className="td-welcome-panel td-welcome-workflow">
@@ -2131,8 +2304,8 @@ export const App: React.FC = () => {
 
       {/* 5. 底部只读状态与进度遥测栏（28px） */}
       <footer className="td-footer">
-        <span className="td-footer-detail" title={detailText}>
-          {detailText}
+        <span className="td-footer-detail" title={footerDetailText}>
+          {footerDetailText}
         </span>
         {mcpRunningCalls > 0 && (
           <button

@@ -3333,16 +3333,16 @@
   position: relative;
 }
 
-/* 未开案主工作区：明净瓷白与晴空蓝取证启动工作台 */
+/* 未开案全屏欢迎首页：明净瓷白与晴空蓝专业取证启动台 */
 .td-welcome-empty {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 28px 34px 36px;
-  background-color: #F6F9FD;
+  padding: 36px 40px 44px;
+  background-color: #F6FAFD;
   background-image:
-    radial-gradient(ellipse 72% 46% at 50% 0%, rgba(38, 116, 196, 0.068), transparent 72%),
-    radial-gradient(rgba(148, 174, 202, 0.32) 0.9px, transparent 0.9px);
+    radial-gradient(ellipse 76% 42% at 50% 0%, rgba(38, 116, 196, 0.085), transparent 72%),
+    radial-gradient(rgba(148, 174, 202, 0.28) 0.9px, transparent 0.9px);
   background-size: 100% 100%, 22px 22px;
   display: flex;
   flex-direction: column;
@@ -3350,21 +3350,28 @@
 
 .td-welcome-canvas {
   width: 100%;
-  max-width: 1080px;
+  max-width: 1120px;
   margin: auto;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 20px;
 }
 
-/* 顶部克制品牌头区与特性微标签 */
+/* 顶部品牌头区：左侧徽标标题 + 右侧轻量集成工具角 + 下方核心能力微标 */
 .td-welcome-masthead {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  gap: 13px;
+  padding: 2px 2px 16px;
+  border-bottom: 1px solid rgba(211, 221, 232, 0.72);
+}
+
+.td-welcome-masthead-top {
+  display: flex;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: 18px;
   flex-wrap: wrap;
-  padding: 4px 2px 2px;
 }
 
 .td-welcome-brand {
@@ -3375,12 +3382,12 @@
 }
 
 .td-welcome-emblem {
-  width: 52px;
-  height: 52px;
-  border-radius: 12px;
+  width: 54px;
+  height: 54px;
+  border-radius: 13px;
   background: var(--surface-bg);
   border: 1px solid var(--border-pane);
-  box-shadow: 0 2px 8px rgba(24, 64, 112, 0.06);
+  box-shadow: 0 3px 10px rgba(24, 64, 112, 0.07);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -3394,40 +3401,130 @@
   min-width: 0;
 }
 
+.td-welcome-title-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex-wrap: wrap;
+}
+
 .td-welcome-title {
   margin: 0;
   font-family: var(--font-brand);
-  font-size: 20px;
+  font-size: 21px;
   font-weight: 700;
   color: var(--text-primary);
   letter-spacing: 0.2px;
-  line-height: 1.25;
+  line-height: 1.24;
 }
 
 .td-welcome-subtitle {
   margin: 0;
-  font-size: 12.5px;
+  font-size: 12.75px;
   color: var(--text-secondary);
   line-height: 1.45;
+}
+
+/* 欢迎首页顶部轻量集成工具角（操作说明 + MCP 实时监控） */
+.td-welcome-utilities {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+
+.td-welcome-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--border-pane);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+  color: var(--header-text);
+  font-size: 12.25px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  outline: none;
+  transition: background-color 0.14s ease, border-color 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
+}
+
+.td-welcome-tool-btn:hover:not(:disabled) {
+  background: #FFFFFF;
+  border-color: var(--accent-soft-border);
+  color: var(--accent-soft-text);
+  box-shadow: 0 2px 8px rgba(38, 116, 196, 0.09);
+}
+
+.td-welcome-tool-btn:active:not(:disabled) {
+  background: var(--accent-soft-bg);
+  border-color: var(--accent);
+  color: var(--surface-selected-text);
+}
+
+.td-welcome-tool-btn:focus-visible {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px rgba(38, 116, 196, 0.18);
+}
+
+.td-welcome-mcp-btn {
+  max-width: 260px;
+}
+
+.td-welcome-mcp-btn--online {
+  background: var(--ok-bg);
+  border-color: var(--ok-border);
+  color: var(--ok-fg);
+}
+
+.td-welcome-mcp-btn--online:hover:not(:disabled) {
+  background: #DCFCE7;
+  border-color: #86EFAC;
+  color: #14532D;
+}
+
+.td-welcome-mcp-btn--running {
+  background: #EFF6FF;
+  border-color: #93C5FD;
+  color: #1D4ED8;
+  font-weight: 600;
+}
+
+.td-welcome-mcp-btn--running:hover:not(:disabled) {
+  background: #DBEAFE;
+  border-color: #60A5FA;
+  color: #1E40AF;
+}
+
+.td-welcome-mcp-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .td-welcome-specs {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   flex-wrap: wrap;
 }
 
 .td-welcome-spec-chip {
   display: inline-flex;
   align-items: center;
-  height: 24px;
+  height: 23px;
   padding: 0 10px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.88);
   border: 1px solid var(--border-pane);
   color: var(--text-secondary);
-  font-size: 11.5px;
+  font-size: 11.25px;
   font-weight: 500;
   white-space: nowrap;
 }
@@ -3437,13 +3534,14 @@
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
+  align-items: stretch;
 }
 
 .td-welcome-tile {
   display: flex;
   align-items: center;
   gap: 13px;
-  padding: 15px 16px;
+  padding: 16px 17px;
   background: var(--surface-bg);
   border: 1px solid var(--border-pane);
   border-radius: 10px;
@@ -3452,13 +3550,14 @@
   cursor: pointer;
   outline: none;
   min-width: 0;
-  transition: border-color 0.14s ease, background-color 0.14s ease, box-shadow 0.14s ease;
+  transition: border-color 0.14s ease, background-color 0.14s ease, box-shadow 0.14s ease, transform 0.14s ease;
 }
 
 .td-welcome-tile:hover:not(:disabled) {
   background: #FAFDFE;
   border-color: var(--accent-soft-border);
-  box-shadow: 0 4px 14px rgba(38, 116, 196, 0.08);
+  box-shadow: 0 4px 14px rgba(38, 116, 196, 0.09);
+  transform: translateY(-1px);
 }
 
 .td-welcome-tile:focus-visible {
@@ -3479,7 +3578,7 @@
 .td-welcome-tile--primary:hover:not(:disabled) {
   background: linear-gradient(135deg, #FFFFFF 0%, #EAF4FF 100%);
   border-color: var(--accent);
-  box-shadow: 0 5px 16px rgba(38, 116, 196, 0.12);
+  box-shadow: 0 5px 16px rgba(38, 116, 196, 0.13);
 }
 
 .td-welcome-tile-badge {
@@ -3509,7 +3608,7 @@
 }
 
 .td-welcome-tile-title {
-  font-size: 13.75px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
   line-height: 1.3;
@@ -3535,7 +3634,7 @@
 /* 下方平衡左右双栏：左侧最近案件档案 + 右侧拖放引导与取证闭环 */
 .td-welcome-split {
   display: grid;
-  grid-template-columns: minmax(0, 1.42fr) minmax(300px, 0.92fr);
+  grid-template-columns: minmax(0, 1.42fr) minmax(308px, 0.92fr);
   gap: 16px;
   align-items: stretch;
 }
@@ -3594,7 +3693,7 @@
 
 /* 最近案件卡片列表 */
 .td-welcome-recent-panel {
-  min-height: 332px;
+  min-height: 360px;
 }
 
 .td-welcome-case-list {
@@ -3603,6 +3702,8 @@
   gap: 10px;
   padding: 14px 16px;
   flex: 1;
+  max-height: 390px;
+  overflow-y: auto;
 }
 
 .td-welcome-case-card {
@@ -3776,6 +3877,7 @@
 }
 
 .td-welcome-dropzone {
+  width: 100%;
   padding: 14px 15px;
   border-radius: 10px;
   background: linear-gradient(180deg, #F5FAFF 0%, #FFFFFF 100%);
@@ -3783,12 +3885,33 @@
   display: flex;
   flex-direction: column;
   gap: 11px;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.14s ease, background 0.14s ease, box-shadow 0.14s ease;
+}
+
+.td-welcome-dropzone:hover:not(:disabled) {
+  background: linear-gradient(180deg, #ECF5FF 0%, #FAFDFE 100%);
+  border-color: var(--accent);
+  box-shadow: 0 4px 12px rgba(38, 116, 196, 0.09);
+}
+
+.td-welcome-dropzone:focus-visible {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 2px rgba(38, 116, 196, 0.18);
+}
+
+.td-welcome-dropzone:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .td-welcome-dropzone-head {
   display: flex;
   align-items: flex-start;
   gap: 11px;
+  width: 100%;
 }
 
 .td-welcome-dropzone-icon {
@@ -3801,6 +3924,12 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+  transition: background-color 0.14s ease, border-color 0.14s ease;
+}
+
+.td-welcome-dropzone:hover:not(:disabled) .td-welcome-dropzone-icon {
+  background: #DCEEFF;
+  border-color: #9BC4EE;
 }
 
 .td-welcome-dropzone-copy {
@@ -3808,12 +3937,79 @@
   flex-direction: column;
   gap: 3px;
   min-width: 0;
+  flex: 1;
+}
+
+.td-welcome-dropzone-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .td-welcome-dropzone-title {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
+}
+
+.td-welcome-dropzone-hint {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-soft-text);
+  background: var(--accent-soft-bg);
+  border: 1px solid var(--accent-soft-border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background-color 0.14s ease, border-color 0.14s ease;
+}
+
+.td-welcome-dropzone:hover:not(:disabled) .td-welcome-dropzone-hint {
+  background: #DCEEFF;
+  border-color: var(--accent);
+}
+
+/* 未开案状态下 MCP 独立监控页专属简洁顶栏 */
+.td-header--standalone-mcp {
+  gap: 10px;
+}
+
+.td-header-logo--compact {
+  width: 26px;
+  height: 26px;
+}
+
+.td-header-page-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-soft-text);
+  white-space: nowrap;
+}
+
+.td-header .td-hdr-back-btn {
+  height: 30px;
+  min-height: 30px;
+  padding: 0 11px 0 9px;
+  gap: 5px;
+  border-radius: 6px;
+  background: var(--accent-soft-bg);
+  border: 1px solid var(--accent-soft-border);
+  color: var(--accent-soft-text);
+  font-size: 12.25px;
+  font-weight: 600;
+}
+
+.td-header .td-hdr-back-btn:hover:not(:disabled) {
+  background: #DFEEFD;
+  border-color: var(--accent);
+  color: var(--surface-selected-text);
+}
+
+.td-header .td-hdr-back-btn:active:not(:disabled) {
+  background: #CFE5FC;
+  border-color: var(--accent-pressed);
 }
 
 .td-welcome-dropzone-desc {
@@ -3928,11 +4124,11 @@
 /* 响应式适配：覆盖 1080px 窄窗与更小视口 */
 @media (max-width: 1120px) {
   .td-welcome-empty {
-    padding: 22px 24px 28px;
+    padding: 26px 26px 32px;
   }
 
   .td-welcome-split {
-    grid-template-columns: minmax(0, 1.25fr) minmax(276px, 0.95fr);
+    grid-template-columns: minmax(0, 1.28fr) minmax(280px, 0.94fr);
   }
 
   .td-custody-secondary {

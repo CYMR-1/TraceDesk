@@ -31,6 +31,7 @@ export type UiIconName =
   | 'activity'
   | 'settings'
   | 'list'
+  | 'arrow_left'
   | 'arrow_right'
   | 'locate'
   | 'html_report'
@@ -278,6 +279,14 @@ export const UiIcon: React.FC<UiIconProps> = ({
             <line x1="5.6" y1="8.0" x2="13.2" y2="8.0" />
             <circle cx="3.2" cy="11.6" r="0.8" fill={color} stroke="none" />
             <line x1="5.6" y1="11.6" x2="13.2" y2="11.6" />
+          </>
+        );
+      case 'arrow_left':
+        // 向左返回箭头图标（与 arrow_right 镜像对称）
+        return (
+          <>
+            <line x1="13.0" y1="8.0" x2="3.4" y2="8.0" />
+            <polyline points="6.8,4.6 3.2,8.0 6.8,11.4" fill="none" />
           </>
         );
       case 'arrow_right':
