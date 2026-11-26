@@ -127,6 +127,32 @@ export interface QuickLocation {
   path: string;
 }
 
+/** 最近案件目录项（对应后端 RecentCaseDto） */
+export interface RecentCaseDto {
+  folder: string;
+  name: string;
+  number: string;
+  examiner: string;
+  target: string;
+  created: string;
+  hasEvidence: boolean;
+  inventoryCount: number;
+  exportsCount: number;
+}
+
+/** 案件历史内容搜索记录摘要（用于内容搜索页下拉回放） */
+export interface SearchRecordSummaryDto {
+  reportName: string;
+  query: string;
+  encoding: string;
+  hits: number;
+  failed: number;
+  visited: number;
+  eligible: number;
+  status: string;
+  time: string;
+}
+
 export interface CaseSnapshot {
   caseDir: string;
   id: string;
@@ -147,6 +173,8 @@ export interface CaseSnapshot {
   verification: VerificationInfo | null;
   fsstat: string;
   quickLocation: QuickLocation | null;
+  /** 案件内可用于回放的历史内容搜索记录列表（最新在前） */
+  searchRecords?: SearchRecordSummaryDto[];
 }
 
 export interface EntryView {

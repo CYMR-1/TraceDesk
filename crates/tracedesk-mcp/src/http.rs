@@ -27,6 +27,12 @@ pub const DEFAULT_PORT: u16 = 8765;
 /// 默认 Streamable HTTP 挂载路径。
 pub const DEFAULT_HTTP_PATH: &str = "/mcp";
 
+/// 独立 CLI Streamable HTTP 服务的默认传输通道标识。
+pub const DEFAULT_HTTP_TRANSPORT_LABEL: &str = "streamable-http";
+
+/// 桌面端进程内托管 HTTP 服务的传输通道标识。
+pub const DESKTOP_HTTP_TRANSPORT_LABEL: &str = "desktop-http";
+
 /// 允许监听的回环地址白名单。
 pub const LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
 
@@ -212,12 +218,14 @@ pub fn extract_user_agent_client(raw_ua: &str) -> Option<String> {
     Some(sanitized)
 }
 
-/// 从小写键 HTTP 请求头与当前会话 ID 构建 [`McpRequestContext`]。
+/// 从小写键 HTTP 请求头、当前会话 ID 与传输通道标记构建 [`McpRequestContext`]。
 ///
-/// 优先识别 `X-MCP-User` 与 `X-MCP-Client` / `X-Client-Name`，并以非通用 `User-Agent` 作为补充回退。
-pub fn request_context_from_http_headers(
+/// 优先识别 `X-MCP-User` 与 `X-MCP-Client` / `X-Client-Name`，并以非通用 `User-Agent` 作为补充回退；
+/// `transport_label` 为空时默认回退为 `"streamable-http"`。
+pub fn request_context_from_http_headers_with_transport(
     headers: &HashMap<String, String>,
     session_id: String,
+    transport_label: &str,
 ) -> McpRequestContext {
     let header_user = headers
         .get("x-mcp-user")
@@ -233,14 +241,34 @@ pub fn request_context_from_http_headers(
     let user_agent_client = headers
         .get("user-agent")
         .and_then(|v| extract_user_agent_client(v));
+    let clean_transport = transport_label.trim();
+    let transport = if clean_transport.is_empty() {
+        DEFAULT_HTTP_TRANSPORT_LABEL.to_string()
+    } else {
+        clean_transport.to_string()
+    };
 
     McpRequestContext {
         session_id: Some(session_id),
         header_user,
         header_client,
         user_agent_client,
-        transport: Some("streamable-http".to_string()),
+        transport: Some(transport),
     }
+}
+
+/// 从小写键 HTTP 请求头与当前会话 ID 构建 [`McpRequestContext`]（默认传输通道标记为 `"streamable-http"`）。
+///
+/// 优先识别 `X-MCP-User` 与 `X-MCP-Client` / `X-Client-Name`，并以非通用 `User-Agent` 作为补充回退。
+pub fn request_context_from_http_headers(
+    headers: &HashMap<String, String>,
+    session_id: String,
+) -> McpRequestContext {
+    request_context_from_http_headers_with_transport(
+        headers,
+        session_id,
+        DEFAULT_HTTP_TRANSPORT_LABEL,
+    )
 }
 
 /// DNS 重绑定校验：检查 HTTP 请求的 `Host` 与 `Origin` 头。
@@ -553,6 +581,7 @@ fn handle_client_connection(
     configured_host: String,
     port: u16,
     expected_path: String,
+    transport_label: String,
     shutdown: Arc<AtomicBool>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
@@ -716,7 +745,11 @@ fn handle_client_connection(
                     }
                 };
 
-                let ctx = request_context_from_http_headers(&req.headers, session_id.clone());
+                let ctx = request_context_from_http_headers_with_transport(
+                    &req.headers,
+                    session_id.clone(),
+                    &transport_label,
+                );
                 match server.handle_jsonrpc_value_with_context(parsed, &ctx) {
                     None => {
                         // 通知消息或客户端响应 -> 返回 HTTP 202 Accepted 与空响应体。
@@ -772,12 +805,13 @@ pub struct McpHttpServerHandle {
     port: u16,
     path: String,
     url: String,
+    transport_label: String,
     shutdown: Arc<AtomicBool>,
     join_handle: Option<JoinHandle<()>>,
 }
 
 impl McpHttpServerHandle {
-    /// 启动本地回环 Streamable HTTP MCP 服务。
+    /// 启动本地回环 Streamable HTTP MCP 服务（默认传输通道标记为 `"streamable-http"`）。
     ///
     /// - 强制校验 `host` 属于 `{"127.0.0.1", "localhost", "::1"}`；
     /// - 绑定前探测端口是否已被占用；
@@ -788,8 +822,27 @@ impl McpHttpServerHandle {
         port: u16,
         path: &str,
     ) -> McpResult<Self> {
+        Self::start_with_transport(server, host, port, path, DEFAULT_HTTP_TRANSPORT_LABEL)
+    }
+
+    /// 启动本地回环 Streamable HTTP MCP 服务，并显式注入遥测传输通道标记（例如 `"desktop-http"` 或 `"streamable-http"`）。
+    pub fn start_with_transport(
+        server: McpServer,
+        host: &str,
+        port: u16,
+        path: &str,
+        transport_label: &str,
+    ) -> McpResult<Self> {
         let clean_host = validate_loopback_host(host)?;
         let clean_path = normalize_http_path(path);
+        let clean_transport = {
+            let trimmed = transport_label.trim();
+            if trimmed.is_empty() {
+                DEFAULT_HTTP_TRANSPORT_LABEL.to_string()
+            } else {
+                trimmed.to_string()
+            }
+        };
         let bind_ip = resolve_bind_ip(&clean_host);
         let requested_addr = SocketAddr::new(bind_ip, port);
 
@@ -821,6 +874,7 @@ impl McpHttpServerHandle {
         let server_arc = Arc::new(server);
         let host_bg = clean_host.clone();
         let path_bg = clean_path.clone();
+        let transport_bg = clean_transport.clone();
 
         let active_conns = Arc::new(AtomicUsize::new(0));
         let join_handle = thread::Builder::new()
@@ -853,12 +907,13 @@ impl McpHttpServerHandle {
                     let srv = Arc::clone(&server_arc);
                     let h = host_bg.clone();
                     let p = path_bg.clone();
+                    let t = transport_bg.clone();
                     let sd = Arc::clone(&shutdown_bg);
                     let _ = thread::Builder::new()
                         .name("tracedesk-mcp-http-conn".to_string())
                         .spawn(move || {
                             let _permit = permit;
-                            handle_client_connection(stream, srv, h, actual_port, p, sd);
+                            handle_client_connection(stream, srv, h, actual_port, p, t, sd);
                         });
                 }
             })?;
@@ -869,6 +924,7 @@ impl McpHttpServerHandle {
             port: actual_port,
             path: clean_path,
             url,
+            transport_label: clean_transport,
             shutdown,
             join_handle: Some(join_handle),
         })
@@ -888,6 +944,11 @@ impl McpHttpServerHandle {
 
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// 返回当前 HTTP 服务实例注入的遥测传输通道标识（如 `"streamable-http"` 或 `"desktop-http"`）。
+    pub fn transport_label(&self) -> &str {
+        &self.transport_label
     }
 
     pub fn is_running(&self) -> bool {

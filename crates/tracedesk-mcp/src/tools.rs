@@ -1,4 +1,4 @@
-//! TraceDesk MCP 全部 19 个工具、2 个资源、JSON Schema 定义、Markdown/JSON 渲染器与 JSON-RPC 2.0 协议分发。
+//! TraceDesk MCP 全部 20 个工具、2 个资源、JSON Schema 定义、Markdown/JSON 渲染器与 JSON-RPC 2.0 协议分发。
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -12,10 +12,11 @@ use tracedesk_core::{PAGE_BYTES, PREVIEW_ENCODINGS, format_commas};
 use crate::activity::{
     MAX_PREVIEW_BYTES, McpActivityRecord, McpActivitySink, default_file_activity_sink,
     extract_case_info_from_output, format_error_summary, format_params_json,
-    format_success_result_summary, lookup_tool_meta, new_activity_id, now_east8_millis,
-    resolve_case_context, summarize_params, truncate_preview, unwrap_params_for_display,
+    format_success_result_summary, lookup_tool_meta, new_activity_id, normalize_activity_client,
+    now_east8_millis, resolve_case_context, summarize_params, truncate_preview,
+    unwrap_params_for_display,
 };
-use crate::service::{CaseService, McpError, McpResult, compose_mcp_client, sanitize_mcp_identity};
+use crate::service::{CaseService, McpError, McpResult, sanitize_mcp_identity};
 
 /// MCP 服务端固定名称（`mcp-contract.md` §1.1）。
 pub const SERVER_NAME: &str = "tracedesk_mcp";
@@ -39,12 +40,12 @@ pub const WORKFLOW_GUIDE_MARKDOWN: &str = "# TraceDesk MCP 标准取证流程\n\
 1. 使用 `tracedesk_list_cases` 查看现有案件，或用 `tracedesk_create_case` 新建隔离案件。\n\
 2. 使用 `tracedesk_load_image` 只读载入 RAW 或 `.E01` 首段镜像（镜像必须位于案件库目录之外）。\n\
 3. 使用 `tracedesk_get_case_summary` 查看 SHA-256、卷声明范围和分区扫描状态。\n\
-4. 使用 `tracedesk_list_files`、`tracedesk_preview_file`、`tracedesk_search_content`、`tracedesk_query_timeline` 开展分析。\n\
+4. 使用 `tracedesk_list_files`、`tracedesk_preview_file`、`tracedesk_search_content`（命中超限时用只读工具 `tracedesk_read_search_report` 分页读取已落盘报告，切勿重复调用 `tracedesk_search_content` 重扫镜像）、`tracedesk_query_timeline` 开展分析。\n\
 5. 使用 `tracedesk_examine_file` 校验文件哈希，用 `tracedesk_record_finding` 记录取证发现。\n\
 6. 使用 `tracedesk_export_file` / `tracedesk_export_findings` 导出副本，并用 `tracedesk_generate_report` 或 `tracedesk_build_review_bundle` 输出正式报告和可核验复核包。\n\n\
 注意：同名文件可能存在于不同分区或包含已删除记录，定位文件时请优先提供 `partition_offset`、`inode` 与 `deleted` 参数。";
 
-/// 工具目录元数据项（供桌面端“可用工具清单（19）”标签页展示）。
+/// 工具目录元数据项（供桌面端“可用工具清单（20）”标签页展示）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ToolCatalogItem {
     pub name: &'static str,
@@ -75,8 +76,8 @@ impl ToolCatalogItem {
     }
 }
 
-/// 全部 19 个 MCP 工具目录（严格顺序对齐 `forensic/mcp/server.py::TOOL_CATALOG`）。
-pub const TOOL_CATALOG: [ToolCatalogItem; 19] = [
+/// 全部 20 个 MCP 工具目录。
+pub const TOOL_CATALOG: [ToolCatalogItem; 20] = [
     ToolCatalogItem::new(
         "tracedesk_list_cases",
         "列出案件",
@@ -145,7 +146,14 @@ pub const TOOL_CATALOG: [ToolCatalogItem; 19] = [
         "搜索文件内容",
         "文件分析",
         false,
-        "按 UTF-8 / UTF-16LE / GBK / HEX 精确搜索全案或单文件字节",
+        "按 UTF-8 / UTF-16LE / GBK / HEX 精确搜索全案或单文件字节，并落盘搜索报告",
+    ),
+    ToolCatalogItem::new(
+        "tracedesk_read_search_report",
+        "分页读取搜索报告",
+        "文件分析",
+        true,
+        "只读分页读取案件 reports/ 下已落盘的 search_*.json 搜索报告，不重扫镜像且不写审计",
     ),
     ToolCatalogItem::new(
         "tracedesk_examine_file",
@@ -487,6 +495,19 @@ struct SearchContentInput {
     verify_large_image: bool,
     #[serde(default)]
     actor: Option<String>,
+    #[serde(default)]
+    response_format: ResponseFormat,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadSearchReportInput {
+    case_dir: String,
+    report_path: String,
+    #[serde(default = "default_limit_50")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
     #[serde(default)]
     response_format: ResponseFormat,
 }
@@ -1093,6 +1114,11 @@ pub fn render_search_md(data: &Value) -> String {
         .get("report_file")
         .and_then(Value::as_str)
         .unwrap_or("");
+    let report_path_hint = data
+        .get("report_path")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(report_file);
 
     let mut lines = vec![
         format!("# 内容搜索结果 · `{query}` ({enc})"),
@@ -1138,7 +1164,7 @@ pub fn render_search_md(data: &Value) -> String {
         && let Some(next_off) = data.get("next_offset").and_then(Value::as_u64)
     {
         lines.push(format!(
-            "\n> 还有更多命中，请使用 `offset={next_off}` 继续翻页。"
+            "\n> 还有更多命中，请调用只读工具 `tracedesk_read_search_report`（`report_path=\"{report_path_hint}\"`，`offset={next_off}`）继续翻页，勿重复调用 `tracedesk_search_content` 以免重新扫描镜像。"
         ));
     }
     lines.join("\n")
@@ -1704,7 +1730,7 @@ fn build_tool_definitions() -> Vec<McpToolDefinition> {
             "搜索文件内容",
             false,
             true,
-            "按精确字节（UTF-8 / UTF-16LE / GBK / HEX）搜索全案可读文件或单个文件，并生成 search_*.json 审计记录。",
+            "按精确字节（UTF-8 / UTF-16LE / GBK / HEX）搜索全案可读文件或单个文件，并将命中结果落盘为 reports/search_*.json 与审计记录。每次调用都会重新扫描镜像并生成新报告；若命中条数超过 limit，请使用返回的 report_path 调用只读工具 tracedesk_read_search_report 继续翻页，切勿重复调用本工具。",
             merge_props(
                 case_base_props(),
                 json!({
@@ -1718,11 +1744,50 @@ fn build_tool_definitions() -> Vec<McpToolDefinition> {
                     "dir_path": { "type": "string", "default": "", "description": "仅大容量镜像单文件搜索需要：所在目录路径" },
                     "max_hits": { "type": "integer", "minimum": 1, "maximum": 5000, "default": 200, "description": "单次搜索最多收集命中条数（1-5000）" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50, "description": "本次响应最多返回命中条数（1-200）" },
-                    "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "命中列表分页偏移量" },
+                    "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "首次返回命中列表的分页偏移量（翻页后续结果请改用 tracedesk_read_search_report，避免重复扫描镜像）" },
                     "verify_large_image": { "type": "boolean", "default": false, "description": "大容量镜像已固定基线时，是否在搜索前执行整镜像校验" }
                 }),
             ),
             &["case_dir", "query"],
+        ),
+        def(
+            "tracedesk_read_search_report",
+            "分页读取搜索报告",
+            true,
+            true,
+            "只读分页读取案件 reports/ 目录下已落盘的搜索报告 JSON（reports/search_*.json），绝不重新扫描镜像、绝不写入新报告或新审计记录。配合 tracedesk_search_content 翻页使用。",
+            json!({
+                "case_dir": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "案件目录路径（绝对路径、相对案件库文件夹名，或 case.json 路径）"
+                },
+                "report_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "搜索报告路径，支持相对路径（如 reports/search_<id>.json）或绝对路径；必须位于当前案件的 reports/ 目录内"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "default": 50,
+                    "description": "每页最多返回命中条数（1-200）"
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "命中列表分页偏移量"
+                },
+                "response_format": {
+                    "type": "string",
+                    "enum": ["markdown", "json"],
+                    "default": "markdown",
+                    "description": "输出格式：markdown 或 json"
+                }
+            }),
+            &["case_dir", "report_path"],
         ),
         def(
             "tracedesk_examine_file",
@@ -2121,7 +2186,23 @@ impl McpServer {
             .or_else(|| ctx.user_agent_client.clone())
     }
 
-    /// 返回全部 19 个 MCP 工具定义。
+    /// 按与 `CaseService::resolve_caller_identity` 完全一致的规则解析遥测记录的调用方名称
+    /// （依次合并入参 `actor`、传输层 `X-MCP-User`、服务端默认 `default_actor` 与客户端名，并去除末尾版本号数字）。
+    fn resolve_activity_client_label(
+        &self,
+        ctx: &McpRequestContext,
+        actor: Option<&str>,
+    ) -> String {
+        let resolved_client = self.resolve_client_for_context(ctx);
+        let (_, mcp_client) = self.service.resolve_caller_identity_with(
+            actor,
+            ctx.header_user.as_deref(),
+            resolved_client.as_deref(),
+        );
+        normalize_activity_client(&mcp_client)
+    }
+
+    /// 返回全部 20 个 MCP 工具定义。
     pub fn list_tools(&self) -> Vec<McpToolDefinition> {
         (*self.tools).clone()
     }
@@ -2394,6 +2475,23 @@ impl McpServer {
                     params.offset,
                     params.verify_large_image,
                     actor.as_deref(),
+                )?;
+                Ok(format_output(
+                    &data,
+                    params.response_format,
+                    render_search_md,
+                ))
+            }
+            "tracedesk_read_search_report" => {
+                let params: ReadSearchReportInput = parse_input(arguments)?;
+                let case_dir = check_non_empty(&params.case_dir, "case_dir", None)?;
+                let report_path = check_non_empty(&params.report_path, "report_path", None)?;
+                let limit = check_range(params.limit, "limit", 1, 200)?;
+                let data = self.service.read_search_report(
+                    &case_dir,
+                    &report_path,
+                    limit,
+                    params.offset,
                 )?;
                 Ok(format_output(
                     &data,
@@ -2746,10 +2844,7 @@ impl McpServer {
                 if let Ok(mut guard) = self.clients.lock() {
                     guard.record_initialize(ctx.session_id.as_deref(), client_info);
                 }
-                let client_label = compose_mcp_client(
-                    ctx.header_user.as_deref(),
-                    self.resolve_client_for_context(ctx).as_deref(),
-                );
+                let client_label = self.resolve_activity_client_label(ctx, None);
                 let call_id = new_activity_id();
                 let params_summary = summarize_params("initialize", &params);
                 let params_json = format_params_json(&params);
@@ -2849,16 +2944,14 @@ impl McpServer {
             "tools/call" => {
                 let started_at = Instant::now();
                 let call_id = new_activity_id();
-                let client_label = compose_mcp_client(
-                    ctx.header_user.as_deref(),
-                    self.resolve_client_for_context(ctx).as_deref(),
-                );
                 let tool_name_opt = params.get("name").and_then(Value::as_str);
                 let args = params
                     .get("arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
                 let display_args = unwrap_params_for_display(&args);
+                let arg_actor = display_args.get("actor").and_then(Value::as_str);
+                let client_label = self.resolve_activity_client_label(ctx, arg_actor);
                 let (tool_title, category, read_only) = tool_name_opt
                     .map(lookup_tool_meta)
                     .unwrap_or_else(|| ("未知工具调用".to_string(), "未知工具".to_string(), true));
@@ -3002,10 +3095,7 @@ impl McpServer {
             "resources/read" => {
                 let started_at = Instant::now();
                 let call_id = new_activity_id();
-                let client_label = compose_mcp_client(
-                    ctx.header_user.as_deref(),
-                    self.resolve_client_for_context(ctx).as_deref(),
-                );
+                let client_label = self.resolve_activity_client_label(ctx, None);
                 let uri_opt = params.get("uri").and_then(Value::as_str);
                 let params_summary = summarize_params("resources/read", &params);
                 let params_json = format_params_json(&params);

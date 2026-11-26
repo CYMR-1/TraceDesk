@@ -1,15 +1,19 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use tracedesk_engines::tsk::{parse_bodyfile_line, parse_mmls_output};
+use tracedesk_engines::tsk::{
+    decode_fls_line, parse_bodyfile_line, parse_fls_bodyfile_reader, parse_mmls_output,
+};
 use tracedesk_engines::{
-    EngineError, EntryReadPlan, TskCli, TskCommand, VolumeReader, map_fat_regions, sha256_file,
+    EngineError, EntryReadPlan, TskCli, TskCommand, VolumeReader, decode_acp_strict,
+    map_fat_regions, sha256_file,
 };
 
 fn repo_root() -> PathBuf {
@@ -367,4 +371,109 @@ fn test_tsk_bin_dir_normalization_and_no_stray_dest_on_missing_tool() {
         !export_dest.exists(),
         "export_file must not leave a 0-byte dest file when executable is missing"
     );
+}
+
+#[test]
+fn test_fls_utf8_multilingual_emoji_decoding_and_malformed_line_tolerance() {
+    // 1. 纯 ASCII 与 UTF-8 中文/日文/韩文/Emoji 文件名均应走零拷贝 UTF-8 快速路径，不触发有损解码。
+    let utf8_samples = [
+        "0|/证据材料/涉案报告_2026.docx|101-128-1|r/rrwxrwxrwx|0|0|2048|1700000000|1700000001|1700000002|1700000003",
+        "0|/証拠フォルダ/テスト文書_日本語.txt|102-128-1|r/rrwxrwxrwx|0|0|512|1700000010|1700000011|1700000012|1700000013",
+        "0|/증거자료/보고서_한국어.pdf|103-128-1|r/rrwxrwxrwx|0|0|4096|1700000020|1700000021|1700000022|1700000023",
+        "0|/现场📸/🔥证据😀|含竖线.png|104-128-1|r/rrwxrwxrwx|0|0|8192|1700000030|1700000031|1700000032|1700000033",
+    ];
+
+    for line in &utf8_samples {
+        let (decoded, used_lossy) = decode_fls_line(line.as_bytes());
+        assert!(matches!(decoded, Cow::Borrowed(_)));
+        assert!(!used_lossy);
+        assert_eq!(decoded.as_ref(), *line);
+    }
+
+    // 2. 严格单行解析器 `parse_bodyfile_line` 必须保持原有边界校验：畸形行应返回 Err。
+    assert!(parse_bodyfile_line("corrupted_no_pipes", 2048, false).is_err());
+    assert!(
+        parse_bodyfile_line(
+            "0|/BAD_SIZE.TXT|105|r/r|0|0|not_a_num|0|0|0|0",
+            2048,
+            false
+        )
+        .is_err()
+    );
+    assert!(
+        parse_bodyfile_line(
+            "0|/BAD_TIME.TXT|106|r/r|0|0|10|abc|0|0|0",
+            2048,
+            false
+        )
+        .is_err()
+    );
+
+    // 3. 构造混合流：包含 UTF-8 多语种/Emoji 正常行、空行、多种格式异常行、非法字节序列行。
+    let mut raw_stream: Vec<u8> = Vec::new();
+    raw_stream.extend_from_slice(utf8_samples[0].as_bytes());
+    raw_stream.extend_from_slice(b"\r\n");
+    // 空行（应静默跳过，不计入异常行）
+    raw_stream.extend_from_slice(b"\r\n");
+    // 异常行 #1：字段数不足
+    raw_stream.extend_from_slice(b"0|/BROKEN/MISSING_FIELDS|12|r/r\n");
+    // UTF-8 日文行
+    raw_stream.extend_from_slice(utf8_samples[1].as_bytes());
+    raw_stream.push(b'\n');
+    // 异常行 #2：文件大小非数字
+    raw_stream.extend_from_slice(b"0|/BAD_SIZE.TXT|105|r/r|0|0|NaN|0|0|0|0\n");
+    // UTF-8 韩文行
+    raw_stream.extend_from_slice(utf8_samples[2].as_bytes());
+    raw_stream.push(b'\n');
+    // 异常行 #3：时间戳非整数
+    raw_stream.extend_from_slice(b"0|/BAD_TS.TXT|106|r/r|0|0|10|0|bad|0|0\n");
+    // UTF-8 Emoji + 含竖线文件名行
+    raw_stream.extend_from_slice(utf8_samples[3].as_bytes());
+    raw_stream.push(b'\n');
+
+    // 非 UTF-8 原始字节行：在支持 CP_ACP 严格解码（如 CP936 GBK）时回退严格解码，
+    // 在无效字节序列（如 0xFF 0xFE）时降级单行有损解码且不中断整盘解析。
+    let mut non_utf8_line: Vec<u8> = Vec::new();
+    non_utf8_line.extend_from_slice(b"0|/RAW_");
+    non_utf8_line.extend_from_slice(&[0xFF, 0xFE]);
+    non_utf8_line.extend_from_slice(b".bin|107|r/rrwxrwxrwx|0|0|77|1|2|3|4");
+    let expect_lossy = decode_acp_strict(&non_utf8_line).is_err();
+    raw_stream.extend_from_slice(&non_utf8_line);
+    raw_stream.push(b'\n');
+
+    let mut cursor = Cursor::new(raw_stream);
+    let summary =
+        parse_fls_bodyfile_reader(&mut cursor, 2048, false, None).expect("容错流式解析不应失败");
+
+    assert_eq!(summary.skipped_lines, 3, "应精确跳过 3 条格式异常行");
+    assert_eq!(
+        summary.lossy_decoded_lines,
+        usize::from(expect_lossy),
+        "无效编码行是否触发有损降级应与当前系统代码页行为一致"
+    );
+    assert_eq!(summary.entries.len(), 5, "所有有效条目必须完整保留");
+    assert_eq!(summary.entries[0].path, "证据材料/涉案报告_2026.docx");
+    assert_eq!(summary.entries[1].path, "証拠フォルダ/テスト文書_日本語.txt");
+    assert_eq!(summary.entries[2].path, "증거자료/보고서_한국어.pdf");
+    assert_eq!(summary.entries[3].path, "现场📸/🔥证据😀|含竖线.png");
+    assert_eq!(summary.entries[4].inode, "107");
+    assert_eq!(summary.entries[4].size, 77);
+    assert!(summary.entries[4].path.starts_with("RAW_"));
+    assert!(summary.entries[4].path.ends_with(".bin"));
+
+    // 4. 在 CP936/GBK（中文 Windows）下验证非 UTF-8 的合法 GBK 字节回退到 CP_ACP 严格解码。
+    let gbk_line: Vec<u8> = b"0|/\xD6\xD0\xCE\xC4.txt|108|r/rrwxrwxrwx|0|0|12|1|2|3|4".to_vec();
+    assert!(std::str::from_utf8(&gbk_line).is_err());
+    if let Ok(expected_acp) = decode_acp_strict(&gbk_line) {
+        let (decoded, used_lossy) = decode_fls_line(&gbk_line);
+        assert!(!used_lossy, "合法 CP_ACP 字节不应触发有损降级");
+        assert_eq!(decoded.as_ref(), expected_acp);
+    }
+
+    // 5. 协作式取消标志生效时应立即返回 Cancelled。
+    let cancel = AtomicBool::new(true);
+    let mut cancel_cursor = Cursor::new(utf8_samples[0].as_bytes());
+    let err = parse_fls_bodyfile_reader(&mut cancel_cursor, 2048, false, Some(&cancel))
+        .unwrap_err();
+    assert!(err.is_cancelled());
 }

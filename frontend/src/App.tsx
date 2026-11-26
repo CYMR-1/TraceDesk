@@ -15,7 +15,7 @@ import { OpenCaseDialog } from './components/dialogs/OpenCaseDialog';
 import { RegisterSourceDialog } from './components/dialogs/RegisterSourceDialog';
 import { createFeatureRegistry, ENABLED_FEATURES, type PanelKey } from './features/registry';
 import { AuditLogModule } from './modules/AuditLogModule';
-import { ContentReviewModule } from './modules/ContentReviewModule';
+import { ContentReviewModule, type ContentSearchLiveState } from './modules/ContentReviewModule';
 import { EvidenceInfoModule } from './modules/EvidenceInfoModule';
 import { FileBrowserModule } from './modules/FileBrowserModule';
 import { FindingsModule } from './modules/FindingsModule';
@@ -29,6 +29,7 @@ import type {
   ExamineFileResponse,
   McpActivityRecord,
   McpStatus,
+  RecentCaseDto,
 } from './types/ipc';
 import { formatError } from './utils/assets';
 import {
@@ -46,8 +47,45 @@ const HelpGuideDialog = React.lazy(() =>
 
 const DEFAULT_STATUS = '就绪 · 应用层只读 · 本地处理 · UTC+8';
 const DEFAULT_DETAIL = '选择目录定位文件；拖动分隔条调整树、列表和内容区域。';
+const DEFAULT_WINDOW_TITLE = 'TraceDesk — 电子数据取证工作台';
 const DELIVERABLE_KEYS = new Set(['report', 'export_bundle']);
 const RAW_IMAGE_EXTENSIONS = ['dd', 'raw', 'img', 'ima', 'bin', 'dsk', 'image', 'flp', 'vfd', 'E01', 'e01'];
+const IMAGE_DROP_EXT_SET = new Set(RAW_IMAGE_EXTENSIONS.map((ext) => ext.toLowerCase()));
+
+/** 提取路径末尾的文件名或目录名 */
+function extractBaseName(filePath: string): string {
+  const cleaned = filePath.replace(/[\\/]+$/, '');
+  const parts = cleaned.split(/[\\/]/);
+  return parts[parts.length - 1] || filePath;
+}
+
+/** 判断拖放路径是否为 case.json 案件元数据文件 */
+function isCaseJsonDrop(filePath: string): boolean {
+  return extractBaseName(filePath).toLowerCase() === 'case.json';
+}
+
+/** 判断拖放路径是否为受支持的证据镜像格式（.dd/.raw/.img/.e01 等） */
+function isSupportedImageDrop(filePath: string): boolean {
+  const base = extractBaseName(filePath);
+  const dotIdx = base.lastIndexOf('.');
+  if (dotIdx <= 0) return false;
+  return IMAGE_DROP_EXT_SET.has(base.slice(dotIdx + 1).toLowerCase());
+}
+
+/** 将秒数格式化为简洁的中文时长（用于哈希校验已耗时与预计剩余时间 ETA） */
+function formatDurationZh(totalSeconds: number): string {
+  const safe = Math.max(0, Math.round(totalSeconds));
+  if (safe < 60) {
+    return `${safe}秒`;
+  }
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const seconds = safe % 60;
+  if (hours > 0) {
+    return `${hours}小时${String(minutes).padStart(2, '0')}分`;
+  }
+  return `${minutes}分${String(seconds).padStart(2, '0')}秒`;
+}
 
 export const App: React.FC = () => {
   const registry = useMemo(() => createFeatureRegistry(ENABLED_FEATURES), []);
@@ -70,6 +108,17 @@ export const App: React.FC = () => {
   const [scanningPartitions, setScanningPartitions] = useState(false);
   const [hashingImage, setHashingImage] = useState(false);
   const [contentSearching, setContentSearching] = useState(false);
+  const [searchLiveState, setSearchLiveState] = useState<ContentSearchLiveState>({
+    searching: false,
+    searchId: null,
+    stageText: '',
+    percent: null,
+    hitCount: 0,
+  });
+  const [cancellingActiveTask, setCancellingActiveTask] = useState(false);
+  const [recentCases, setRecentCases] = useState<RecentCaseDto[]>([]);
+  const [loadingRecentCases, setLoadingRecentCases] = useState(false);
+  const [dragOverActive, setDragOverActive] = useState(false);
   const [refreshToken, setRefreshToken] = useState(0);
   const [singleFileSearchToken, setSingleFileSearchToken] = useState(0);
 
@@ -93,11 +142,15 @@ export const App: React.FC = () => {
   const busyRef = useRef(false);
   const hashingImageRef = useRef(false);
   const contentSearchingRef = useRef(false);
+  const activeSearchIdRef = useRef<string | null>(null);
+  const hashStartedAtRef = useRef<number | null>(null);
   const backgroundBusyRef = useRef(false);
   const inspectingBundleRef = useRef(false);
   const clearPendingProgressRef = useRef<() => void>(() => {});
   const snapshotRef = useRef<CaseSnapshot | null>(null);
   const mcpStatusRef = useRef<McpStatus | null>(null);
+  const openCaseByPathRef = useRef<(casePath: string) => Promise<void>>(async () => {});
+  const loadImageByPathRef = useRef<(imagePath: string) => Promise<void>>(async () => {});
   mcpStatusRef.current = mcpStatus;
 
   // 同步更新并发锁与快照引用，避免链式任务在 React 异步重渲染前读到陈旧状态
@@ -116,6 +169,27 @@ export const App: React.FC = () => {
     contentSearchingRef.current = next;
     backgroundBusyRef.current = hashingImageRef.current || next;
     setContentSearching(next);
+    if (!next) {
+      activeSearchIdRef.current = null;
+    }
+  }, []);
+
+  const handleSearchLiveStateChange = useCallback((next: ContentSearchLiveState) => {
+    activeSearchIdRef.current = next.searching ? next.searchId : null;
+    setSearchLiveState(next);
+  }, []);
+
+  /** 刷新案件库中的最近案件列表（供空态欢迎页与打开案件弹窗复用） */
+  const refreshRecentCases = useCallback(async () => {
+    setLoadingRecentCases(true);
+    try {
+      const list = await tauriApi.listRecentCases();
+      setRecentCases(list);
+    } catch {
+      // 忽略最近案件刷新异常
+    } finally {
+      setLoadingRecentCases(false);
+    }
   }, []);
 
   const setSnapshotState = useCallback((next: CaseSnapshot | null) => {
@@ -183,7 +257,7 @@ export const App: React.FC = () => {
     [setSnapshotState]
   );
 
-  // 启动时读取路径、当前案件快照与 MCP 实时状态
+  // 启动时读取路径、当前案件快照、最近案件列表与 MCP 实时状态
   useEffect(() => {
     let active = true;
     void (async () => {
@@ -199,6 +273,10 @@ export const App: React.FC = () => {
         }
       } catch {
         // 忽略初始化读取失败
+      }
+
+      if (active) {
+        void refreshRecentCases();
       }
 
       try {
@@ -217,7 +295,91 @@ export const App: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [setSnapshotState]);
+  }, [setSnapshotState, refreshRecentCases]);
+
+  // 打开/切换/关闭案件或载入镜像时动态更新原生窗口标题（同时同步浏览器页签标题）
+  useEffect(() => {
+    const title = !snapshot
+      ? DEFAULT_WINDOW_TITLE
+      : snapshot.evidence?.path
+        ? `TraceDesk — ${snapshot.number} (${extractBaseName(snapshot.evidence.path)})`
+        : `TraceDesk — ${snapshot.number}`;
+    document.title = title;
+    if (!inTauri) return;
+    let active = true;
+    void import('@tauri-apps/api/window')
+      .then(({ getCurrentWindow }) => {
+        if (!active) return;
+        return getCurrentWindow().setTitle(title);
+      })
+      .catch(() => {
+        // 忽略窗口标题设置异常
+      });
+    return () => {
+      active = false;
+    };
+  }, [inTauri, snapshot?.number, snapshot?.evidence?.path]);
+
+  // 订阅 Tauri 2 原生窗口文件拖拽事件：支持拖入 case.json 打开案件，或已开案时拖入镜像文件加载
+  useEffect(() => {
+    if (!inTauri) return;
+    let mounted = true;
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const fn = await getCurrentWindow().onDragDropEvent((event) => {
+          if (!mounted) return;
+          const payload = event.payload;
+          if (payload.type === 'enter' || payload.type === 'over') {
+            setDragOverActive(true);
+            return;
+          }
+          if (payload.type === 'leave') {
+            setDragOverActive(false);
+            return;
+          }
+          if (payload.type === 'drop') {
+            setDragOverActive(false);
+            const paths = payload.paths ?? [];
+            if (paths.length === 0) return;
+
+            const caseJson = paths.find((p) => isCaseJsonDrop(p));
+            if (caseJson) {
+              void openCaseByPathRef.current(caseJson);
+              return;
+            }
+            const imageFile = paths.find((p) => isSupportedImageDrop(p));
+            if (imageFile) {
+              if (!snapshotRef.current) {
+                showAlert('提示', '请先新建或打开案件，再拖入证据镜像文件（.dd / .raw / .img / .e01）。', 'info');
+                return;
+              }
+              void loadImageByPathRef.current(imageFile);
+              return;
+            }
+            showAlert(
+              '不支持的文件类型',
+              '请拖入案件元数据 case.json 打开案件，或在已开案状态下拖入 .dd / .raw / .img / .e01 镜像文件。',
+              'warning'
+            );
+          }
+        });
+        if (!mounted) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      } catch {
+        // 忽略非桌面窗口环境
+      }
+    })();
+    return () => {
+      mounted = false;
+      setDragOverActive(false);
+      unlisten?.();
+    };
+  }, [inTauri, showAlert]);
 
   // 订阅后台任务、大镜像哈希进度与 MCP 实时遥测事件（含 StrictMode/卸载防泄漏与 rAF 合批节流）
   useEffect(() => {
@@ -305,16 +467,27 @@ export const App: React.FC = () => {
       registerSafe(
         tauriEvents.onHashProgress((ev) => {
           if (!mounted) return;
+          if (hashStartedAtRef.current === null) {
+            hashStartedAtRef.current = Date.now();
+          }
           const pct = ev.total > 0 ? Math.min(100, Math.floor((100 * ev.done) / ev.total)) : 0;
+          const elapsedSec = Math.max(0, (Date.now() - hashStartedAtRef.current) / 1000);
+          let etaPart = '';
+          if (ev.total > ev.done && ev.rateMiBs > 0.01) {
+            const remainingMiB = (ev.total - ev.done) / (1024 * 1024);
+            const etaSec = remainingMiB / ev.rateMiBs;
+            etaPart = ` · 预计剩余 ${formatDurationZh(etaSec)}`;
+          }
           scheduleProgressUpdate(
             pct,
-            `后台读取整镜像 · ${pct}% · ${Math.round(ev.rateMiBs)} MiB/s`
+            `后台读取整镜像 · ${pct}% · ${Math.round(ev.rateMiBs)} MiB/s · 已耗时 ${formatDurationZh(elapsedSec)}${etaPart}`
           );
         })
       ),
       registerSafe(
         tauriEvents.onHashFinished((ev) => {
           if (!mounted) return;
+          hashStartedAtRef.current = null;
           clearPendingProgress();
           setHashingImageState(false);
           setProgressPercent(null);
@@ -526,11 +699,12 @@ export const App: React.FC = () => {
       setDetailText(DEFAULT_DETAIL);
       setStatusText(DEFAULT_STATUS);
       applySnapshot(next);
+      void refreshRecentCases();
       if (next) {
         await resumePartitions(next);
       }
     },
-    [applySnapshot, resumePartitions]
+    [applySnapshot, resumePartitions, refreshRecentCases]
   );
 
   // 案件与镜像动作
@@ -546,7 +720,30 @@ export const App: React.FC = () => {
     setNewCaseOpen(true);
   };
 
-  const handleOpenCase = async () => {
+  /** 通过指定路径直接打开案件（供欢迎空态卡片、拖拽 case.json 复用） */
+  const openCaseByPath = useCallback(
+    async (casePath: string) => {
+      if (backgroundBusyRef.current) {
+        openBusyDialog('切换案件前请先取消后台校验或内容搜索，或等待完成。');
+        return;
+      }
+      if (busyRef.current) {
+        openBusyDialog('请等待当前任务完成后再打开案件。');
+        return;
+      }
+      const snap = await runTask('打开案件并读取清单', () => tauriApi.openCase({ casePath }), {
+        requiresCase: false,
+        blocksBackground: true,
+      });
+      if (snap) {
+        await handleCaseReplaced(snap);
+      }
+    },
+    [handleCaseReplaced, openBusyDialog, runTask]
+  );
+  openCaseByPathRef.current = openCaseByPath;
+
+  const handleOpenCase = () => {
     if (backgroundBusyRef.current) {
       openBusyDialog('切换案件前请先取消后台校验或内容搜索，或等待完成。');
       return;
@@ -555,25 +752,61 @@ export const App: React.FC = () => {
       openBusyDialog('请等待当前任务完成后再打开案件。');
       return;
     }
-    if (inTauri) {
-      const picked = await tauriApi.pickFile({
-        title: '打开案件 case.json',
-        defaultPath: appPaths.casesDir || undefined,
-        filters: [{ name: '案件元数据 (case.json)', extensions: ['json'] }],
-      });
-      if (!picked) return;
-      // 先完成打开案件并释放并发锁，再由链式逻辑自动恢复分区浏览或扫描
-      const snap = await runTask('打开案件并读取清单', () => tauriApi.openCase({ casePath: picked }), {
-        requiresCase: false,
-        blocksBackground: true,
-      });
-      if (snap) {
-        await handleCaseReplaced(snap);
-      }
-    } else {
-      setOpenCaseOpen(true);
-    }
+    // 统一打开含最近案件列表卡片与“浏览本地 case.json…”按钮的弹窗
+    setOpenCaseOpen(true);
   };
+
+  /** 关闭当前打开的案件并返回空态欢迎页 */
+  const handleCloseCase = useCallback(async () => {
+    if (!snapshotRef.current) return;
+    if (backgroundBusyRef.current) {
+      openBusyDialog('关闭案件前请先取消后台校验或内容搜索，或等待完成。');
+      return;
+    }
+    if (busyRef.current) {
+      openBusyDialog('请等待当前任务完成后再关闭案件。');
+      return;
+    }
+    const res = await runTask('关闭当前案件', () => tauriApi.closeCase(), {
+      requiresCase: true,
+      blocksBackground: true,
+    });
+    if (res?.closed) {
+      await handleCaseReplaced(null);
+      setActiveTab('files');
+      setStatusText('已关闭当前案件');
+    }
+  }, [handleCaseReplaced, openBusyDialog, runTask]);
+
+  /** 通过指定路径加载镜像（供选择文件与拖拽镜像文件复用） */
+  const loadImageByPath = useCallback(
+    async (imagePath: string) => {
+      if (!snapshotRef.current) {
+        showAlert('提示', '请先新建或打开案件。', 'info');
+        return;
+      }
+      if (backgroundBusyRef.current) {
+        openBusyDialog('加载新镜像前请先取消后台完整性校验或内容搜索，或等待完成。');
+        return;
+      }
+      if (busyRef.current) {
+        openBusyDialog('请等待当前任务完成后再加载镜像。');
+        return;
+      }
+      const snap = await runTask(
+        '打开镜像并识别分区',
+        () => tauriApi.loadImage({ imagePath }),
+        { requiresCase: true, blocksBackground: true }
+      );
+      if (snap) {
+        setSelectedEntry(null);
+        applySnapshot(snap);
+        await resumePartitions(snap);
+      }
+    },
+    [applySnapshot, openBusyDialog, resumePartitions, runTask, showAlert]
+  );
+  loadImageByPathRef.current = loadImageByPath;
 
   const handleLoadImage = async () => {
     if (!snapshotRef.current) {
@@ -599,17 +832,7 @@ export const App: React.FC = () => {
     } else {
       imagePath = 'C:\\TraceDesk\\evidence\\demo.dd';
     }
-    // 先完成镜像识别并同步释放并发锁，再在顶层链式调用分区自动扫描/根目录读取
-    const snap = await runTask(
-      '打开镜像并识别分区',
-      () => tauriApi.loadImage({ imagePath: imagePath! }),
-      { requiresCase: true, blocksBackground: true }
-    );
-    if (snap) {
-      setSelectedEntry(null);
-      applySnapshot(snap);
-      await resumePartitions(snap);
-    }
+    await loadImageByPath(imagePath);
   };
 
   const handleVerifyIntegrity = async () => {
@@ -638,12 +861,14 @@ export const App: React.FC = () => {
         return;
       }
       clearPendingProgressRef.current();
+      hashStartedAtRef.current = Date.now();
       setHashingImageState(true);
       setStatusText('后台读取整镜像 · 可继续浏览');
       setTaskStageText('后台读取整镜像 · 可继续浏览');
       try {
         await tauriApi.verifyIntegrity();
       } catch (err) {
+        hashStartedAtRef.current = null;
         clearPendingProgressRef.current();
         setHashingImageState(false);
         setProgressPercent(null);
@@ -689,6 +914,33 @@ export const App: React.FC = () => {
     }
   }, [applySnapshot, openBusyDialog, runTask]);
 
+  const handleScanPartition = useCallback(
+    async (offset: number) => {
+      if (!snapshotRef.current?.evidence) return;
+      if (busyRef.current) {
+        openBusyDialog('请等待当前任务完成后再索引分区。');
+        return;
+      }
+      setScanningPartitions(true);
+      try {
+        const res = await runTask(`索引分区（偏移 ${offset}）`, () =>
+          tauriApi.scanPartition({ offset })
+        );
+        if (res) {
+          if (res.completed) {
+            applySnapshot(res.snapshot);
+            setDetailText(`已完成分区偏移 ${offset} 扇区的文件索引。`);
+          } else {
+            setDetailText(`已取消分区偏移 ${offset} 扇区的索引。`);
+          }
+        }
+      } finally {
+        setScanningPartitions(false);
+      }
+    },
+    [applySnapshot, openBusyDialog, runTask]
+  );
+
   const handleCancelScan = useCallback(async () => {
     try {
       await tauriApi.cancelScanPartitions();
@@ -697,6 +949,30 @@ export const App: React.FC = () => {
       // 忽略
     }
   }, []);
+
+  /** 按当前活跃任务类型统一发起取消请求（前台长任务 / 后台大镜像哈希 / 后台内容搜索） */
+  const handleCancelActiveTask = useCallback(async () => {
+    if (cancellingActiveTask) return;
+    setCancellingActiveTask(true);
+    try {
+      const jobs: Promise<unknown>[] = [];
+      if (busyRef.current) {
+        jobs.push(tauriApi.cancelTask());
+      }
+      if (hashingImageRef.current) {
+        jobs.push(tauriApi.cancelVerifyIntegrity());
+      }
+      if (contentSearchingRef.current && activeSearchIdRef.current) {
+        jobs.push(tauriApi.cancelContentSearch({ searchId: activeSearchIdRef.current }));
+      }
+      if (jobs.length > 0) {
+        setStatusText('正在请求取消当前任务…');
+        await Promise.allSettled(jobs);
+      }
+    } finally {
+      setCancellingActiveTask(false);
+    }
+  }, [cancellingActiveTask]);
 
   const handleBrowseDirectory = useCallback(
     async (offset: number, inode: string | null, path: string): Promise<EntryView[] | null> => {
@@ -860,6 +1136,13 @@ export const App: React.FC = () => {
     void handleScanAllPartitions();
   }, [handleScanAllPartitions]);
 
+  const handleScanPartitionClick = useCallback(
+    (offset: number) => {
+      void handleScanPartition(offset);
+    },
+    [handleScanPartition]
+  );
+
   const handleCancelScanClick = useCallback(() => {
     void handleCancelScan();
   }, [handleCancelScan]);
@@ -976,7 +1259,15 @@ export const App: React.FC = () => {
   const hasFileNoteFeature = Boolean(registry.hasFeature('file_tools') && fileNoteAction);
 
   const custodyState = snapshot?.custodyState ?? 'idle';
-  const showProgressBar = busy || hashingImage;
+  const showProgressBar = busy || hashingImage || contentSearching;
+
+  // 当仅存在后台内容搜索时，底栏进度条与文案同步显示后台内容搜索进度
+  const effectiveProgressPercent =
+    busy || hashingImage ? progressPercent : contentSearching ? searchLiveState.percent : null;
+  const footerStatusText =
+    !busy && !hashingImage && contentSearching
+      ? searchLiveState.stageText || '正在后台搜索文件内容…'
+      : statusText;
 
   // 聚合当前活跃的前台与后台任务名称，供实时任务进度弹窗清晰展示
   const activeTaskNames = useMemo(() => {
@@ -996,9 +1287,9 @@ export const App: React.FC = () => {
   const busyDialogStageText = useMemo(() => {
     if (taskStageText) return taskStageText;
     if (hashingImage) return '后台读取整镜像 · 可继续浏览';
-    if (contentSearching) return '正在流式检索镜像文件内容…';
+    if (contentSearching) return searchLiveState.stageText || '正在流式检索镜像文件内容…';
     return statusText;
-  }, [taskStageText, hashingImage, contentSearching, statusText]);
+  }, [taskStageText, hashingImage, contentSearching, searchLiveState.stageText, statusText]);
 
   // 当前正在执行中的 MCP 工具信息（用于顶栏和底栏实时状态指示）
   const activeRunningMcp = useMemo(
@@ -1099,6 +1390,23 @@ export const App: React.FC = () => {
 
             return (
               <React.Fragment key={act.key}>
+                {needDivider && snapshot && (
+                  <button
+                    type="button"
+                    data-action-key="close_case"
+                    disabled={busy}
+                    className="td-btn td-hdr-btn"
+                    title="关闭当前打开的案件"
+                    onClick={() => void handleCloseCase()}
+                  >
+                    <UiIcon
+                      name="x_circle"
+                      size={14}
+                      color={busy ? 'var(--text-disabled)' : 'var(--header-icon)'}
+                    />
+                    关闭案件
+                  </button>
+                )}
                 {needDivider && <div className="td-header-divider" />}
                 <button
                   type="button"
@@ -1166,6 +1474,12 @@ export const App: React.FC = () => {
                 }}
               >
                 {panel.title}
+                {panel.key === 'review' && contentSearching && (
+                  <span className="td-tab-badge" title="后台内容搜索正在运行">
+                    <span className="td-mcp-dot td-mcp-dot--running" style={{ width: 6, height: 6 }} />
+                    搜索中
+                  </span>
+                )}
                 {panel.key === 'mcp' && mcpRunningCalls > 0 && (
                   <span className="td-tab-badge">
                     <span className="td-mcp-dot td-mcp-dot--running" style={{ width: 6, height: 6 }} />
@@ -1221,10 +1535,117 @@ export const App: React.FC = () => {
 
       {/* 4. 纯白证据工作区 */}
       <main className="td-workspace">
+        {/* 未开案时展示带最近案件卡片的欢迎空态（仍允许切换查看 MCP 实时监控页） */}
+        {!snapshot && activeTab !== 'mcp' && (
+          <div className="td-welcome-empty">
+            <div className="td-welcome-hero">
+              <BrandLogo size={42} />
+              <div className="td-welcome-hero-text">
+                <h1 className="td-welcome-title">TraceDesk 电子数据取证工作台</h1>
+                <p className="td-welcome-subtitle">
+                  应用层只读 · 本地流式处理 · 防篡改 SHA-256 审计链 · UTC+8
+                </p>
+              </div>
+              <div className="td-welcome-actions">
+                <button
+                  type="button"
+                  className="td-btn td-btn--accent"
+                  disabled={busy}
+                  onClick={handleNewCase}
+                >
+                  <UiIcon name="case_new" size={14} color="#FFFFFF" />
+                  新建案件
+                </button>
+                <button
+                  type="button"
+                  className="td-btn td-btn--soft"
+                  disabled={busy}
+                  onClick={handleOpenCase}
+                >
+                  <UiIcon name="case_open" size={14} color="var(--accent-soft-text)" />
+                  打开案件…
+                </button>
+              </div>
+            </div>
+
+            {inTauri && (
+              <div className="td-welcome-drop-hint">
+                <UiIcon name="import_disk" size={14} color="var(--accent)" />
+                <span>
+                  提示：可直接将案件元数据 <span className="td-mono">case.json</span> 拖入窗口快速打开；开案后拖入{' '}
+                  <span className="td-mono">.dd / .raw / .img / .e01</span> 即可加载证据镜像。
+                </span>
+              </div>
+            )}
+
+            <div className="td-welcome-recent-section">
+              <div className="td-welcome-recent-head">
+                <span className="td-section-title">最近案件</span>
+                <button
+                  type="button"
+                  className="td-btn td-btn--compact"
+                  disabled={loadingRecentCases || busy}
+                  onClick={() => void refreshRecentCases()}
+                >
+                  <UiIcon name="refresh" size={12} color="var(--text-secondary)" />
+                  {loadingRecentCases ? '正在刷新…' : '刷新列表'}
+                </button>
+              </div>
+
+              {recentCases.length > 0 ? (
+                <div className="td-recent-grid">
+                  {recentCases.map((item) => (
+                    <button
+                      key={item.folder}
+                      type="button"
+                      className="td-recent-card"
+                      disabled={busy}
+                      onClick={() => void openCaseByPath(item.folder)}
+                      title={`点击直接打开案件：${item.folder}`}
+                    >
+                      <div className="td-recent-card-head">
+                        <span className="td-recent-card-number td-mono">
+                          {item.number || item.name}
+                        </span>
+                        <span
+                          className={`td-recent-badge ${item.hasEvidence ? 'td-recent-badge--ready' : 'td-recent-badge--empty'}`}
+                        >
+                          {item.hasEvidence
+                            ? `已载入镜像 · ${item.inventoryCount.toLocaleString()} 项`
+                            : '待载入镜像'}
+                        </span>
+                      </div>
+                      <div className="td-recent-card-meta">
+                        <span>对象：{item.target || '—'}</span>
+                        <span>·</span>
+                        <span>人员：{item.examiner || '—'}</span>
+                      </div>
+                      <div className="td-recent-card-foot">
+                        <span className="td-recent-card-path td-mono">{item.folder}</span>
+                        {item.created && (
+                          <span className="td-muted-text td-mono" style={{ fontSize: 11, flexShrink: 0 }}>
+                            {item.created}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="td-recent-empty">
+                  {loadingRecentCases
+                    ? '正在扫描案件库目录…'
+                    : '案件库中尚无历史案件。点击上方「新建案件」开始，或点击「打开案件…」浏览本地 case.json。'}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* 文件浏览与内容搜索保持挂载，避免切换标签时丢失文件树或后台流式搜索结果 */}
         <div
           style={{
-            display: activeTab === 'files' ? 'flex' : 'none',
+            display: snapshot && activeTab === 'files' ? 'flex' : 'none',
             flex: 1,
             minHeight: 0,
             flexDirection: 'column',
@@ -1239,6 +1660,7 @@ export const App: React.FC = () => {
             onSelectEntry={setSelectedEntry}
             onDetailChange={setDetailText}
             onScanPartitions={handleScanPartitionsClick}
+            onScanPartition={handleScanPartitionClick}
             onCancelScan={handleCancelScanClick}
             onBrowseDirectory={handleBrowseDirectory}
             onExportEntry={handleExportEntryClick}
@@ -1249,16 +1671,17 @@ export const App: React.FC = () => {
           />
         </div>
 
-        {activeTab === 'info' && (
+        {snapshot && activeTab === 'info' && (
           <EvidenceInfoModule
             snapshot={snapshot}
             busy={busy}
             onRegisterSource={handleOpenRegisterSource}
             onExportFsstat={handleExportFsstatClick}
+            onScanPartition={handleScanPartitionClick}
           />
         )}
 
-        {activeTab === 'findings' && (
+        {snapshot && activeTab === 'findings' && (
           <FindingsModule
             snapshot={snapshot}
             busy={busy}
@@ -1270,7 +1693,7 @@ export const App: React.FC = () => {
         {registry.hasFeature('timeline') && (
           <div
             style={{
-              display: activeTab === 'timeview' ? 'flex' : 'none',
+              display: snapshot && activeTab === 'timeview' ? 'flex' : 'none',
               flex: 1,
               minHeight: 0,
               flexDirection: 'column',
@@ -1280,12 +1703,14 @@ export const App: React.FC = () => {
           </div>
         )}
 
-        {activeTab === 'audit' && <AuditLogModule snapshot={snapshot} refreshToken={refreshToken} />}
+        {snapshot && activeTab === 'audit' && (
+          <AuditLogModule snapshot={snapshot} refreshToken={refreshToken} />
+        )}
 
         {registry.hasFeature('review') && (
           <div
             style={{
-              display: activeTab === 'review' ? 'flex' : 'none',
+              display: snapshot && activeTab === 'review' ? 'flex' : 'none',
               flex: 1,
               minHeight: 0,
               flexDirection: 'column',
@@ -1297,6 +1722,7 @@ export const App: React.FC = () => {
               singleFileRequestToken={singleFileSearchToken}
               busy={busy}
               onSearchingChange={setContentSearchingState}
+              onSearchLiveStateChange={handleSearchLiveStateChange}
               onSnapshotUpdated={applySnapshot}
               onAlert={showAlert}
             />
@@ -1345,16 +1771,60 @@ export const App: React.FC = () => {
           </button>
         )}
         <div className="td-footer-divider" />
-        <span className="td-footer-status">{statusText}</span>
+        <span
+          className={`td-footer-status ${!busy && !hashingImage && contentSearching ? 'td-footer-status--clickable' : ''}`}
+          title={
+            !busy && !hashingImage && contentSearching
+              ? '点击切换到「内容搜索与复核」页查看实时命中'
+              : footerStatusText
+          }
+          onClick={() => {
+            if (!busy && !hashingImage && contentSearching) {
+              setActiveTab('review');
+            }
+          }}
+        >
+          {footerStatusText}
+        </span>
         {showProgressBar && (
-          <div className="td-progress-track" aria-label="任务进度">
-            <div
-              className={`td-progress-fill ${progressPercent === null ? 'td-progress-fill--indeterminate' : ''}`}
-              style={progressPercent !== null ? { width: `${progressPercent}%` } : undefined}
-            />
+          <div className="td-footer-progress-group">
+            <div className="td-progress-track" aria-label="任务进度">
+              <div
+                className={`td-progress-fill ${effectiveProgressPercent === null ? 'td-progress-fill--indeterminate' : ''}`}
+                style={
+                  effectiveProgressPercent !== null
+                    ? { width: `${effectiveProgressPercent}%` }
+                    : undefined
+                }
+              />
+            </div>
+            <button
+              type="button"
+              className="td-footer-cancel-btn"
+              disabled={cancellingActiveTask}
+              title="取消当前正在执行的任务"
+              onClick={() => void handleCancelActiveTask()}
+            >
+              {cancellingActiveTask ? '取消中…' : '取消'}
+            </button>
           </div>
         )}
       </footer>
+
+      {/* 原生文件拖放柔和提示遮罩 */}
+      {dragOverActive && (
+        <div className="td-drop-overlay" aria-live="polite">
+          <div className="td-drop-card">
+            <UiIcon name="import_disk" size={34} color="var(--accent)" />
+            <div className="td-drop-title">松开鼠标以导入文件</div>
+            <div className="td-drop-desc">
+              {snapshot
+                ? '拖入 case.json 可切换案件；拖入 .dd / .raw / .img / .e01 可为当前案件加载证据镜像。'
+                : '拖入案件目录中的 case.json 即可直接打开已有案件。'}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ---------- 公共业务弹窗 ---------- */}
       {newCaseOpen && (
@@ -1368,6 +1838,7 @@ export const App: React.FC = () => {
       {openCaseOpen && (
         <OpenCaseDialog
           defaultCasesDir={appPaths.casesDir || 'C:\\TraceDesk\\cases'}
+          initialRecentCases={recentCases}
           onOpened={(snap) => void handleCaseReplaced(snap)}
           onClose={() => setOpenCaseOpen(false)}
         />
@@ -1438,7 +1909,9 @@ export const App: React.FC = () => {
           reason={busyDialogReason}
           taskNames={activeTaskNames}
           stageText={busyDialogStageText}
-          progressPercent={progressPercent}
+          progressPercent={effectiveProgressPercent}
+          onCancelTasks={() => void handleCancelActiveTask()}
+          cancelling={cancellingActiveTask}
           onClose={() => setBusyDialogReason(null)}
         />
       )}

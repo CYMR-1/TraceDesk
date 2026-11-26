@@ -417,7 +417,7 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
 
     let st_before = cmd_get_mcp_status(&state, Some(port)).expect("get_mcp_status");
     assert!(!st_before.running);
-    assert_eq!(st_before.tools.len(), 19);
+    assert_eq!(st_before.tools.len(), tracedesk_mcp::TOOL_CATALOG.len());
     assert_eq!(st_before.active_case_number.as_deref(), Some("MCP-COORD-01"));
 
     let st_started = cmd_start_mcp_http(&state, port).expect("start_mcp_http");
@@ -548,7 +548,7 @@ fn embedded_mcp_http_server_and_case_lock_coordination() {
     assert_eq!(code_tools, 200);
     let tools_val: Value = serde_json::from_str(&body_tools).expect("parse tools");
     let tools_arr = tools_val["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools_arr.len(), 19);
+    assert_eq!(tools_arr.len(), tracedesk_mcp::TOOL_CATALOG.len());
     let record_tool = tools_arr
         .iter()
         .find(|t| t["name"] == "tracedesk_record_finding")
@@ -1768,5 +1768,194 @@ fn mcp_hot_refresh_case_json_preserves_timeline_and_blocks_cross_case_bookmark()
     assert!(bookmark_err.contains("未找到"));
 
     cmd_stop_mcp_http(&state).expect("stop_mcp_http");
+    state.shutdown_all();
+}
+
+/// 回归测试：当 `case_lock` 被占用导致 `emit_case_updated_if_matching` 遇到 `WouldBlock` 时，
+/// 必须置位 `disk_dirty` 并延迟通知（杜绝“假刷新”），待释放锁后再经由 `cmd_get_case_snapshot`
+/// 主动从磁盘热重载最新案件数据与审计记录。
+#[test]
+fn disk_dirty_defers_wouldblock_hot_reload_and_recovers_on_snapshot() {
+    use std::sync::atomic::Ordering;
+    use tracedesk_mcp::{CaseService, McpActivityRecord};
+
+    let tmp = tempdir().expect("create tempdir");
+    let cases_dir = tmp.path().join("cases");
+    std::fs::create_dir_all(&cases_dir).expect("mkdir cases");
+    let state = make_test_state(cases_dir.clone());
+
+    let snap = cmd_create_case(
+        &state,
+        &cases_dir.to_string_lossy(),
+        "DIRTY-RELOAD-01",
+        "测试员",
+        "热刷新脏标记回归",
+        None,
+    )
+    .expect("create case");
+    let _ = cmd_load_image(&state, &demo_image_path().to_string_lossy(), None).expect("load_image");
+    let _ = cmd_scan_all_partitions(&state, None).expect("scan_all");
+
+    // 1. 模拟长任务占用内存 `case_lock`（但未持有磁盘 `case.lock`），外部 MCP 进程直接向磁盘写入。
+    let held_guard = state.case_lock.lock().expect("hold case_lock");
+    let external_svc = CaseService::new(Some(cases_dir.clone()), Some("外部AI助手".to_string()));
+    CaseService::with_caller_scope(Some("外部AI助手"), Some("Cursor"), || {
+        external_svc
+            .register_source(
+                &snap.case_dir,
+                "EV-DIRTY-01",
+                "跨进程延迟热刷新交付方",
+                "2026-11-26 11:00:00",
+                "TraceDesk MCP",
+                "",
+                None,
+            )
+            .expect("external register_source");
+    });
+
+    // 2. 此时触发 `emit_case_updated_if_matching`，由于 `case_lock` 正被占用应返回 false 并置脏。
+    let rec = McpActivityRecord {
+        id: "act-dirty-1".to_string(),
+        call_id: "call-dirty-1".to_string(),
+        timestamp: "2026-11-26 11:00:01.000".to_string(),
+        phase: "completed".to_string(),
+        transport: "stdio".to_string(),
+        client: "Cursor".to_string(),
+        session_id: None,
+        method: "tools/call".to_string(),
+        tool_name: Some("tracedesk_register_source".to_string()),
+        tool_title: "登记证据来源".to_string(),
+        category: "证据镜像".to_string(),
+        read_only: false,
+        case_dir: Some(snap.case_dir.clone()),
+        case_number: Some("DIRTY-RELOAD-01".to_string()),
+        params_summary: String::new(),
+        params_json: "{}".to_string(),
+        duration_ms: Some(12),
+        result_summary: "ok".to_string(),
+        response_preview: None,
+        error: None,
+    };
+    let emitted_now = state.emit_case_updated_if_matching(&rec);
+    assert!(
+        !emitted_now,
+        "遇到 WouldBlock 时不得立即广播假刷新，应延迟至真正热重载之后"
+    );
+    assert!(
+        state.disk_dirty.load(Ordering::Acquire),
+        "遇到 WouldBlock 后必须置位 disk_dirty 脏标记"
+    );
+    assert!(
+        state
+            .pending_case_updated
+            .lock()
+            .expect("pending lock")
+            .is_some(),
+        "遇到 WouldBlock 后应暂存待补发通知载荷"
+    );
+
+    // 持锁期间调用 get_case_snapshot 不阻塞且保持 disk_dirty=true。
+    let stale_snap = cmd_get_case_snapshot(&state)
+        .expect("get_case_snapshot while locked")
+        .expect("cached snapshot");
+    assert!(stale_snap.evidence.and_then(|e| e.provenance).is_none());
+    assert!(state.disk_dirty.load(Ordering::Acquire));
+
+    // 3. 释放 `case_lock` 后再次获取快照，应自动从磁盘重载最新数据并清除脏标记。
+    drop(held_guard);
+    let fresh_snap = cmd_get_case_snapshot(&state)
+        .expect("get_case_snapshot after unlock")
+        .expect("fresh snapshot");
+    assert!(
+        !state.disk_dirty.load(Ordering::Acquire),
+        "成功热重载后必须清除 disk_dirty 脏标记"
+    );
+    assert!(
+        state
+            .pending_case_updated
+            .lock()
+            .expect("pending lock")
+            .is_none(),
+        "成功热重载后应清空待补发通知载荷"
+    );
+    let prov = fresh_snap
+        .evidence
+        .and_then(|e| e.provenance)
+        .expect("provenance should be reloaded from disk");
+    assert_eq!(prov.evidence_id, "EV-DIRTY-01");
+    assert_eq!(prov.source, "跨进程延迟热刷新交付方");
+
+    state.shutdown_all();
+}
+
+/// 回归测试：无锁三段式内容搜索结束后应自动更新 `CaseSnapshot.search_records`，
+/// 且历史搜索记录回放（`cmd_load_search_record`）注册的 `replay:*` 会话可直接保存为取证发现，
+/// 全程保持审计哈希链 100% 完整且不残留常驻 `case.lock`。
+#[test]
+fn detached_content_search_updates_snapshot_records_and_supports_replay_bookmark() {
+    use tracedesk_core::verify_audit_chain_at;
+
+    let tmp = tempdir().expect("create tempdir");
+    let cases_dir = tmp.path().join("cases");
+    std::fs::create_dir_all(&cases_dir).expect("mkdir cases");
+    let state = make_test_state(cases_dir.clone());
+
+    let snap = cmd_create_case(
+        &state,
+        &cases_dir.to_string_lossy(),
+        "SEARCH-REPLAY-01",
+        "测试员",
+        "无锁搜索与历史回放回归",
+        None,
+    )
+    .expect("create case");
+    let _ = cmd_load_image(&state, &demo_image_path().to_string_lossy(), None).expect("load_image");
+    let _ = cmd_scan_all_partitions(&state, None).expect("scan_all");
+
+    let search_res = cmd_start_content_search(&state, "6E 6F 74 65", "HEX", None, None)
+        .expect("start_content_search");
+    assert_eq!(search_res.needle_hex, "6e6f7465");
+
+    // 搜索完成后不残留常驻 `case.lock`，且 `CaseSnapshot.search_records` 应包含刚生成的搜索记录。
+    {
+        let cg = state.case_lock.lock().expect("case_lock");
+        assert!(
+            !cg.as_ref().expect("case open").has_lock(),
+            "内容搜索结束后不应残留常驻 case.lock"
+        );
+    }
+
+    let snap_after = cmd_get_case_snapshot(&state)
+        .expect("get_case_snapshot")
+        .expect("snapshot");
+    assert!(
+        !snap_after.search_records.is_empty(),
+        "CaseSnapshot.search_records 应包含历史内容搜索摘要"
+    );
+    let latest_rec = &snap_after.search_records[0];
+    assert_eq!(latest_rec.query, "6E 6F 74 65");
+    assert_eq!(latest_rec.encoding, "HEX");
+    assert!(latest_rec.hits >= 1);
+
+    // 模拟重启或新会话：清空内存搜索会话后通过 `cmd_load_search_record` 回放并保存为取证发现。
+    state.clear_search_sessions();
+    let replayed = cmd_load_search_record(&state, &latest_rec.report_name)
+        .expect("load_search_record replay");
+    assert!(
+        replayed
+            .iter()
+            .any(|h| h.path == "DOCS/CASE.TXT" && h.pos == 5),
+        "回放历史搜索记录应还原准确命中位置"
+    );
+
+    let replay_session_id = format!("replay:{}", latest_rec.report_name);
+    let bookmarked = cmd_bookmark_search_hits(&state, &replay_session_id, &[0])
+        .expect("bookmark replayed hit");
+    assert_eq!(bookmarked.saved_count, 1);
+
+    let verified = verify_audit_chain_at(Path::new(&snap.case_dir)).expect("audit chain valid");
+    assert!(verified.iter().any(|r| r.action == "CONTENT_SEARCH"));
+    assert!(verified.iter().any(|r| r.action == "FILE_NOTE"));
+
     state.shutdown_all();
 }

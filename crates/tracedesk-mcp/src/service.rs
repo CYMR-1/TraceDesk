@@ -21,12 +21,12 @@ use thiserror::Error;
 use tracedesk_core::{
     AppPaths, AuditOrigin, AuditRecord, BuildBundleOptions, Case, CaseData, CoreError,
     FindingGroup, PAGE_BYTES, PREVIEW_ENCODINGS, Provenance, SOURCE_FIELDS, SearchOptions,
-    TimelineFilter, TimelineIndex, action_title, audit_mcp_user, audit_origin, audit_origin_label,
-    build_bundle, can_export, coverage_text, deleted_source_note, display_iso_time,
-    display_timestamp, entry_name, entry_status, examine, export_findings as do_export_findings,
-    group_findings, is_within, normalize_event_filter, operation_title, preview_entry_page,
-    record_note, resolve_clean, search_case, sha256_hex, source_status, strip_trailing_version,
-    verify_audit_chain_at,
+    SearchRecord, TimelineFilter, TimelineIndex, action_title, audit_mcp_user, audit_origin,
+    audit_origin_label, build_bundle, can_export, coverage_text, deleted_source_note,
+    display_iso_time, display_timestamp, entry_name, entry_status, examine,
+    export_findings as do_export_findings, group_findings, is_within, normalize_event_filter,
+    operation_title, preview_entry_page, record_note, resolve_clean, search_case, sha256_hex,
+    source_status, strip_trailing_version, verify_audit_chain_at,
 };
 use tracedesk_engines::{CaseFileLock, InventoryEntry};
 
@@ -557,7 +557,22 @@ impl CaseService {
     }
 
     /// 结合工具参数 `actor`、传输层 `X-MCP-User`、`--actor`/`TRACEDESK_MCP_ACTOR` 与客户端名，
-    /// 解析本次操作应写入审计链的 `(actor, mcp_client)`。
+    /// 解析本次操作应写入审计链与遥测记录的 `(actor, mcp_client)`。
+    pub fn resolve_caller_identity_with(
+        &self,
+        actor: Option<&str>,
+        header_user: Option<&str>,
+        client_name: Option<&str>,
+    ) -> (Option<String>, String) {
+        let explicit_actor = actor
+            .and_then(sanitize_mcp_identity)
+            .or_else(|| header_user.and_then(sanitize_mcp_identity))
+            .or_else(|| self.default_actor.clone());
+        let mcp_client = compose_mcp_client(explicit_actor.as_deref(), client_name);
+        (explicit_actor, mcp_client)
+    }
+
+    /// 结合当前线程作用域与工具参数 `actor`，解析本次操作应写入审计链的 `(actor, mcp_client)`。
     fn resolve_caller_identity(&self, actor: Option<&str>) -> (Option<String>, String) {
         let (scoped_user, scoped_client) = ACTIVE_CALLER_SCOPE.with(|cell| {
             cell.borrow()
@@ -565,12 +580,7 @@ impl CaseService {
                 .map(|s| (s.header_user.clone(), s.client_name.clone()))
                 .unwrap_or((None, None))
         });
-        let explicit_actor = actor
-            .and_then(sanitize_mcp_identity)
-            .or(scoped_user)
-            .or_else(|| self.default_actor.clone());
-        let mcp_client = compose_mcp_client(explicit_actor.as_deref(), scoped_client.as_deref());
-        (explicit_actor, mcp_client)
+        self.resolve_caller_identity_with(actor, scoped_user.as_deref(), scoped_client.as_deref())
     }
 
     /// 打开案件并按配置的 `lock_timeout` 排队获取 `case.lock`（固定 `AuditOrigin::Mcp` 且写入 `mcp_client`），
@@ -1562,6 +1572,56 @@ impl CaseService {
         Ok(Value::Object(out))
     }
 
+    /// 将 `SearchRecord` 包装为标准分页搜索结果 JSON（供 `tracedesk_search_content` 与 `tracedesk_read_search_report` 复用）。
+    fn format_search_record_page(
+        case_dir: &Path,
+        report_file: &Path,
+        rel_report_path: &str,
+        record: SearchRecord,
+        limit: usize,
+        offset: usize,
+    ) -> Value {
+        let errors_count = record.errors.len();
+        let errors_preview: Vec<_> = record.errors.into_iter().take(20).collect();
+        let page_data = paginate(&record.hits, limit, offset);
+
+        let mut out = serde_json::Map::new();
+        out.insert(
+            "case_dir".to_string(),
+            Value::String(case_dir.to_string_lossy().into_owned()),
+        );
+        out.insert(
+            "report_file".to_string(),
+            Value::String(report_file.to_string_lossy().into_owned()),
+        );
+        out.insert(
+            "report_path".to_string(),
+            Value::String(rel_report_path.to_string()),
+        );
+        out.insert("query".to_string(), Value::String(record.query));
+        out.insert("encoding".to_string(), Value::String(record.encoding));
+        out.insert("needle_hex".to_string(), Value::String(record.needle));
+        out.insert("scope".to_string(), Value::String(record.scope));
+        out.insert("status".to_string(), Value::String(record.status));
+        out.insert(
+            "verification".to_string(),
+            Value::String(record.verification),
+        );
+        out.insert("visited".to_string(), Value::from(record.visited));
+        out.insert("eligible".to_string(), Value::from(record.eligible));
+        out.insert("errors_count".to_string(), Value::from(errors_count));
+        out.insert(
+            "errors".to_string(),
+            serde_json::to_value(errors_preview).unwrap_or_else(|_| json!([])),
+        );
+        if let Some(obj) = page_data.as_object() {
+            for (k, v) in obj {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        Value::Object(out)
+    }
+
     /// 10. `tracedesk_search_content`：按精确字节搜索全案或单文件，并生成 `reports/search_*.json`。
     #[allow(clippy::too_many_arguments)]
     pub fn search_content(
@@ -1607,43 +1667,108 @@ impl CaseService {
         let output = search_case(&mut case, &options, &cancel, None, None, None)?;
         self.update_case_cache_from_open(&case);
 
-        let record = output.record;
-        let errors_count = record.errors.len();
-        let errors_preview: Vec<_> = record.errors.into_iter().take(20).collect();
-        let page_data = paginate(&record.hits, limit, offset);
-
-        let mut out = serde_json::Map::new();
-        out.insert(
-            "case_dir".to_string(),
-            Value::String(case.folder().to_string_lossy().into_owned()),
+        let rel_report_path = format!("reports/{}", output.report_name);
+        let out = Self::format_search_record_page(
+            case.folder(),
+            &output.report_path,
+            &rel_report_path,
+            output.record,
+            limit,
+            offset,
         );
-        out.insert(
-            "report_file".to_string(),
-            Value::String(output.report_path.to_string_lossy().into_owned()),
-        );
-        out.insert("query".to_string(), Value::String(record.query));
-        out.insert("encoding".to_string(), Value::String(record.encoding));
-        out.insert("needle_hex".to_string(), Value::String(record.needle));
-        out.insert("scope".to_string(), Value::String(record.scope));
-        out.insert("status".to_string(), Value::String(record.status));
-        out.insert(
-            "verification".to_string(),
-            Value::String(record.verification),
-        );
-        out.insert("visited".to_string(), Value::from(record.visited));
-        out.insert("eligible".to_string(), Value::from(record.eligible));
-        out.insert("errors_count".to_string(), Value::from(errors_count));
-        out.insert(
-            "errors".to_string(),
-            serde_json::to_value(errors_preview).unwrap_or_else(|_| json!([])),
-        );
-        if let Some(obj) = page_data.as_object() {
-            for (k, v) in obj {
-                out.insert(k.clone(), v.clone());
-            }
-        }
         case.close();
-        Ok(Value::Object(out))
+        Ok(out)
+    }
+
+    /// 11. `tracedesk_read_search_report`：只读分页读取案件 `reports/` 下已落盘的 `search_*.json` 搜索报告。
+    ///
+    /// 严格校验目标路径位于当前案件 `reports/` 目录内防止路径穿越，绝不重新扫描镜像、绝不写入新报告或新审计记录。
+    pub fn read_search_report(
+        &self,
+        case_dir: &str,
+        report_path: &str,
+        limit: usize,
+        offset: usize,
+    ) -> McpResult<Value> {
+        let trimmed = report_path.trim();
+        if trimmed.is_empty() {
+            return Err(McpError::ValueError(
+                "参数 report_path 不能为空。".to_string(),
+            ));
+        }
+        if trimmed.chars().any(|ch| ch.is_control()) {
+            return Err(McpError::ValueError(
+                "参数 report_path 包含非法控制字符。".to_string(),
+            ));
+        }
+
+        let folder = self.resolve_case_dir(case_dir)?;
+        let reports_dir = resolve_clean(&folder.join("reports"));
+
+        let raw = Path::new(trimmed);
+        let candidate = if raw.is_absolute() {
+            resolve_clean(raw)
+        } else {
+            let mut comps = raw.components();
+            let is_single_normal = matches!(comps.next(), Some(std::path::Component::Normal(_)))
+                && comps.next().is_none();
+            let joined = if is_single_normal && trimmed.to_ascii_lowercase().starts_with("search_")
+            {
+                reports_dir.join(raw)
+            } else {
+                folder.join(raw)
+            };
+            resolve_clean(&joined)
+        };
+
+        // 强制限制目标文件必须严格位于当前案件 `reports/` 目录之内，拒绝任何 `..` 或跨目录/跨案件路径穿越。
+        if !is_within(&candidate, &reports_dir) || candidate == reports_dir {
+            return Err(McpError::ValueError(format!(
+                "搜索报告路径必须位于当前案件的 reports/ 目录内（已拒绝越界路径：{trimmed}）。"
+            )));
+        }
+
+        let file_name = candidate
+            .file_name()
+            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if !file_name.starts_with("search_") || !file_name.ends_with(".json") {
+            return Err(McpError::ValueError(format!(
+                "仅允许读取 reports/search_*.json 格式的搜索报告（当前路径：{trimmed}）。"
+            )));
+        }
+
+        if !candidate.is_file() {
+            return Err(McpError::FileNotFoundError(format!(
+                "未找到指定的搜索报告文件：{trimmed}"
+            )));
+        }
+
+        let raw_text = fs::read_to_string(&candidate)?;
+        let record: SearchRecord = serde_json::from_str(&raw_text).map_err(|e| {
+            McpError::ValueError(format!("搜索报告 JSON 格式无效（{trimmed}）：{e}"))
+        })?;
+
+        let rel_report_path = candidate
+            .strip_prefix(&folder)
+            .ok()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|| {
+                let name = candidate
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                format!("reports/{name}")
+            });
+
+        Ok(Self::format_search_record_page(
+            &folder,
+            &candidate,
+            &rel_report_path,
+            record,
+            limit,
+            offset,
+        ))
     }
 
     /// 11. `tracedesk_examine_file`：计算文件 SHA-256 或与外部对照副本比对。

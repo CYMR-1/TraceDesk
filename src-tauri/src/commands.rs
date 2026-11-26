@@ -1,29 +1,36 @@
 //! 实现 `ui-contract.md` §3 与 `frontend/src/api/tauri.ts` 中定义的全部 38 个 Tauri 命令及
 //! 6 类流式事件（含便捷别名）。
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use memchr::memmem;
+use rayon::prelude::*;
 use serde_json::{Map, Value, json};
 use tauri::{AppHandle, Emitter, State};
 use tracedesk_mcp::McpActivitySnapshot;
 use tracedesk_core::{
-    AuditOrigin, BrowserFilter, BuildBundleOptions, Case, CoreError, EvidenceInfo, FindingGroup,
-    PreviewEncoding, Provenance, SearchHit, SearchOptions, SearchRecord, StatusFilter,
-    TimelineFilter, TimelineIndex, action_title, audit_mcp_user, audit_origin, audit_origin_label,
-    build_bundle, case_folder_name,
-    deleted_export_summary, deleted_source_note, display_iso_time, entry_status, examine,
+    AuditOrigin, BrowserFilter, BuildBundleOptions, CONTEXT_BYTES, Case, CoreError, EvidenceInfo,
+    FindingGroup, ICAT_THREADS, PIECE_BYTES, PIECE_SPLIT_MIN, PartitionScan, PreviewEncoding,
+    Provenance, RawHit, SearchErrorEntry, SearchHit, SearchOutput, SearchRecord,
+    SelectedSearchTarget, StatusFilter, StreamMatcher, TimelineFilter, TimelineIndex,
+    WIN_INIT_BYTES, WIN_INIT_FILES, WIN_MAX_BYTES, WIN_MAX_FILES, action_title, audit_mcp_user,
+    audit_origin, audit_origin_label, build_bundle, case_folder_name, deleted_export_summary,
+    deleted_source_note, display_iso_time, entry_status, examine,
     export_findings as core_export_findings, format_missing_materials, group_findings, hex_lower,
     inspect_bundle_exports, inspect_bundle_searches, is_within, next_case_folder_path,
     operation_title, parse_pattern, preview_entry_image, preview_entry_page, record_note,
-    resolve_clean, search_case,
+    resolve_clean, sha256_hex,
 };
-use tracedesk_engines::{InventoryEntry, SourceGuard, TskCli, ewf, sha256_file};
+use tracedesk_engines::{
+    ByteInterval, EngineError, EntryReadPlan, InventoryEntry, MediaReader, SourceGuard, TskCli,
+    VolumeReader, can_export, ewf, open_media, sha256_file,
+};
 use uuid::Uuid;
 
 use crate::mcp_http::mcp_list_cases;
@@ -163,8 +170,9 @@ pub fn cmd_create_case(
     if let Some(mut old) = case_guard.take() {
         old.close();
     }
-    // 切换至新建案件前清理旧案件残留的搜索会话，避免内存泄漏或跨案误存书签。
+    // 切换至新建案件前清理旧案件残留的搜索会话与热刷新脏标记，避免内存泄漏或跨案误存书签。
     state.clear_search_sessions();
+    state.clear_disk_dirty();
     let mut view = state
         .view
         .write()
@@ -235,6 +243,7 @@ pub fn cmd_open_case(state: &Arc<AppState>, case_path: &str) -> Result<CaseSnaps
         old.close();
     }
     state.clear_search_sessions();
+    state.clear_disk_dirty();
 
     let mut view = state
         .view
@@ -261,6 +270,7 @@ pub fn cmd_close_case(state: &Arc<AppState>) -> Result<CloseCaseResponse, String
         cur.close();
     }
     state.clear_search_sessions();
+    state.clear_disk_dirty();
     if let Ok(mut view) = state.view.write() {
         view.clear();
     }
@@ -268,7 +278,9 @@ pub fn cmd_close_case(state: &Arc<AppState>) -> Result<CloseCaseResponse, String
 }
 
 pub fn cmd_get_case_snapshot(state: &Arc<AppState>) -> Result<Option<CaseSnapshot>, String> {
-    // 非阻塞轻量检测外部 MCP 进程是否修改了磁盘案件状态：若当前有长耗时扫描/搜索占锁则直接返回缓存视图，不卡顿 UI。
+    // 非阻塞轻量检测外部 MCP 进程是否修改了磁盘案件状态：
+    // 若存在因先前 WouldBlock 积压的 disk_dirty 脏标记，只要锁已空闲即立即从磁盘热重载并补发通知；
+    // 若当前仍被长耗时任务占锁，则保留 disk_dirty 标记待锁释放后自动补刷，同时不卡顿 UI。
     let _ = state.reload_active_case_from_disk_nonblocking();
     let view = state
         .view
@@ -813,6 +825,7 @@ pub fn cmd_scan_all_partitions(
     })();
 
     state.scanning_active.store(false, Ordering::SeqCst);
+    let _ = state.flush_disk_dirty_if_ready();
     match &res {
         Ok(_) => emit_task_finished(app, "读取所有分区与文件树", true, None),
         Err(e) => emit_task_finished(app, "读取所有分区与文件树", false, Some(e.clone())),
@@ -871,6 +884,7 @@ pub fn cmd_scan_partition(
     })();
 
     state.scanning_active.store(false, Ordering::SeqCst);
+    let _ = state.flush_disk_dirty_if_ready();
     match &res {
         Ok(_) => emit_task_finished(app, &stage, true, None),
         Err(e) => emit_task_finished(app, &stage, false, Some(e.clone())),
@@ -2388,6 +2402,187 @@ fn fallback_hit_entry(h: &SearchHit) -> (String, InventoryEntry) {
     )
 }
 
+/// 流式内容搜索单块读取缓冲大小（1 MiB）。
+const SEARCH_STREAM_CHUNK_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DetachedDedupKey {
+    Shared {
+        offset: u64,
+        inode: String,
+        size: u64,
+    },
+    Unique(usize),
+}
+
+struct DetachedDirectTask {
+    key: DetachedDedupKey,
+    piece_start: u64,
+    entry: InventoryEntry,
+    sort_key: (u64, u64, u64),
+    preplanned_intervals: Option<Vec<ByteInterval>>,
+}
+
+enum DetachedDirectOutcome {
+    Hits(Vec<RawHit>),
+    NeedsIcat,
+}
+
+type DetachedIcatOutcome = Result<(DetachedDedupKey, Vec<RawHit>, Option<String>), CoreError>;
+type DetachedStageProgress<'a> = &'a (dyn Fn(&str, u64, u64) + Sync);
+
+/// 在短锁阶段提取的只读搜索上下文快照，释放 `case_lock` 与 `case.lock` 后独立执行流式搜索。
+struct DetachedSearchContext {
+    case_folder: PathBuf,
+    image: PathBuf,
+    evidence: EvidenceInfo,
+    entries: Vec<InventoryEntry>,
+    source_note: String,
+    partition_scans: Vec<PartitionScan>,
+    selected_target: Option<SelectedSearchTarget>,
+    needle: Vec<u8>,
+}
+
+fn parse_search_inode_num(inode: &str) -> Option<u64> {
+    let first = inode.split('-').next()?;
+    if first.is_empty() || !first.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    first.parse::<u64>().ok()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_detached_direct_intervals(
+    vol: &mut VolumeReader,
+    entry: &InventoryEntry,
+    intervals: &[ByteInterval],
+    needle: &[u8],
+    finder: &memmem::Finder<'_>,
+    cancel: &AtomicBool,
+    io_buf: &mut Vec<u8>,
+) -> Result<Vec<RawHit>, CoreError> {
+    let mut hits = Vec::new();
+    let extra = (needle.len() as u64).saturating_sub(1) + CONTEXT_BYTES as u64;
+    for iv in intervals {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(CoreError::Cancelled("已取消内容搜索".to_string()));
+        }
+        let read_lo = iv.start.saturating_sub(CONTEXT_BYTES as u64);
+        let read_hi = iv.end.saturating_add(extra).min(entry.size);
+        if read_hi.saturating_sub(read_lo) < needle.len() as u64 {
+            continue;
+        }
+        let total = read_hi - read_lo;
+        let mut matcher = StreamMatcher::new(
+            finder,
+            needle.len(),
+            total,
+            read_lo,
+            iv.start,
+            iv.end,
+            None,
+        );
+        let mut pos = read_lo;
+        while pos < read_hi {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(CoreError::Cancelled("已取消内容搜索".to_string()));
+            }
+            let want = (read_hi - pos).min(SEARCH_STREAM_CHUNK_BYTES as u64) as usize;
+            if io_buf.len() < want {
+                io_buf.resize(want, 0);
+            }
+            vol.read_entry_into(entry, pos, &mut io_buf[..want])?;
+            let _ = matcher.push_chunk(&io_buf[..want], Some(cancel))?;
+            pos += want as u64;
+        }
+        hits.extend(matcher.into_hits());
+    }
+    Ok(hits)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scan_detached_via_icat(
+    tool: &TskCli,
+    image: &Path,
+    entry: &InventoryEntry,
+    needle: &[u8],
+    finder: &memmem::Finder<'_>,
+    cancel: &AtomicBool,
+    byte_progress: Option<DetachedStageProgress<'_>>,
+) -> Result<(Vec<RawHit>, Option<String>), CoreError> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(CoreError::Cancelled("已取消内容搜索".to_string()));
+    }
+    if entry.size < needle.len() as u64 {
+        return Ok((Vec::new(), None));
+    }
+    let mut matcher = StreamMatcher::new(finder, needle.len(), entry.size, 0, 0, entry.size, None);
+    let stream_res = tool.stream_entry(image, entry, Some(cancel), |chunk| {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(EngineError::Cancelled("已取消内容搜索".to_string()));
+        }
+        let _ = matcher
+            .push_chunk(chunk, Some(cancel))
+            .map_err(|e| EngineError::Cancelled(e.to_string()))?;
+        if let Some(cb) = byte_progress {
+            cb("搜索文件字节", matcher.consumed(), entry.size);
+        }
+        Ok(())
+    });
+    if cancel.load(Ordering::Relaxed) {
+        return Err(CoreError::Cancelled("已取消内容搜索".to_string()));
+    }
+    let _ = matcher.push_chunk(&[], Some(cancel))?;
+    match stream_res {
+        Ok((written, note)) => {
+            let err_msg = if !note.is_empty() {
+                Some(note)
+            } else if written < entry.size {
+                Some(format!("仅读到 {written}/{} 字节", entry.size))
+            } else {
+                None
+            };
+            Ok((matcher.into_hits(), err_msg))
+        }
+        Err(err) if err.is_cancelled() => Err(CoreError::Cancelled("已取消内容搜索".to_string())),
+        Err(err) => Ok((matcher.into_hits(), Some(err.to_string()))),
+    }
+}
+
+/// 在不持有 `case_lock` 与 `case.lock` 期间对小镜像执行一次无锁哈希复算，并仅在提交结果时短暂持锁写入审计日志。
+fn verify_small_image_detached(
+    state: &Arc<AppState>,
+    case_folder: &Path,
+    evidence: &EvidenceInfo,
+    stage_label: &str,
+    cancel: &AtomicBool,
+    progress_cb: &(dyn Fn(&str, u64, u64) + Sync),
+) -> Result<bool, CoreError> {
+    let cb = |done: u64, total: u64| {
+        progress_cb(stage_label, done, total);
+    };
+    let measured = measure_hash_detached(evidence, cancel, &cb)?;
+    let mut case_guard = state
+        .case_lock
+        .lock()
+        .map_err(|_| CoreError::Other("案件状态锁异常".to_string()))?;
+    let Some(case) = case_guard.as_mut() else {
+        return Err(CoreError::InvalidInput(
+            "当前案件已关闭，内容搜索已中止".to_string(),
+        ));
+    };
+    if resolve_clean(case.folder()) != resolve_clean(case_folder) {
+        return Err(CoreError::InvalidInput(
+            "当前案件已切换，内容搜索已中止".to_string(),
+        ));
+    }
+    let ok = case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| c.accept_hash(measured))?;
+    if let Ok(mut view) = state.view.write() {
+        view.sync_from_case(case, false);
+    }
+    Ok(ok)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_content_search_worker(
     state: Arc<AppState>,
@@ -2494,7 +2689,579 @@ fn run_content_search_worker(
     };
 
     // 统一将所有异常路径汇总至 `search_res`，保证无论任何原因退出都会复位 `sess.running = false` 并推送 `search:finished`。
-    let search_res = (|| -> (Result<tracedesk_core::SearchOutput, CoreError>, Option<CaseSnapshot>) {
+    // 参考 `spawn_large_image_hash_worker` 采用三段式锁设计：
+    // 1. 短锁获取只读案件/清单快照并做前置校验 → 立即释放 `case_lock`（全程不持有磁盘 `case.lock`）；
+    // 2. 无锁执行流式 SIMD / Rayon / icat 内容搜索，搜索期间用户可随时保存取证发现、查看审计或由外部 MCP 并发读写；
+    // 3. 搜索结束后再短锁校验磁盘指纹、原子落盘 `reports/search_*.json` 并追加 `CONTENT_SEARCH` 审计记录。
+    let search_res = (|| -> (Result<SearchOutput, CoreError>, Option<CaseSnapshot>) {
+        // 第 1 步：短锁获取只读案件与清单快照（不获取磁盘 `case.lock`）。
+        let ctx = match (|| -> Result<DetachedSearchContext, CoreError> {
+            let needle = parse_pattern(&query, &encoding)?;
+            let mut case_guard = state
+                .case_lock
+                .lock()
+                .map_err(|_| CoreError::Other("案件状态锁异常".to_string()))?;
+            let Some(case) = case_guard.as_mut() else {
+                return Err(CoreError::InvalidInput(
+                    "当前案件已关闭，内容搜索已中止".to_string(),
+                ));
+            };
+            let image = case.image_path()?;
+            let evidence = case
+                .data()
+                .evidence
+                .as_ref()
+                .ok_or_else(|| CoreError::InvalidInput("请先加载镜像".to_string()))?
+                .clone();
+
+            if let Some(ref sel) = selected
+                && (!can_export(sel) || !case.displayed_entries().contains(sel))
+            {
+                return Err(CoreError::InvalidInput(
+                    "请选择当前案件中的普通文件".to_string(),
+                ));
+            }
+            if selected.is_none() && case.browsing_directories() {
+                return Err(CoreError::InvalidInput(
+                    "全案搜索需要先在文件浏览中建立完整文件索引，亦可选择搜索单个文件。"
+                        .to_string(),
+                ));
+            }
+            // 大镜像在短锁阶段即时校验 SourceGuard 与会话复核标记（零读盘哈希开销）。
+            if evidence.is_large_image() {
+                case.operation_check(None, Some(&cancel), None)?;
+            }
+
+            let entries: Vec<InventoryEntry> = match selected {
+                Some(ref sel) => vec![sel.clone()],
+                None => case
+                    .data()
+                    .inventory
+                    .iter()
+                    .filter(|e| can_export(e))
+                    .cloned()
+                    .collect(),
+            };
+            let selected_target = selected.as_ref().map(|s| SelectedSearchTarget {
+                path: s.path.clone(),
+                offset: s.offset,
+                inode: s.inode.clone(),
+            });
+
+            Ok(DetachedSearchContext {
+                case_folder: case.folder().to_path_buf(),
+                image,
+                evidence,
+                entries,
+                source_note: case.source_note().to_string(),
+                partition_scans: case.data().partition_scans.clone().unwrap_or_default(),
+                selected_target,
+                needle,
+            })
+        })() {
+            Ok(c) => c,
+            Err(e) => return (Err(e), None),
+        };
+
+        // 第 2 步：已彻底释放 `case_lock` 与磁盘 `case.lock`，执行无锁流式内容搜索。
+        let tool = match TskCli::discover(None) {
+            Ok(t) => t,
+            Err(e) => return (Err(CoreError::Engine(e)), None),
+        };
+
+        let mut hits: Vec<SearchHit> = Vec::new();
+        let mut errors: Vec<SearchErrorEntry> = Vec::new();
+        let mut completed: usize = 0;
+        let mut state_text = "完成".to_string();
+        let mut verification = "校验未完成".to_string();
+
+        let run_result: Result<(), CoreError> = (|| {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(CoreError::Cancelled("已取消内容搜索".to_string()));
+            }
+
+            let source_paths = if ctx.evidence.is_ewf() {
+                ewf::discover_segments(&ctx.image)?
+            } else {
+                vec![ctx.image.clone()]
+            };
+            let guard = SourceGuard::acquire(&source_paths).ok();
+            let protected = guard.is_some();
+
+            if !ctx.evidence.is_large_image() {
+                let ok = verify_small_image_detached(
+                    &state,
+                    &ctx.case_folder,
+                    &ctx.evidence,
+                    "搜索前校验",
+                    &cancel,
+                    &progress_cb,
+                )?;
+                if !ok {
+                    return Err(CoreError::IntegrityFailed(
+                        "镜像摘要与案件不一致，拒绝使用搜索结果".to_string(),
+                    ));
+                }
+            }
+
+            verification = if !ctx.source_note.is_empty() {
+                ctx.source_note.clone()
+            } else if protected {
+                "全程持有镜像只读共享句柄，搜索前复算 SHA-256".to_string()
+            } else {
+                "搜索前后分别复算 SHA-256".to_string()
+            };
+
+            let total = ctx.entries.len();
+            if total > 0 {
+                let nlen = ctx.needle.len() as u64;
+                let finder = memmem::Finder::new(&ctx.needle);
+                let byte_progress: Option<DetachedStageProgress<'_>> =
+                    if total == 1 { Some(&progress_cb) } else { None };
+                if byte_progress.is_none() {
+                    progress_cb("搜索文件内容", 0, total as u64);
+                }
+
+                // 统计未删除常规文件的硬链接引用计数。
+                let mut key_counts: HashMap<DetachedDedupKey, usize> = HashMap::new();
+                for entry in &ctx.entries {
+                    if entry.size >= nlen && !entry.deleted && entry.mode.starts_with("r/") {
+                        let key = DetachedDedupKey::Shared {
+                            offset: entry.offset,
+                            inode: entry.inode.clone(),
+                            size: entry.size,
+                        };
+                        *key_counts.entry(key).or_insert(0) += 1;
+                    }
+                }
+                let mut shared_remaining: HashMap<DetachedDedupKey, usize> = key_counts
+                    .into_iter()
+                    .filter(|&(_, count)| count > 1)
+                    .collect();
+                let mut shared_cache: HashMap<DetachedDedupKey, (Vec<RawHit>, Option<String>)> =
+                    HashMap::new();
+
+                let media: Option<Arc<dyn MediaReader>> = open_media(&ctx.image).ok();
+                let mut probe_vol: Option<VolumeReader> = media
+                    .as_ref()
+                    .map(|m| VolumeReader::open_with_media(Arc::clone(m)));
+                if let Some(ref mut pv) = probe_vol {
+                    for part in &ctx.evidence.partitions {
+                        pv.prime_partition(part.offset);
+                    }
+                }
+                let mut icat_pool: Option<rayon::ThreadPool> = None;
+
+                let mut cursor = 0usize;
+                let mut emitted = 0usize;
+                let mut win_files = WIN_INIT_FILES;
+                let mut max_win_bytes = WIN_INIT_BYTES;
+
+                while cursor < total {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Err(CoreError::Cancelled("已取消内容搜索".to_string()));
+                    }
+
+                    // 1. 按原始清单顺序切分滚动窗口。
+                    let mut win_end = cursor;
+                    let mut win_bytes: u64 = 0;
+                    let mut win_seen_keys: HashSet<DetachedDedupKey> = HashSet::new();
+                    while win_end < total && (win_end - cursor) < win_files {
+                        let entry = &ctx.entries[win_end];
+                        let size = entry.size;
+                        let mut cost = 0u64;
+                        if size >= nlen {
+                            if !entry.deleted && entry.mode.starts_with("r/") {
+                                let key = DetachedDedupKey::Shared {
+                                    offset: entry.offset,
+                                    inode: entry.inode.clone(),
+                                    size,
+                                };
+                                if !shared_cache.contains_key(&key) && win_seen_keys.insert(key) {
+                                    cost = size.min(128 << 20);
+                                }
+                            } else {
+                                cost = size.min(128 << 20);
+                            }
+                        }
+                        if win_end > cursor && win_bytes.saturating_add(cost) > max_win_bytes {
+                            break;
+                        }
+                        win_bytes = win_bytes.saturating_add(cost);
+                        win_end += 1;
+                    }
+
+                    // 2. 将窗口内条目分类为跳过 / 硬链接复用 / 直读 / icat 回退。
+                    let mut entry_keys: HashMap<usize, DetachedDedupKey> = HashMap::new();
+                    let mut key_entry: HashMap<DetachedDedupKey, InventoryEntry> = HashMap::new();
+                    let mut key_results: HashMap<DetachedDedupKey, (Vec<RawHit>, Option<String>)> =
+                        HashMap::new();
+                    let mut direct_tasks: Vec<DetachedDirectTask> = Vec::new();
+                    let mut icat_tasks: Vec<(DetachedDedupKey, InventoryEntry)> = Vec::new();
+
+                    for (idx, entry) in ctx.entries.iter().enumerate().take(win_end).skip(cursor) {
+                        if entry.size < nlen {
+                            let k = DetachedDedupKey::Unique(idx);
+                            entry_keys.insert(idx, k.clone());
+                            key_results.insert(k, (Vec::new(), None));
+                            continue;
+                        }
+
+                        let is_regular = !entry.deleted && entry.mode.starts_with("r/");
+                        let key = if is_regular {
+                            DetachedDedupKey::Shared {
+                                offset: entry.offset,
+                                inode: entry.inode.clone(),
+                                size: entry.size,
+                            }
+                        } else {
+                            DetachedDedupKey::Unique(idx)
+                        };
+                        entry_keys.insert(idx, key.clone());
+
+                        if shared_cache.contains_key(&key) || key_entry.contains_key(&key) {
+                            continue;
+                        }
+                        key_entry.insert(key.clone(), entry.clone());
+
+                        let Some(ino_num) = parse_search_inode_num(&entry.inode) else {
+                            icat_tasks.push((key, entry.clone()));
+                            continue;
+                        };
+                        if media.is_none() {
+                            icat_tasks.push((key, entry.clone()));
+                            continue;
+                        }
+
+                        if is_regular && entry.size >= PIECE_SPLIT_MIN {
+                            let plan = probe_vol
+                                .as_mut()
+                                .map(|v| v.plan_entry(entry, &ctx.needle))
+                                .unwrap_or(EntryReadPlan::FallbackToIcat);
+                            match plan {
+                                EntryReadPlan::FallbackToIcat => {
+                                    icat_tasks.push((key, entry.clone()));
+                                }
+                                EntryReadPlan::Direct { intervals, .. } => {
+                                    if intervals.is_empty() {
+                                        key_results.insert(key, (Vec::new(), None));
+                                    } else {
+                                        for iv in intervals {
+                                            let mut p_start = iv.start;
+                                            while p_start < iv.end {
+                                                let p_end = (p_start + PIECE_BYTES).min(iv.end);
+                                                direct_tasks.push(DetachedDirectTask {
+                                                    key: key.clone(),
+                                                    piece_start: p_start,
+                                                    entry: entry.clone(),
+                                                    sort_key: (entry.offset, ino_num, p_start),
+                                                    preplanned_intervals: Some(vec![ByteInterval {
+                                                        start: p_start,
+                                                        end: p_end,
+                                                    }]),
+                                                });
+                                                p_start = p_end;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            direct_tasks.push(DetachedDirectTask {
+                                key,
+                                piece_start: 0,
+                                entry: entry.clone(),
+                                sort_key: (entry.offset, ino_num, 0),
+                                preplanned_intervals: None,
+                            });
+                        }
+                    }
+
+                    // 3. 按 (offset, inode_num, piece_start) 排序直读任务并在 rayon 线程池并行扫描。
+                    direct_tasks.sort_unstable_by_key(|t| t.sort_key);
+                    let window_done = AtomicUsize::new(0);
+
+                    if let Some(ref pv_ref) = probe_vol
+                        && !direct_tasks.is_empty()
+                    {
+                        let raw_outcomes: Vec<
+                            Result<(DetachedDedupKey, u64, DetachedDirectOutcome), CoreError>,
+                        > = direct_tasks
+                            .into_par_iter()
+                            .map_init(
+                                || (pv_ref.fork_worker(), Vec::<u8>::new()),
+                                |(vol, io_buf), task| {
+                                    if cancel.load(Ordering::Relaxed) {
+                                        return Err(CoreError::Cancelled(
+                                            "已取消内容搜索".to_string(),
+                                        ));
+                                    }
+                                    let intervals = match task.preplanned_intervals {
+                                        Some(iv) => iv,
+                                        None => match vol.plan_entry(&task.entry, &ctx.needle) {
+                                            EntryReadPlan::Direct { intervals, .. } => intervals,
+                                            EntryReadPlan::FallbackToIcat => {
+                                                return Ok((
+                                                    task.key,
+                                                    task.piece_start,
+                                                    DetachedDirectOutcome::NeedsIcat,
+                                                ));
+                                            }
+                                        },
+                                    };
+                                    match scan_detached_direct_intervals(
+                                        vol,
+                                        &task.entry,
+                                        &intervals,
+                                        &ctx.needle,
+                                        &finder,
+                                        &cancel,
+                                        io_buf,
+                                    ) {
+                                        Ok(found) => {
+                                            let done =
+                                                window_done.fetch_add(1, Ordering::Relaxed) + 1;
+                                            if byte_progress.is_none() && done.is_multiple_of(64) {
+                                                progress_cb(
+                                                    "搜索文件内容",
+                                                    (emitted + done).min(total) as u64,
+                                                    total as u64,
+                                                );
+                                            }
+                                            Ok((
+                                                task.key,
+                                                task.piece_start,
+                                                DetachedDirectOutcome::Hits(found),
+                                            ))
+                                        }
+                                        Err(err) if err.is_cancelled() => Err(err),
+                                        Err(_) => Ok((
+                                            task.key,
+                                            task.piece_start,
+                                            DetachedDirectOutcome::NeedsIcat,
+                                        )),
+                                    }
+                                },
+                            )
+                            .collect();
+
+                        let mut assembled: HashMap<
+                            DetachedDedupKey,
+                            (bool, BTreeMap<u64, Vec<RawHit>>),
+                        > = HashMap::new();
+                        for item in raw_outcomes {
+                            let (key, p_start, outcome) = item?;
+                            let slot = assembled
+                                .entry(key)
+                                .or_insert_with(|| (false, BTreeMap::new()));
+                            match outcome {
+                                DetachedDirectOutcome::Hits(list) => {
+                                    slot.1.insert(p_start, list);
+                                }
+                                DetachedDirectOutcome::NeedsIcat => {
+                                    slot.0 = true;
+                                }
+                            }
+                        }
+
+                        for (key, (needs_icat, pieces)) in assembled {
+                            if needs_icat {
+                                if let Some(entry) = key_entry.get(&key) {
+                                    icat_tasks.push((key, entry.clone()));
+                                }
+                            } else {
+                                let mut merged = Vec::new();
+                                for (_, mut piece_hits) in pieces {
+                                    merged.append(&mut piece_hits);
+                                }
+                                key_results.insert(key, (merged, None));
+                            }
+                        }
+                    }
+
+                    // 4. 在按需创建的 `icat` 池上并发执行回退条目与 FAT 已删除条目。
+                    if !icat_tasks.is_empty() {
+                        let pool = match icat_pool {
+                            Some(ref p) => p,
+                            None => {
+                                let threads = icat_tasks.len().clamp(1, ICAT_THREADS);
+                                let built = rayon::ThreadPoolBuilder::new()
+                                    .num_threads(threads)
+                                    .build()
+                                    .map_err(|e| {
+                                        CoreError::Other(format!("无法创建 icat 线程池：{e}"))
+                                    })?;
+                                icat_pool.insert(built)
+                            }
+                        };
+                        let icat_outcomes: Vec<DetachedIcatOutcome> = pool.install(|| {
+                            icat_tasks
+                                .into_par_iter()
+                                .map(|(key, entry)| {
+                                    let (found, err) = scan_detached_via_icat(
+                                        &tool,
+                                        &ctx.image,
+                                        &entry,
+                                        &ctx.needle,
+                                        &finder,
+                                        &cancel,
+                                        byte_progress,
+                                    )?;
+                                    Ok((key, found, err))
+                                })
+                                .collect()
+                        });
+                        for item in icat_outcomes {
+                            let (key, found, err) = item?;
+                            key_results.insert(key, (found, err));
+                        }
+                    }
+
+                    for (key, val) in &key_results {
+                        if shared_remaining.contains_key(key) {
+                            shared_cache.insert(key.clone(), val.clone());
+                        }
+                    }
+
+                    // 5. 严格按原始清单顺序流式发布命中结果。
+                    for (idx, entry) in ctx.entries.iter().enumerate().take(win_end).skip(cursor) {
+                        if cancel.load(Ordering::Relaxed) {
+                            return Err(CoreError::Cancelled("已取消内容搜索".to_string()));
+                        }
+                        let key = &entry_keys[&idx];
+                        let (raw_hits, err_msg) = key_results
+                            .get(key)
+                            .or_else(|| shared_cache.get(key))
+                            .cloned()
+                            .unwrap_or_default();
+
+                        if let Some(rem) = shared_remaining.get_mut(key) {
+                            *rem -= 1;
+                            if *rem == 0 {
+                                shared_remaining.remove(key);
+                                shared_cache.remove(key);
+                            }
+                        }
+
+                        let src_note = deleted_source_note(entry).to_string();
+                        let entry_hits: Vec<SearchHit> = raw_hits
+                            .into_iter()
+                            .map(|h| SearchHit {
+                                path: entry.path.clone(),
+                                offset: entry.offset,
+                                inode: entry.inode.clone(),
+                                deleted: entry.deleted,
+                                file_byte: h.file_byte,
+                                before: h.before,
+                                after: h.after,
+                                reallocated: entry.reallocated,
+                                source_note: src_note.clone(),
+                            })
+                            .collect();
+
+                        if !entry_hits.is_empty() {
+                            hit_cb(&entry_hits);
+                            hits.extend(entry_hits);
+                        }
+                        emitted += 1;
+                        if let Some(msg) = err_msg {
+                            errors.push(SearchErrorEntry {
+                                path: entry.path.clone(),
+                                offset: entry.offset,
+                                inode: entry.inode.clone(),
+                                error: msg,
+                            });
+                        }
+                        completed += 1;
+                    }
+
+                    if byte_progress.is_none() {
+                        progress_cb("搜索文件内容", emitted.min(total) as u64, total as u64);
+                    }
+
+                    cursor = win_end;
+                    win_files = (win_files * 2).min(WIN_MAX_FILES);
+                    max_win_bytes = (max_win_bytes * 2).min(WIN_MAX_BYTES);
+                }
+            }
+
+            if cancel.load(Ordering::Relaxed) {
+                return Err(CoreError::Cancelled("已取消内容搜索".to_string()));
+            }
+
+            if let Some(ref g) = guard {
+                let latest_paths = if ctx.evidence.is_ewf() {
+                    ewf::discover_segments(&ctx.image)?
+                } else {
+                    vec![ctx.image.clone()]
+                };
+                if g.verify_unchanged(&latest_paths).is_err() {
+                    return Err(CoreError::IntegrityFailed(
+                        "搜索期间镜像或分段清单发生变化，结果未发布".to_string(),
+                    ));
+                }
+            }
+            drop(guard);
+
+            if !protected && !ctx.evidence.is_large_image() {
+                let ok = verify_small_image_detached(
+                    &state,
+                    &ctx.case_folder,
+                    &ctx.evidence,
+                    "搜索后校验",
+                    &cancel,
+                    &progress_cb,
+                )?;
+                if !ok {
+                    return Err(CoreError::IntegrityFailed(
+                        "镜像摘要与案件不一致，拒绝使用搜索结果".to_string(),
+                    ));
+                }
+            }
+
+            Ok(())
+        })();
+
+        let was_cancelled = match run_result {
+            Ok(()) => false,
+            Err(err) if err.is_cancelled() => {
+                state_text = "已取消；结果未发布".to_string();
+                hits.clear();
+                true
+            }
+            Err(err) => return (Err(err), None),
+        };
+
+        if !was_cancelled && cancel.load(Ordering::Relaxed) {
+            state_text = "已取消；结果未发布".to_string();
+            hits.clear();
+        }
+        if !errors.is_empty() && state_text == "完成" {
+            state_text = "部分文件读取失败".to_string();
+        }
+
+        let record = SearchRecord {
+            query: query.clone(),
+            encoding: encoding.clone(),
+            needle: hex_lower(&ctx.needle),
+            image_sha256: ctx.evidence.sha256.clone(),
+            verification,
+            scope: if ctx.selected_target.is_some() {
+                "选中文件".to_string()
+            } else {
+                "清单内可读取的文件，不含未分配空间".to_string()
+            },
+            selected: ctx.selected_target,
+            partition_scans: ctx.partition_scans,
+            status: state_text.clone(),
+            visited: completed,
+            eligible: ctx.entries.len(),
+            errors,
+            hits,
+        };
+
+        // 第 3 步：搜索结束后短暂重新获取 `case_lock` 与 `case.lock`，
+        // 同步磁盘指纹（合并搜索期间产生的发现笔记或外部 MCP 写入）、落盘 `reports/search_*.json` 并追加审计日志。
         let mut case_guard = match state.case_lock.lock() {
             Ok(g) => g,
             Err(_) => {
@@ -2506,32 +3273,61 @@ fn run_content_search_worker(
         };
         let Some(case) = case_guard.as_mut() else {
             return (
-                Err(CoreError::InvalidInput("当前案件已关闭，内容搜索已中止".to_string())),
+                Err(CoreError::InvalidInput(
+                    "当前案件已关闭，搜索记录未写入".to_string(),
+                )),
                 None,
             );
         };
-        let out = case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
-            search_case(
-                c,
-                &SearchOptions {
-                    query,
-                    encoding,
-                    limit: None,
-                    selected,
-                },
-                &cancel,
-                Some(&progress_cb),
-                Some(&mut hit_cb),
+        if resolve_clean(case.folder()) != resolve_clean(&ctx.case_folder) {
+            return (
+                Err(CoreError::InvalidInput(
+                    "当前案件已切换，搜索记录未写入".to_string(),
+                )),
                 None,
-            )
+            );
+        }
+
+        let is_large = ctx.evidence.is_large_image();
+        let commit_res = case.with_write_lock(DESKTOP_WRITE_LOCK_TIMEOUT, |c| {
+            if is_large && !was_cancelled && !cancel.load(Ordering::Relaxed) {
+                c.check_source()?;
+            }
+            let report_name = format!("search_{}.json", Uuid::new_v4().simple());
+            let report_path = c.folder().join("reports").join(&report_name);
+            let json_text = serde_json::to_string_pretty(&record)?;
+            fs::write(&report_path, json_text.as_bytes())?;
+            let report_sha256 = sha256_hex(json_text.as_bytes());
+
+            let mut details = Map::new();
+            details.insert("query".to_string(), Value::String(query.clone()));
+            details.insert("encoding".to_string(), Value::String(encoding.clone()));
+            details.insert("hits".to_string(), Value::from(record.hits.len() as u64));
+            details.insert(
+                "failed".to_string(),
+                Value::from(record.errors.len() as u64),
+            );
+            details.insert("visited".to_string(), Value::from(record.visited as u64));
+            details.insert("eligible".to_string(), Value::from(record.eligible as u64));
+            details.insert("sha256".to_string(), Value::String(report_sha256));
+            c.log("CONTENT_SEARCH", &report_name, &state_text, details)?;
+
+            Ok(SearchOutput {
+                record,
+                report_name,
+                report_path,
+            })
         });
+
         let snap = if let Ok(mut view) = state.view.write() {
             view.sync_from_case(case, false);
             view.snapshot.clone()
         } else {
             None
         };
-        (out, snap)
+        drop(case_guard);
+        let _ = state.flush_disk_dirty_if_ready();
+        (commit_res, snap)
     })();
 
     // 在发送 search:finished 之前刷新所有剩余命中结果。
@@ -2771,45 +3567,56 @@ pub fn cmd_load_search_record(
     let record: SearchRecord =
         serde_json::from_str(&raw).map_err(|e| format!("历史搜索记录格式错误：{e}"))?;
 
+    let replay_session_id = format!("replay:{clean_name}");
     if record.hits.is_empty() {
+        if let Ok(mut searches) = state.searches.lock() {
+            searches.insert(
+                replay_session_id.clone(),
+                SearchSessionState {
+                    search_id: replay_session_id,
+                    case_folder,
+                    query: record.query,
+                    encoding: record.encoding,
+                    needle_hex: record.needle,
+                    image_sha256: record.image_sha256,
+                    verification: record.verification,
+                    report_name: Some(clean_name.to_string()),
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    running: false,
+                    hits: Vec::new(),
+                },
+            );
+        }
         return Ok(Vec::new());
     }
 
     // 仅在搜索记录确有命中时再按需构建索引映射，避免 0 命中时扫描 10 万条清单。
-    let entry_lookup: HashMap<(u64, String, bool, String), usize> = {
+    let (dtos, stored_hits): (Vec<SearchHitDto>, Vec<StoredSearchHit>) = {
         let view = state
             .view
             .read()
             .map_err(|_| "视图缓存锁异常".to_string())?;
         let ordered = view.browser_index.ordered();
-        let mut map = HashMap::with_capacity(ordered.len());
+        let mut entry_lookup = HashMap::with_capacity(ordered.len());
         for (idx, row) in ordered.iter().enumerate() {
-            map.insert(
+            entry_lookup.insert(
                 (row.offset, row.inode.clone(), row.deleted, row.path.clone()),
                 idx,
             );
         }
-        map
-    };
 
-    let dtos: Vec<SearchHitDto> = record
-        .hits
-        .into_iter()
-        .enumerate()
-        .map(|(idx, h)| {
-            let entry_id = entry_lookup
-                .get(&(h.offset, h.inode.clone(), h.deleted, h.path.clone()))
-                .map(|i| i.to_string())
-                .unwrap_or_else(|| {
-                    format!(
-                        "{}:{}:{}:{}",
-                        h.offset,
-                        h.inode,
-                        if h.deleted { 1 } else { 0 },
-                        h.path
-                    )
-                });
-            SearchHitDto {
+        let mut dtos = Vec::with_capacity(record.hits.len());
+        let mut stored = Vec::with_capacity(record.hits.len());
+        for (idx, h) in record.hits.into_iter().enumerate() {
+            let (entry_id, entry_obj) = if let Some(&i) =
+                entry_lookup.get(&(h.offset, h.inode.clone(), h.deleted, h.path.clone()))
+                && let Some(e) = view.browser_index.get(i)
+            {
+                (i.to_string(), e.clone())
+            } else {
+                fallback_hit_entry(&h)
+            };
+            let dto = SearchHitDto {
                 hit_index: idx,
                 entry_id,
                 pos: h.file_byte,
@@ -2820,9 +3627,37 @@ pub fn cmd_load_search_record(
                 reallocated: Some(h.reallocated),
                 before_hex: h.before,
                 after_hex: h.after,
-            }
-        })
-        .collect();
+            };
+            stored.push(StoredSearchHit {
+                dto: dto.clone(),
+                entry: entry_obj,
+                source_note: h.source_note,
+            });
+            dtos.push(dto);
+        }
+        (dtos, stored)
+    };
+
+    // 将历史回放会话注册到 `state.searches`，使回放后的命中项亦可直接点击“保存为取证发现”。
+    if let Ok(mut searches) = state.searches.lock() {
+        searches.insert(
+            replay_session_id.clone(),
+            SearchSessionState {
+                search_id: replay_session_id,
+                case_folder,
+                query: record.query,
+                encoding: record.encoding,
+                needle_hex: record.needle,
+                image_sha256: record.image_sha256,
+                verification: record.verification,
+                report_name: Some(clean_name.to_string()),
+                cancel: Arc::new(AtomicBool::new(false)),
+                running: false,
+                hits: stored_hits,
+            },
+        );
+    }
+
     Ok(dtos)
 }
 

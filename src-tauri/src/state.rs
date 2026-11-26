@@ -192,6 +192,21 @@ pub struct QuickLocationDto {
     pub path: String,
 }
 
+/// 案件历史内容搜索记录摘要（从审计链轻量汇总并校验本地 JSON 文件存在性，供前端下拉回放）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchRecordSummaryDto {
+    pub report_name: String,
+    pub query: String,
+    pub encoding: String,
+    pub hits: u64,
+    pub failed: u64,
+    pub visited: u64,
+    pub eligible: u64,
+    pub status: String,
+    pub time: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaseSnapshot {
@@ -216,6 +231,9 @@ pub struct CaseSnapshot {
     pub verification: Option<VerificationInfoDto>,
     pub fsstat: String,
     pub quick_location: Option<QuickLocationDto>,
+    /// 案件内可用于回放的历史内容搜索记录列表（按时间倒序，最新在前）。
+    #[serde(default)]
+    pub search_records: Vec<SearchRecordSummaryDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -888,6 +906,84 @@ pub fn compute_custody_state(case: &Case) -> &'static str {
     "verified"
 }
 
+/// 轻量提取案件审计链中本地文件仍存在的历史内容搜索记录（按时间倒序排列），
+/// 避免直接解析可能高达数十 MB 的 `reports/search_*.json` 命中明细文件。
+fn collect_search_records(case_folder: &Path) -> Vec<SearchRecordSummaryDto> {
+    let audit_path = case_folder.join("audit.jsonl");
+    let Ok(raw) = std::fs::read_to_string(&audit_path) else {
+        return Vec::new();
+    };
+    let reports_dir = case_folder.join("reports");
+    let mut records = Vec::new();
+    for line in raw.lines() {
+        // 快速过滤非内容搜索行，减少无关 JSON 解析开销。
+        if !line.contains("\"CONTENT_SEARCH\"") {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("action").and_then(Value::as_str) != Some("CONTENT_SEARCH") {
+            continue;
+        }
+        let Some(subject) = val.get("subject").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(clean_name) = Path::new(subject).file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if clean_name != subject || !reports_dir.join(clean_name).is_file() {
+            continue;
+        }
+        let details = val.get("details");
+        let timestamp = val
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        records.push(SearchRecordSummaryDto {
+            report_name: clean_name.to_string(),
+            query: details
+                .and_then(|d| d.get("query"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            encoding: details
+                .and_then(|d| d.get("encoding"))
+                .and_then(Value::as_str)
+                .unwrap_or("UTF-8")
+                .to_string(),
+            hits: details
+                .and_then(|d| d.get("hits"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            failed: details
+                .and_then(|d| d.get("failed"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            visited: details
+                .and_then(|d| d.get("visited"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            eligible: details
+                .and_then(|d| d.get("eligible"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            status: val
+                .get("result")
+                .and_then(Value::as_str)
+                .unwrap_or("完成")
+                .to_string(),
+            time: if timestamp.is_empty() {
+                "未记录".to_string()
+            } else {
+                display_iso_time(timestamp, true)
+            },
+        });
+    }
+    records.reverse();
+    records
+}
+
 /// 根据给定的 [`Case`] 构建完整的 [`CaseSnapshot`]。
 pub fn build_case_snapshot(case: &Case) -> CaseSnapshot {
     let data = case.data();
@@ -1053,6 +1149,7 @@ pub fn build_case_snapshot(case: &Case) -> CaseSnapshot {
         verification,
         fsstat: data.fsstat.clone().unwrap_or_default(),
         quick_location,
+        search_records: collect_search_records(case.folder()),
     }
 }
 
@@ -1296,10 +1393,23 @@ impl ViewCache {
  * 4. 线程安全的应用状态（AppState）
  * ========================================================================================== */
 
+/// 非阻塞磁盘热重载结果：用于区分“成功同步/无需更新”与“因 `case_lock` 被占用而延迟”。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonblockingReloadOutcome {
+    Reloaded,
+    Unchanged,
+    WouldBlock,
+}
+
 pub struct AppState {
     pub app_paths: AppPaths,
     pub case_lock: Mutex<Option<Case>>,
     pub view: RwLock<ViewCache>,
+    /// 当跨进程写入到达但 `case_lock` 暂时繁忙导致非阻塞热重载跳过时置为 `true`，
+    /// 以便后续释放锁或拉取快照时主动从磁盘补做热重载，杜绝前端“假刷新”。
+    pub disk_dirty: AtomicBool,
+    /// 因 `WouldBlock` 延迟发送的 `mcp:case-updated` 通知载荷，待热重载完成后再补发。
+    pub pending_case_updated: Mutex<Option<Value>>,
     pub scan_cancel: Arc<AtomicBool>,
     pub hash_cancel: Arc<AtomicBool>,
     pub task_cancel: Arc<AtomicBool>,
@@ -1338,6 +1448,8 @@ impl AppState {
             app_paths,
             case_lock: Mutex::new(None),
             view: RwLock::new(ViewCache::default()),
+            disk_dirty: AtomicBool::new(false),
+            pending_case_updated: Mutex::new(None),
             scan_cancel: Arc::new(AtomicBool::new(false)),
             hash_cancel: Arc::new(AtomicBool::new(false)),
             task_cancel: Arc::new(AtomicBool::new(false)),
@@ -1422,6 +1534,14 @@ impl AppState {
         accepted
     }
 
+    /// 清除磁盘脏标记与延迟热刷新通知（用于新建/打开/关闭案件时重置状态）。
+    pub fn clear_disk_dirty(&self) {
+        self.disk_dirty.store(false, Ordering::SeqCst);
+        if let Ok(mut pending) = self.pending_case_updated.lock() {
+            *pending = None;
+        }
+    }
+
     /// 在调用方已持有 `case_lock` 的前提下检测磁盘变化并按需热重载内存 `Case` 与 `ViewCache`。
     /// 仅当清单或镜像等视图相关字段实质变化时才重建 `BrowserIndex` 并重置时间线索引，
     /// 避免仅追加审计日志时无效重建 10 万条目录树与 40 万条时间线。
@@ -1436,6 +1556,8 @@ impl AppState {
                 .map_err(|_| "视图缓存锁异常".to_string())?;
             view.sync_from_case(case, false);
         }
+        // 已成功与磁盘最新指纹对齐，清除跨进程热刷新脏标记。
+        self.disk_dirty.store(false, Ordering::SeqCst);
         Ok(changed)
     }
 
@@ -1447,27 +1569,95 @@ impl AppState {
             .lock()
             .map_err(|_| "案件状态锁异常".to_string())?;
         let Some(case) = case_guard.as_mut() else {
+            self.clear_disk_dirty();
             return Ok(false);
         };
-        self.reload_case_and_sync_view(case)
+        let changed = self.reload_case_and_sync_view(case)?;
+        drop(case_guard);
+        self.emit_pending_case_updated_if_any();
+        Ok(changed)
     }
 
-    /// 非阻塞版磁盘热重载：若 `case_lock` 正被长耗时扫描或内容搜索占用则立即返回 `Ok(false)`，
-    /// 确保快照读取与后台 MCP 遥测尾随线程不会被耗时任务阻塞。
-    pub fn reload_active_case_from_disk_nonblocking(&self) -> Result<bool, String> {
+    /// 非阻塞版磁盘热重载（返回详细状态）：若 `case_lock` 正被占用则置 `disk_dirty = true` 并返回 `WouldBlock`，
+    /// 确保快照读取与后台 MCP 遥测尾随线程不会被阻塞，同时避免丢弃跨进程变更。
+    pub fn reload_active_case_from_disk_nonblocking_outcome(
+        &self,
+    ) -> Result<NonblockingReloadOutcome, String> {
         let mut case_guard = match self.case_lock.try_lock() {
             Ok(g) => g,
-            Err(std::sync::TryLockError::WouldBlock) => return Ok(false),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                self.disk_dirty.store(true, Ordering::SeqCst);
+                return Ok(NonblockingReloadOutcome::WouldBlock);
+            }
             Err(std::sync::TryLockError::Poisoned(_)) => return Err("案件状态锁异常".to_string()),
         };
         let Some(case) = case_guard.as_mut() else {
-            return Ok(false);
+            self.clear_disk_dirty();
+            return Ok(NonblockingReloadOutcome::Unchanged);
         };
-        self.reload_case_and_sync_view(case)
+        let changed = self.reload_case_and_sync_view(case)?;
+        Ok(if changed {
+            NonblockingReloadOutcome::Reloaded
+        } else {
+            NonblockingReloadOutcome::Unchanged
+        })
+    }
+
+    /// 非阻塞版磁盘热重载：若 `case_lock` 正被占用则置脏并立即返回 `Ok(false)`。
+    pub fn reload_active_case_from_disk_nonblocking(&self) -> Result<bool, String> {
+        match self.reload_active_case_from_disk_nonblocking_outcome()? {
+            NonblockingReloadOutcome::Reloaded => {
+                self.emit_pending_case_updated_if_any();
+                Ok(true)
+            }
+            NonblockingReloadOutcome::Unchanged => {
+                self.emit_pending_case_updated_if_any();
+                Ok(false)
+            }
+            NonblockingReloadOutcome::WouldBlock => Ok(false),
+        }
+    }
+
+    /// 补发先前因 `WouldBlock` 暂存的 `mcp:case-updated` 通知（此时 `ViewCache` 已对齐最新磁盘状态）。
+    fn emit_pending_case_updated_if_any(&self) {
+        let payload = self
+            .pending_case_updated
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take());
+        if let Some(body) = payload
+            && let Some(app) = self.current_app_handle()
+        {
+            let _ = app.emit("mcp:case-updated", body);
+        }
+    }
+
+    /// 若存在因锁竞争延迟的跨进程热刷新脏标记，则在锁空闲时主动补做磁盘重载并补发通知。
+    pub fn flush_disk_dirty_if_ready(&self) -> Result<bool, String> {
+        let has_pending = self
+            .pending_case_updated
+            .lock()
+            .ok()
+            .is_some_and(|g| g.is_some());
+        if !self.disk_dirty.load(Ordering::Acquire) && !has_pending {
+            return Ok(false);
+        }
+        match self.reload_active_case_from_disk_nonblocking_outcome()? {
+            NonblockingReloadOutcome::Reloaded => {
+                self.emit_pending_case_updated_if_any();
+                Ok(true)
+            }
+            NonblockingReloadOutcome::Unchanged => {
+                self.emit_pending_case_updated_if_any();
+                Ok(false)
+            }
+            NonblockingReloadOutcome::WouldBlock => Ok(false),
+        }
     }
 
     /// 当非只读写入工具成功完成且作用于当前打开案件时，先热重载磁盘变更并刷新 `ViewCache`，
-    /// 再向前端推送 `mcp:case-updated` 事件。
+    /// 再向前端推送 `mcp:case-updated` 事件；若此时 `case_lock` 正被占用遇到 `WouldBlock`，
+    /// 则置 `disk_dirty = true` 并暂存通知，待锁释放后真正完成热重载再推送，杜绝前端“假刷新”。
     pub fn emit_case_updated_if_matching(&self, record: &McpActivityRecord) -> bool {
         if record.phase != "completed" || record.read_only {
             return false;
@@ -1509,36 +1699,55 @@ impl AppState {
             return false;
         };
 
-        // 推送前端前先非阻塞热重载最新磁盘状态与 ViewCache，确保前端立即拉取快照与审计日志时读到最新结果，
-        // 同时避免后台尾随线程在桌面端执行长耗时扫描/搜索期间被卡住。
-        let _ = self.reload_active_case_from_disk_nonblocking();
+        let tool_name = record
+            .tool_name
+            .as_deref()
+            .unwrap_or(record.method.as_str());
+        let payload = json!({
+            "caseDir": case_dir_str,
+            "toolName": tool_name,
+            "client": record.client,
+            "timestamp": record.timestamp,
+        });
+
+        // 推送前端前先非阻塞热重载最新磁盘状态与 ViewCache；若遇到 WouldBlock 则置脏并暂存通知，
+        // 杜绝在 ViewCache 仍是旧快照时就通知前端“已自动刷新”。
+        match self.reload_active_case_from_disk_nonblocking_outcome() {
+            Ok(NonblockingReloadOutcome::WouldBlock) => {
+                if let Ok(mut pending) = self.pending_case_updated.lock() {
+                    *pending = Some(payload);
+                }
+                return false;
+            }
+            Ok(NonblockingReloadOutcome::Reloaded | NonblockingReloadOutcome::Unchanged) => {
+                if let Ok(mut pending) = self.pending_case_updated.lock() {
+                    *pending = None;
+                }
+            }
+            Err(_) => {
+                self.disk_dirty.store(true, Ordering::SeqCst);
+                if let Ok(mut pending) = self.pending_case_updated.lock() {
+                    *pending = Some(payload);
+                }
+                return false;
+            }
+        }
 
         if let Some(app) = self.current_app_handle() {
-            let tool_name = record
-                .tool_name
-                .as_deref()
-                .unwrap_or(record.method.as_str());
-            let _ = app.emit(
-                "mcp:case-updated",
-                json!({
-                    "caseDir": case_dir_str,
-                    "toolName": tool_name,
-                    "client": record.client,
-                    "timestamp": record.timestamp,
-                }),
-            );
+            let _ = app.emit("mcp:case-updated", payload);
         }
         true
     }
 
     /// 轮询一次 `logs/mcp-activity.jsonl` 的字节增量，将外部 `stdio` / `streamable-http`
-    /// 进程写入的新事件吸收进内存队列并实时推送给前端。返回本次新吸收的事件条数。
+    /// 进程写入的新事件吸收进内存队列并实时推送给前端；若存在因锁冲突延迟的热刷新脏标记也会在此自动补刷。
     pub fn poll_activity_log_once(&self) -> usize {
         let new_records = match self.mcp_tailer.lock() {
             Ok(mut tailer) => tailer.poll_new_records(),
             Err(_) => return 0,
         };
         if new_records.is_empty() {
+            let _ = self.flush_disk_dirty_if_ready();
             return 0;
         }
         let app_opt = self.current_app_handle();
@@ -1558,6 +1767,7 @@ impl AppState {
             }
             let _ = self.emit_case_updated_if_matching(&rec);
         }
+        let _ = self.flush_disk_dirty_if_ready();
         ingested
     }
 

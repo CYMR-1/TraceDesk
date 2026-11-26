@@ -36,6 +36,8 @@ interface FileBrowserModuleProps {
   onSelectEntry: (entry: EntryView | null) => void;
   onDetailChange: (detail: string) => void;
   onScanPartitions: () => void;
+  /** 仅索引指定扇区偏移的单个分区 */
+  onScanPartition: (offset: number) => void;
   onCancelScan: () => void;
   onBrowseDirectory: (offset: number, inode: string | null, path: string) => Promise<EntryView[] | null>;
   onExportEntry: (entry: EntryView) => void;
@@ -54,6 +56,7 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
   onSelectEntry,
   onDetailChange,
   onScanPartitions,
+  onScanPartition,
   onCancelScan,
   onBrowseDirectory,
   onExportEntry,
@@ -84,8 +87,12 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
   const [branches, setBranches] = useState<Record<string, TreeBranchState>>({});
   const [ancestors, setAncestors] = useState<Record<string, string | null>>({});
 
-  // 右键菜单状态
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: EntryView } | null>(null);
+  // 右键菜单状态（支持文件条目菜单与左侧分区树“仅索引此分区”菜单）
+  const [contextMenu, setContextMenu] = useState<
+    | { kind: 'entry'; x: number; y: number; entry: EntryView }
+    | { kind: 'partition'; x: number; y: number; offset: number; description: string; ready: boolean }
+    | null
+  >(null);
 
   // 异步竞态与去重守卫：按案件代次隔离树分支回写，按递增序号隔离分页列表响应
   const caseGenRef = useRef(0);
@@ -632,7 +639,7 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
                 const existing = items.find((item) => item.entryId === node.entryId);
                 if (existing) {
                   handleSelectRow(existing);
-                  setContextMenu({ x: e.clientX, y: e.clientY, entry: existing });
+                  setContextMenu({ kind: 'entry', x: e.clientX, y: e.clientY, entry: existing });
                 }
               }
             }}
@@ -806,9 +813,20 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
     []
   );
 
-  // 右键菜单构造（遵循 FeatureRegistry 装配清单）
+  // 右键菜单构造（支持文件条目菜单与分区节点“仅索引此分区”菜单）
   const contextMenuItems = useMemo<ContextMenuItem[]>(() => {
     if (!contextMenu || busy) return [];
+    if (contextMenu.kind === 'partition') {
+      return [
+        {
+          key: 'scan_partition',
+          label: contextMenu.ready
+            ? `重新索引此分区（偏移 ${contextMenu.offset}）`
+            : `仅索引此分区（偏移 ${contextMenu.offset}）`,
+          onClick: () => onScanPartition(contextMenu.offset),
+        },
+      ];
+    }
     const { entry } = contextMenu;
     if (entry.directory) return [];
     const previewActions = registry.actionsAt('preview');
@@ -831,6 +849,7 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
     contextMenu,
     busy,
     registry,
+    onScanPartition,
     onExportEntry,
     onRecordNote,
     onHashEntry,
@@ -1010,9 +1029,9 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
             return (
               <React.Fragment key={partId}>
                 <div
-                  className={`td-tree-row ${selectedTreeId === partId ? 'td-tree-row--selected' : ''}`}
+                  className={`td-tree-row td-tree-row--partition ${selectedTreeId === partId ? 'td-tree-row--selected' : ''}`}
                   style={{ paddingLeft: 20 }}
-                  title={`${part.description}\n偏移 ${part.offset} 扇区\n${scan?.error || rootBranch?.error || stateLabel}`}
+                  title={`${part.description}\n偏移 ${part.offset} 扇区\n${scan?.error || rootBranch?.error || stateLabel}${scan?.status !== 'error' ? '\n右键可选择「仅索引此分区」' : ''}`}
                   onClick={() =>
                     void handleTreeNodeClick(
                       {
@@ -1026,6 +1045,19 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
                       partId
                     )
                   }
+                  onContextMenu={(e) => {
+                    if (scan?.status === 'error') return;
+                    e.preventDefault();
+                    setSelectedTreeId(partId);
+                    setContextMenu({
+                      kind: 'partition',
+                      x: e.clientX,
+                      y: e.clientY,
+                      offset: part.offset,
+                      description: part.description,
+                      ready: scan?.status === 'ready',
+                    });
+                  }}
                 >
                   {scan?.status !== 'error' ? (
                     <button
@@ -1050,6 +1082,20 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
                   <span className="td-tree-label">
                     分区 {idx + 1} · 偏移 {part.offset} · {stateLabel}
                   </span>
+                  {scan?.status !== 'ready' && scan?.status !== 'error' && (
+                    <button
+                      type="button"
+                      className="td-tree-inline-action"
+                      disabled={busy}
+                      title={`仅索引分区偏移 ${part.offset} 扇区`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onScanPartition(part.offset);
+                      }}
+                    >
+                      仅索引
+                    </button>
+                  )}
                 </div>
 
                 {partExpanded && scan?.status !== 'error' && (
@@ -1178,7 +1224,14 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
             <button
               type="button"
               className="td-search-clear"
-              onClick={() => setKeyword('')}
+              onClick={() => {
+                // 清空关键词后立即触发重新查询，与时间线/发现/审计页交互保持一致
+                pendingLogFilterRef.current = false;
+                setKeyword('');
+                setAppliedKeyword('');
+                setPage(0);
+                setFilterSeq((n) => n + 1);
+              }}
               aria-label="清空关键词"
             >
               ×
@@ -1231,7 +1284,7 @@ const FileBrowserModuleInner: React.FC<FileBrowserModuleProps> = ({
         onDoubleClickRow={(entry) => handleDoubleClickRow(entry)}
         onContextMenuRow={(e, entry) => {
           if (!entry.directory) {
-            setContextMenu({ x: e.clientX, y: e.clientY, entry });
+            setContextMenu({ kind: 'entry', x: e.clientX, y: e.clientY, entry });
           }
         }}
         emptyText={

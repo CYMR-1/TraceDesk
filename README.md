@@ -26,7 +26,7 @@
 | `Cargo.toml`、`启动取证工作台.bat` | Rust 工作区（5 个成员）与一键构建/启动入口 |
 | `crates/tracedesk-engines/` | 底层只读取证引擎：TSK 白名单、纯 Rust EWF1 并行解码、FAT/NTFS、卷随机读取与 Windows 拒写句柄 |
 | `crates/tracedesk-core/` | 案件隔离、SHA-256 审计链、目录树索引、时间线、9 编码与图片预览、SIMD 并行搜索、报告与 ZIP64 复核包 |
-| `crates/tracedesk-mcp/` | 标准 MCP 服务端 `tracedesk-mcp.exe`（19 工具 + 2 资源、跨进程实时遥测与统计，支持 `stdio` 与仅回环 `Streamable HTTP`） |
+| `crates/tracedesk-mcp/` | 标准 MCP 服务端 `tracedesk-mcp.exe`（20 工具 + 2 资源、跨进程实时遥测与统计，支持 `stdio` 与仅回环 `Streamable HTTP`） |
 | `crates/tracedesk-cli/` | 命令行工具 `tracedesk-cli.exe`（`run-demo`、`make-demo`、`verify-bundle`、`bench`） |
 | `src-tauri/` | Tauri 2 原生桌面宿主 `tracedesk-desktop.exe`（49 项 IPC 命令、8 项流式事件、跨进程 MCP 遥测尾随与内嵌 HTTP MCP 托管） |
 | `frontend/` | Vite + React 19 + TypeScript 桌面工作台前端（明净瓷白与晴空蓝浅色视觉规范、虚拟表格、MCP 实时监控主工作区与 9 份图文引导） |
@@ -101,20 +101,20 @@ cargo test --workspace
 
 ### 完整取证闭环操作
 
-1. **新建/打开案件**：填写编号、取证人员、对象并选择 `cases` 案件库，目录名按“案件编号_取证人员_取证对象”自动生成，重名依次添加 ` (2)`、` (3)`。
-2. **加载镜像**：选择 `evidence/demo.dd`（带分区表 FAT16，偏移 2048）或 `evidence/demo_volume.dd`（偏移 0 无分区表卷），自动固定 SHA-256、识别分区、评估卷声明覆盖范围并扫描全部可读分区。
-3. **浏览与预览**：左侧按镜像/分区/目录展示完整树，右上列表支持后缀、路径关键词和状态筛选与分页（双击页码跳页），右下支持 9 种文本编码（ASCII、UTF-8、UTF-16LE/BE、GBK、GB18030、Big5、Windows-1252、ISO-8859-1）、十六进制与安全图片缩放预览（单张上限 32 MiB / 4000 万像素，显示副本最长边缩至 4096 px）。所有时间统一展示东八区（UTC+8），未记录时间不误显为 1970 年。
+1. **新建/打开与关闭案件**：填写编号、取证人员、对象并选择 `cases` 案件库，目录名按“案件编号_取证人员_取证对象”自动生成，重名依次添加 ` (2)`、` (3)`。未开案欢迎页与「打开案件」弹窗均展示最近案件卡片支持一键打开，也可直接将 `case.json` 拖入窗口打开；已开案后可在顶栏一键「关闭案件」，原生窗口标题同步展示当前案件编号与镜像名。
+2. **加载镜像**：选择 `evidence/demo.dd`（带分区表 FAT16，偏移 2048）或 `evidence/demo_volume.dd`（偏移 0 无分区表卷），或在已开案状态下直接拖入 `.dd`/`.raw`/`.img`/`.e01` 镜像，自动固定 SHA-256、识别分区、评估卷声明覆盖范围并扫描全部可读分区；大镜像支持在分区树右键/悬浮按钮或证据信息页分区表中按需点击「仅索引此分区」。
+3. **浏览与预览**：左侧按镜像/分区/目录展示完整树，右上列表支持后缀、路径关键词（清空 `×` 即时刷新）和状态筛选与分页（双击页码跳页），右下支持 9 种文本编码（ASCII、UTF-8、UTF-16LE/BE、GBK、GB18030、Big5、Windows-1252、ISO-8859-1）、十六进制与安全图片缩放预览（单张上限 32 MiB / 4000 万像素，显示副本最长边缩至 4096 px；常规与已删除 NTFS 文件优先经 `VolumeReader` 进程内直读免临时文件，`icat` 临时缓存上限 64 MiB 防大文件撑爆磁盘）。所有时间统一展示东八区（UTC+8），未记录时间不误显为 1970 年。
 4. **校验与导出**：点击“校验完整性”后选择现存或已删除文件导出至 `exports/`（重名时不再创建子目录，直接在 `exports/` 下于文件名后追加 `(1)`、`(2)` 等序号后缀，如 `NOTES(1).TXT`），导出前后均校验原镜像并记录副本 SHA-256；单文件导出结果弹窗可直接点击“记为取证发现”顺手补录研判笔记。
-5. **取证发现与内容搜索**：在文件预览区顶部操作栏或导出结果弹窗可一键点击“记为取证发现”，右键文件亦可记录取证发现、计算单文件 SHA-256 或与本地副本比对；“内容搜索与复核”支持 UTF-8 / UTF-16LE / GBK / HEX 精确字节并行搜索、流式实时展示、三态全选、分区偏移筛选、排除与批量保存为取证发现；“取证发现”页支持按文件归组查看并一键批量导出副本与汇总清单。
+5. **取证发现与内容搜索**：在文件预览区顶部操作栏或导出结果弹窗可一键点击“记为取证发现”，右键文件亦可记录取证发现、计算单文件 SHA-256 或与本地副本比对；“内容搜索与复核”支持 UTF-8 / UTF-16LE / GBK / HEX 精确字节无锁并行搜索（搜索期间可并发保存发现与响应外部 MCP 读写）、流式实时展示与底栏进度取消、三态全选、分区偏移与命中路径关键词/已删除状态二次筛查、排除与「恢复已排除项」、历史内容搜索记录回放及批量保存为取证发现；“取证发现”页支持按文件归组查看并一键批量导出副本与汇总清单。
 6. **时间线、审计、报告与复核包**：在“MACB 时间线”“审计日志”“取证发现”中双击打开底部双栏详情（支持在吸顶详情栏右上角点击 `× 关闭` 随时收起；审计日志区分 `[人工]` 与 `[MCP · <使用者>]` 来源、支持按调用方精筛并展示前后哈希），点击“生成 Markdown 报告”输出 10 章节中文报告，点击“导出复核包”按需勾选导出副本与搜索记录生成 ZIP64 复核包及 `.zip.sha256`（包内同时附带独立 `verify_bundle.py`，也可使用 `tracedesk-cli verify-bundle` 毫秒级核验）。
-7. **MCP 实时监控**：切换至主工作区 **MCP 实时监控** 标签页（或在顶部 **MCP 服务** 按钮查看实时脉冲指示），即时透视外部 AI 客户端每一步工具调用的起止过程、入参 JSON 与返回预览、19 项工具调用统计及案件热刷新状态。
+7. **MCP 实时监控**：切换至主工作区 **MCP 实时监控** 标签页（或在顶部 **MCP 服务** 按钮查看实时脉冲指示并一键直达），即时透视外部 AI 客户端每一步工具调用的起止过程、入参 JSON 与返回预览、20 项工具调用统计及案件热刷新状态。
 
 ## 大容量镜像（≥1 GiB）
 
 逻辑容量达到 **1 GiB** 时自动启用按需目录浏览模式：
-- 打开后直达首个可读根目录（带容量上限的 LRU 目录缓存），左侧文件树默认保持分区根目录折叠态并支持点击按需逐层展开读取与多分支缓存（不可识别文件系统的保留分区如 GPT MSR 展示柔和错误提示与重试，单击目录节点同步刷新右侧列表与左侧树分支）；≥8 MiB 普通文件通过纯 Rust `VolumeReader` 按偏移随机读取，可直接跳至末页；删除记录继续使用 `icat` 恢复可读字节。
-- 需要全案搜索或 MACB 时间线时点击“建立完整文件索引”（可随时取消，不破坏已有清单）；大清单以 gzip 压缩 JSONL 存于 `inventory-*.jsonl.gz`。
-- 需要完整性结论时点击“校验完整性”执行后台可取消整镜像哈希校验（EWF 多段由 Rayon 并行解压与校验）。
+- 打开后直达首个可读根目录（带容量上限的 LRU 目录缓存），左侧文件树默认保持分区根目录折叠态并支持点击按需逐层展开读取与多分支缓存（不可识别文件系统的保留分区如 GPT MSR 展示柔和错误提示与重试，单击目录节点同步刷新右侧列表与左侧树分支）；常规文件与已删除 NTFS 文件优先通过纯 Rust `VolumeReader` 按偏移进程内随机读取，可直接跳至末页；其余删除记录继续使用 `icat` 恢复可读字节并设 64 MiB 临时缓存截断上限。
+- 需要全案搜索或 MACB 时间线时点击“建立完整文件索引”，亦可针对单个目标分区在左侧分区树右键/悬浮按钮或证据信息页分区表中点击“仅索引此分区”；前台扫描、校验与搜索任务均可在底栏进度区或任务进度弹窗直接取消，不破坏已有清单；大清单以 gzip 压缩 JSONL 存于 `inventory-*.jsonl.gz`。
+- 需要完整性结论时点击“校验完整性”执行后台可取消整镜像哈希校验（EWF 多段由 Rayon 并行解压与校验），底栏与进度弹窗实时展示速率、已耗时与预计剩余时间（ETA）。
 - Windows 下大镜像会话与受保护搜索对 RAW 或全部 EWF 分段持有拒写、拒删除只读共享句柄（`FILE_SHARE_READ`）。
 
 分段 EWF 大镜像实测见 [EWF 加载与复核实测](docs/validation/EWF加载与复核实测.md)，核心算法与闭环性能实测见 [Rust 迁移性能对比实测](docs/validation/Rust迁移性能对比实测.md)。
@@ -127,11 +127,11 @@ cargo test --workspace
 
 ## MCP 服务端接入
 
-TraceDesk 内置原生标准 Model Context Protocol（MCP）服务端 `tracedesk-mcp.exe`（桌面端亦内嵌复用同一 `McpServer`），将完整电子数据取证工作流暴露为 **19 个工具**与 **2 个资源**（`tracedesk://cases`、`tracedesk://guide/workflow`），供 Claude Desktop、Cursor、Antigravity 等外部 AI 客户端调用：
+TraceDesk 内置原生标准 Model Context Protocol（MCP）服务端 `tracedesk-mcp.exe`（桌面端亦内嵌复用同一 `McpServer`），将完整电子数据取证工作流暴露为 **20 个工具**与 **2 个资源**（`tracedesk://cases`、`tracedesk://guide/workflow`），供 Claude Desktop、Cursor、Antigravity 等外部 AI 客户端调用：
 
 - **案件管理**：`tracedesk_list_cases`、`tracedesk_create_case`、`tracedesk_get_case_summary`
 - **证据镜像**：`tracedesk_load_image`、`tracedesk_verify_integrity`、`tracedesk_register_source`、`tracedesk_scan_partitions`
-- **文件分析**：`tracedesk_list_files`、`tracedesk_preview_file`、`tracedesk_search_content`、`tracedesk_examine_file`
+- **文件分析**：`tracedesk_list_files`、`tracedesk_preview_file`、`tracedesk_search_content`、`tracedesk_read_search_report`（只读分页翻阅已落盘搜索报告，不重扫镜像）、`tracedesk_examine_file`
 - **发现、时间线与审计**：`tracedesk_record_finding`、`tracedesk_list_findings`、`tracedesk_query_timeline`、`tracedesk_query_audit_log`
 - **导出与报告**：`tracedesk_export_file`、`tracedesk_export_findings`、`tracedesk_generate_report`、`tracedesk_build_review_bundle`
 
@@ -157,8 +157,8 @@ TraceDesk 内置原生标准 Model Context Protocol（MCP）服务端 `tracedesk
 
 - **跨进程全通道实时监控**：同时汇聚桌面端内嵌 HTTP（`desktop-http`）、独立 HTTP 进程（`streamable-http`）与外部客户端拉起的独立 `stdio` 子进程三类通道活动。`desktop-http` 通过进程内事件直推前端（`mcp:activity`），独立 `stdio` / `streamable-http` 进程通过跨进程伴随锁安全追加写入 `logs/mcp-activity.jsonl`（超过 1,200 行自动原子截断保留最近 600 行），桌面端以带头部指纹校验的增量字节尾随线程实时汇聚并按 `callId` 原位更新“执行中 → 成功 / 失败”状态。
 - **单步参数与结果透视**：支持按阶段（执行中/成功/失败）、只读/受控写入、调用方客户端、传输通道与关键词多维筛选；右侧可拖拽分栏展示单步调用的完整时间戳、耗时、来源与目标案件、美化后的入参 JSON、返回结果预览（超 16 KiB 安全截断）及失败错误详情，并支持一键跳转审计日志核查哈希链。
-- **19 工具调用统计与接入配置**：内置四项紧凑遥测指标卡（总调用/执行中、成功率与平均耗时、活跃客户端、只读与受控写入占比）以及“实时操作流 / 接入配置 / 工具清单与调用统计”三合一子视图，集中呈现全部 **19 项 MCP 工具**的累计调用次数、失败次数与平均耗时。
-- **案件自动热刷新**：当任意 MCP 进程对桌面端当前已打开的案件完成受控写入（如加载镜像、扫描分区、记录发现、生成报告或导出复核包）后，宿主自动发出 `mcp:case-updated` 事件并触发当前案件视图平滑热刷新（同步刷新案件快照、文件浏览、发现、时间线与审计日志），无需手动关闭重开案件。
+- **20 工具调用统计与接入配置**：内置四项紧凑遥测指标卡（总调用/执行中、成功率与平均耗时、活跃客户端、只读与受控写入占比）以及“实时操作流 / 接入配置 / 工具清单与调用统计”三合一子视图，集中呈现全部 **20 项 MCP 工具**的累计调用次数、失败次数与平均耗时。
+- **案件自动热刷新**：当任意 MCP 进程对桌面端当前已打开的案件完成受控写入（如加载镜像、扫描分区、记录发现、生成报告或导出复核包）后，宿主自动发出 `mcp:case-updated` 事件并触发当前案件视图平滑热刷新（同步刷新案件快照、文件浏览、发现、时间线与审计日志；若触发瞬间正处于本地写锁竞争，宿主自动置位 `disk_dirty` 并在锁释放后主动补刷磁盘最新状态，杜绝假刷新），无需手动关闭重开案件。
 
 ## 第三方依赖与 AI 参与
 

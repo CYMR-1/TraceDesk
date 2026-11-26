@@ -31,8 +31,10 @@ import type {
   PreviewPageResponse,
   QueryFilesPageResponse,
   QueryTimelinePageResponse,
+  RecentCaseDto,
   SearchEncoding,
   SearchFinishedEvent,
+  SearchHitDto,
   SearchHitsEvent,
   SearchProgressEvent,
   StartContentSearchResponse,
@@ -110,6 +112,11 @@ export const tauriApi = {
     return callCommand<CaseSnapshot | null>('get_case_snapshot', {});
   },
 
+  /** 获取案件库目录下的最近案件列表 */
+  listRecentCases(): Promise<RecentCaseDto[]> {
+    return callCommand<RecentCaseDto[]>('list_recent_cases', {});
+  },
+
   /* ---------- 3.2 证据镜像与文件浏览命令 ---------- */
 
   loadImage(params: { imagePath: string }): Promise<CaseSnapshot> {
@@ -142,8 +149,18 @@ export const tauriApi = {
     return callCommand<{ completed: boolean; snapshot: CaseSnapshot }>('scan_all_partitions', {});
   },
 
+  /** 仅索引指定扇区偏移的单个分区（大镜像按需索引入口） */
+  scanPartition(params: { offset: number }): Promise<{ completed: boolean; snapshot: CaseSnapshot }> {
+    return callCommand<{ completed: boolean; snapshot: CaseSnapshot }>('scan_partition', params);
+  },
+
   cancelScanPartitions(): Promise<{ cancelled: boolean }> {
     return callCommand<{ cancelled: boolean }>('cancel_scan_partitions', {});
+  },
+
+  /** 统一取消当前正在执行的前台长任务（加载镜像/哈希/分区扫描等） */
+  cancelTask(): Promise<{ cancelled: boolean }> {
+    return callCommand<{ cancelled: boolean }>('cancel_task', {});
   },
 
   browseDirectory(params: {
@@ -272,6 +289,11 @@ export const tauriApi = {
     hitIndices: number[];
   }): Promise<{ savedCount: number; snapshot: CaseSnapshot }> {
     return callCommand<{ savedCount: number; snapshot: CaseSnapshot }>('bookmark_search_hits', params);
+  },
+
+  /** 读取历史内容搜索记录（reports/search_*.json）中的命中列表用于回放 */
+  loadSearchRecord(params: { reportName: string }): Promise<SearchHitDto[]> {
+    return callCommand<SearchHitDto[]>('load_search_record', params);
   },
 
   generateReport(): Promise<{ path: string; snapshot: CaseSnapshot }> {

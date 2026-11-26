@@ -80,7 +80,7 @@ export const ExportResultDialog: React.FC<ExportResultDialogProps> = ({
             onClick={onClose}
             autoFocus
           >
-            OK
+            确定
           </button>
         </>
       }

@@ -10,8 +10,8 @@ use tracedesk_core::{AppPaths, resolve_clean};
 
 use crate::activity::McpActivitySink;
 use crate::http::{
-    DEFAULT_HOST, DEFAULT_HTTP_PATH, DEFAULT_PORT, McpHttpServerHandle, normalize_http_path,
-    validate_loopback_host,
+    DEFAULT_HOST, DEFAULT_HTTP_PATH, DEFAULT_PORT, DESKTOP_HTTP_TRANSPORT_LABEL,
+    McpHttpServerHandle, normalize_http_path, validate_loopback_host,
 };
 use crate::service::{McpError, McpResult};
 use crate::tools::{McpServer, TOOL_CATALOG, ToolCatalogItem};
@@ -310,7 +310,13 @@ impl LocalHttpMcpManager {
         if let Some(ref sink) = self.activity_sink {
             server = server.with_activity_sink(Arc::clone(sink));
         }
-        let handle = McpHttpServerHandle::start(server, &clean_host, port, &clean_path)?;
+        let handle = McpHttpServerHandle::start_with_transport(
+            server,
+            &clean_host,
+            port,
+            &clean_path,
+            DESKTOP_HTTP_TRANSPORT_LABEL,
+        )?;
         let url = handle.url().to_string();
         guard.host = handle.host().to_string();
         guard.port = handle.port();

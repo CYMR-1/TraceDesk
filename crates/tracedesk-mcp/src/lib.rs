@@ -1,5 +1,5 @@
 //! TraceDesk MCP 服务端库（`tracedesk_mcp`）：
-//! - 19 个标准电子数据取证 MCP 工具与 2 个 MCP 资源（`tools`）
+//! - 20 个标准电子数据取证 MCP 工具与 2 个 MCP 资源（`tools`）
 //! - 单次调用自动加锁与立即释放 `case.lock`、只读视图/时间线缓存、`origin="mcp"` 审计写入（`service`）
 //! - MCP 实时过程监控、跨进程 JSONL 遥测与聚合统计（`activity`）
 //! - `stdio` 行分隔 JSON-RPC 2.0 传输（`stdio`）
@@ -29,12 +29,14 @@ pub use activity::{
 };
 
 pub use http::{
-    DEFAULT_HOST, DEFAULT_HTTP_PATH, DEFAULT_PORT, HttpConnectionPermit, HttpParseError,
-    LOOPBACK_HOSTS, MAX_CHUNKED_TRAILERS, MAX_CONCURRENT_HTTP_CONNS, MAX_HTTP_BODY_BYTES,
-    MAX_HTTP_HEADERS, MAX_SESSION_ID_BYTES, McpHttpServerHandle, ParsedHttpRequest,
-    check_port_available, extract_user_agent_client, normalize_http_path, normalize_request_path,
-    parse_http_request, request_context_from_http_headers, run_http_blocking, sanitize_session_id,
-    validate_loopback_host, verify_dns_rebinding, write_http_response,
+    DEFAULT_HOST, DEFAULT_HTTP_PATH, DEFAULT_HTTP_TRANSPORT_LABEL, DEFAULT_PORT,
+    DESKTOP_HTTP_TRANSPORT_LABEL, HttpConnectionPermit, HttpParseError, LOOPBACK_HOSTS,
+    MAX_CHUNKED_TRAILERS, MAX_CONCURRENT_HTTP_CONNS, MAX_HTTP_BODY_BYTES, MAX_HTTP_HEADERS,
+    MAX_SESSION_ID_BYTES, McpHttpServerHandle, ParsedHttpRequest, check_port_available,
+    extract_user_agent_client, normalize_http_path, normalize_request_path, parse_http_request,
+    request_context_from_http_headers, request_context_from_http_headers_with_transport,
+    run_http_blocking, sanitize_session_id, validate_loopback_host, verify_dns_rebinding,
+    write_http_response,
 };
 pub use runtime::{
     LocalHttpMcpManager, McpStatusSnapshot, build_claude_config, build_cli_command,

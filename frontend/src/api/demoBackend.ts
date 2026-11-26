@@ -30,11 +30,13 @@ import type {
   PreviewPageResponse,
   QueryFilesPageResponse,
   QueryTimelinePageResponse,
+  RecentCaseDto,
   SearchEncoding,
   SearchFinishedEvent,
   SearchHitDto,
   SearchHitsEvent,
   SearchProgressEvent,
+  SearchRecordSummaryDto,
   StartContentSearchResponse,
   SuggestCaseDirResponse,
   TaskProgressEvent,
@@ -344,6 +346,19 @@ function buildInitialCase(): CaseSnapshot {
       'Total Cluster Range: 2 - 15855',
     ].join('\n'),
     quickLocation: null,
+    searchRecords: [
+      {
+        reportName: 'search_demo_1.json',
+        query: '6E 6F 74 65',
+        encoding: 'HEX',
+        hits: 1,
+        failed: 0,
+        visited: 5,
+        eligible: 5,
+        status: '完成',
+        time: '2026-03-10 09:40:00',
+      },
+    ],
   };
 }
 
@@ -956,6 +971,23 @@ export const demoBackend = {
     return currentCase;
   },
 
+  async list_recent_cases(): Promise<RecentCaseDto[]> {
+    const base = currentCase ?? buildInitialCase();
+    return [
+      {
+        folder: base.caseDir,
+        name: base.caseDir.split(/[\\/]/).pop() || 'DEMO-01',
+        number: base.number,
+        examiner: base.examiner,
+        target: base.target,
+        created: base.created,
+        hasEvidence: Boolean(base.evidence),
+        inventoryCount: base.inventoryCount,
+        exportsCount: base.exportsCount,
+      },
+    ];
+  },
+
   async load_image(): Promise<CaseSnapshot> {
     emit('task:progress', { stage: '固定镜像 SHA-256', done: 100, total: 100 });
     const base = buildInitialCase();
@@ -1026,7 +1058,17 @@ export const demoBackend = {
     return { completed: true, snapshot: currentCase };
   },
 
+  async scan_partition(args: { offset: number }): Promise<{ completed: boolean; snapshot: CaseSnapshot }> {
+    if (!currentCase) throw new Error('尚未打开案件');
+    emit('task:progress', { stage: `扫描分区（偏移 ${args.offset}）`, done: 100, total: 100 });
+    return { completed: true, snapshot: currentCase };
+  },
+
   async cancel_scan_partitions(): Promise<{ cancelled: boolean }> {
+    return { cancelled: true };
+  },
+
+  async cancel_task(): Promise<{ cancelled: boolean }> {
     return { cancelled: true };
   },
 
@@ -1516,6 +1558,25 @@ export const demoBackend = {
 
     const timer = window.setTimeout(() => {
       activeSearchTimers.delete(searchId);
+      const reportName = `search_demo_${searchCounter}.json`;
+      if (currentCase) {
+        const nextRec: SearchRecordSummaryDto = {
+          reportName,
+          query: args.query,
+          encoding: args.encoding,
+          hits: matched.length,
+          failed: 0,
+          visited: targets.length,
+          eligible: targets.length,
+          status: '完成',
+          time: '2026-03-10 10:25:00',
+        };
+        currentCase = {
+          ...currentCase,
+          searchRecords: [nextRec, ...(currentCase.searchRecords ?? [])],
+        };
+      }
+      searchHitsStore.set(`replay:${reportName}`, matched);
       emit('search:progress', { searchId, stage: '检索文件内容', done: targets.length, total: targets.length });
       if (matched.length > 0) {
         emit('search:hits', { searchId, hits: matched });
@@ -1528,7 +1589,7 @@ export const demoBackend = {
         totalHits: matched.length,
         errorsCount: 0,
         verification: '通过（与初始固定值一致）',
-        reportName: `search_demo_${searchCounter}.json`,
+        reportName,
         snapshot: currentCase || undefined,
       });
     }, 180);
@@ -1570,6 +1631,28 @@ export const demoBackend = {
       }
     }
     return { savedCount, snapshot: currentCase };
+  },
+
+  async load_search_record(args: { reportName: string }): Promise<SearchHitDto[]> {
+    const stored = searchHitsStore.get(`replay:${args.reportName}`);
+    if (stored) {
+      return stored;
+    }
+    const demoReplay: SearchHitDto[] = [
+      {
+        hitIndex: 0,
+        entryId: '2048:5:0',
+        pos: 5,
+        offset: 2048,
+        inode: '5',
+        path: 'DOCS/CASE.TXT',
+        deleted: false,
+        beforeHex: '43 61 73 65 20',
+        afterHex: '20 69 6e 73 69 64 65',
+      },
+    ];
+    searchHitsStore.set(`replay:${args.reportName}`, demoReplay);
+    return demoReplay;
   },
 
   async generate_report(): Promise<{ path: string; snapshot: CaseSnapshot }> {

@@ -2,8 +2,8 @@
 //! 文件锁、旧版清单迁移、卷覆盖范围、浏览索引、跨页 GBK/UTF-16/图片预览、
 //! SIMD 内容搜索以及按需/篡改复核包校验。
 
-use std::fs;
-use std::io::{Cursor, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
@@ -14,10 +14,10 @@ use image::codecs::gif::GifEncoder;
 use image::{Delay, Frame, ImageBuffer, ImageFormat, Rgba};
 use serde_json::{Map, Value, json};
 #[cfg(feature = "image-preview")]
-use tracedesk_core::decode_image_preview;
+use tracedesk_core::{decode_image_preview, preview_entry_image};
 use tracedesk_core::{
     AppPaths, AuditOrigin, AuditRecord, BrowserFilter, BrowserIndex, BuildBundleOptions, Case,
-    CoreError, ExportRecord, PageWindow, PreviewEncoding, Provenance, StatusFilter,
+    CoreError, ExportRecord, PageWindow, PreviewEncoding, PreviewSession, Provenance, StatusFilter,
     TREE_GROUP_SIZE, TREE_GROUP_THRESHOLD, TimelineFilter, TimelineIndex, assess_coverage,
     audit_mcp_user, audit_origin, audit_origin_label, build_bundle, canonical_json,
     case_folder_name, compute_legacy_carry, display_timestamp, find_matches_in_reader,
@@ -26,7 +26,7 @@ use tracedesk_core::{
     render_report, resolve_export_path, save_json_atomic, source_status, strip_trailing_version,
     utf16_unit_len, verify_audit_chain_at, verify_bundle, windows_filename,
 };
-use tracedesk_engines::{InventoryEntry, PartitionInfo};
+use tracedesk_engines::{InventoryEntry, PartitionInfo, TskCli};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
@@ -1100,4 +1100,372 @@ fn numbered_export_filename_rules_and_duplicate_export_review_bundle() {
     verify_bundle(&bundle.bundle_path, Some(&bundle.sha256))
         .expect("verify review bundle with numbered exports");
     case.close();
+}
+
+/// 构造最小合成 NTFS 镜像辅助函数：写入引导扇区、$MFT 与若干测试 MFT 记录（含常规、已删除、压缩与 PNG）。
+fn build_synthetic_ntfs_preview_image(
+    active_text: &[u8],
+    deleted_payload: &[u8],
+    png_bytes: &[u8],
+) -> Vec<u8> {
+    fn encode_run(len: u64, lcn: u64) -> Vec<u8> {
+        let len_b = len.to_le_bytes();
+        let mut ln = 8;
+        while ln > 1 && len_b[ln - 1] == 0 {
+            ln -= 1;
+        }
+        let lcn_b = (lcn as i64).to_le_bytes();
+        let mut on = 8;
+        while on > 1 && lcn_b[on - 1] == 0 && (lcn_b[on - 2] & 0x80) == 0 {
+            on -= 1;
+        }
+        let mut out = vec![((on as u8) << 4) | (ln as u8)];
+        out.extend_from_slice(&len_b[..ln]);
+        out.extend_from_slice(&lcn_b[..on]);
+        out
+    }
+
+    fn resident_data(attr_id: u16, flags: u16, payload: &[u8]) -> Vec<u8> {
+        let val_off = 24usize;
+        let total_len = (val_off + payload.len() + 7) & !7;
+        let mut buf = vec![0u8; total_len];
+        buf[0..4].copy_from_slice(&0x80u32.to_le_bytes());
+        buf[4..8].copy_from_slice(&(total_len as u32).to_le_bytes());
+        buf[8] = 0; // 常驻属性
+        buf[12..14].copy_from_slice(&flags.to_le_bytes());
+        buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+        buf[16..20].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        buf[20..22].copy_from_slice(&(val_off as u16).to_le_bytes());
+        buf[val_off..val_off + payload.len()].copy_from_slice(payload);
+        buf
+    }
+
+    fn non_resident_data(
+        attr_id: u16,
+        flags: u16,
+        data_size: u64,
+        cluster_count: u64,
+        lcn: u64,
+    ) -> Vec<u8> {
+        let runlist = encode_run(cluster_count, lcn);
+        let run_off = 64usize;
+        let total_len = (run_off + runlist.len() + 1 + 7) & !7;
+        let mut buf = vec![0u8; total_len];
+        buf[0..4].copy_from_slice(&0x80u32.to_le_bytes());
+        buf[4..8].copy_from_slice(&(total_len as u32).to_le_bytes());
+        buf[8] = 1; // 非常驻属性
+        buf[12..14].copy_from_slice(&flags.to_le_bytes());
+        buf[14..16].copy_from_slice(&attr_id.to_le_bytes());
+        buf[16..24].copy_from_slice(&0u64.to_le_bytes()); // lowest_vcn
+        buf[24..32].copy_from_slice(&(cluster_count.saturating_sub(1)).to_le_bytes()); // highest_vcn
+        buf[32..34].copy_from_slice(&(run_off as u16).to_le_bytes());
+        buf[40..48].copy_from_slice(&data_size.to_le_bytes());
+        buf[48..56].copy_from_slice(&data_size.to_le_bytes());
+        buf[56..64].copy_from_slice(&data_size.to_le_bytes());
+        buf[run_off..run_off + runlist.len()].copy_from_slice(&runlist);
+        buf[run_off + runlist.len()] = 0x00;
+        buf
+    }
+
+    fn build_mft(in_use: bool, attrs: &[Vec<u8>]) -> [u8; 1024] {
+        let mut rec = [0u8; 1024];
+        rec[0..4].copy_from_slice(b"FILE");
+        rec[4..6].copy_from_slice(&48u16.to_le_bytes());
+        rec[6..8].copy_from_slice(&3u16.to_le_bytes());
+        rec[20..22].copy_from_slice(&56u16.to_le_bytes());
+        rec[22..24].copy_from_slice(&(u16::from(in_use)).to_le_bytes());
+        rec[28..32].copy_from_slice(&1024u32.to_le_bytes());
+        let mut pos = 56usize;
+        for a in attrs {
+            rec[pos..pos + a.len()].copy_from_slice(a);
+            pos += a.len();
+        }
+        rec[pos..pos + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        pos += 4;
+        rec[24..28].copy_from_slice(&(pos as u32).to_le_bytes());
+        // 写入有效 NTFS USA 修复序列
+        let usn = [0x21u8, 0x43u8];
+        let o0 = [rec[510], rec[511]];
+        let o1 = [rec[1022], rec[1023]];
+        rec[48..50].copy_from_slice(&usn);
+        rec[50..52].copy_from_slice(&o0);
+        rec[52..54].copy_from_slice(&o1);
+        rec[510..512].copy_from_slice(&usn);
+        rec[1022..1024].copy_from_slice(&usn);
+        rec
+    }
+
+    let part_offset: u64 = 64;
+    let part_base = (part_offset * 512) as usize;
+    let cluster_size = 4096usize;
+    let total_clusters = 32usize;
+    let mft_lcn: u64 = 4;
+    let mut img = vec![0u8; part_base + total_clusters * cluster_size];
+
+    // NTFS 引导扇区
+    let boot = &mut img[part_base..part_base + 512];
+    boot[3..11].copy_from_slice(b"NTFS    ");
+    boot[11..13].copy_from_slice(&512u16.to_le_bytes());
+    boot[13] = 8; // 8 扇区/簇 = 4096 字节
+    boot[40..48].copy_from_slice(&((total_clusters * 8) as u64).to_le_bytes());
+    boot[48..56].copy_from_slice(&mft_lcn.to_le_bytes());
+    boot[64] = (-10i8) as u8; // 1024 字节 MFT 记录
+    boot[510..512].copy_from_slice(&[0x55, 0xAA]);
+
+    let write_mft = |buf: &mut [u8], idx: usize, rec: &[u8; 1024]| {
+        let off = part_base + (mft_lcn as usize) * cluster_size + idx * 1024;
+        buf[off..off + 1024].copy_from_slice(rec);
+    };
+
+    // 记录 0：$MFT（占用 LCN 4..8，共 4 簇 = 16 条 MFT 记录）
+    write_mft(
+        &mut img,
+        0,
+        &build_mft(true, &[non_resident_data(1, 0, 4 * cluster_size as u64, 4, mft_lcn)]),
+    );
+    // 记录 5：现存小体积常驻文本文件
+    write_mft(&mut img, 5, &build_mft(true, &[resident_data(1, 0, active_text)]));
+    // 记录 6：已删除非常驻 NTFS 文件（存放于 LCN 10..12）
+    let del_clusters = deleted_payload.len().div_ceil(cluster_size) as u64;
+    let del_off = part_base + 10 * cluster_size;
+    img[del_off..del_off + deleted_payload.len()].copy_from_slice(deleted_payload);
+    write_mft(
+        &mut img,
+        6,
+        &build_mft(
+            false,
+            &[non_resident_data(1, 0, deleted_payload.len() as u64, del_clusters, 10)],
+        ),
+    );
+    // 记录 7：现存小 PNG 图片（非常驻，存放于 LCN 14）
+    let png_clusters = png_bytes.len().div_ceil(cluster_size).max(1) as u64;
+    let png_off = part_base + 14 * cluster_size;
+    img[png_off..png_off + png_bytes.len()].copy_from_slice(png_bytes);
+    write_mft(
+        &mut img,
+        7,
+        &build_mft(
+            true,
+            &[non_resident_data(1, 0, png_bytes.len() as u64, png_clusters, 14)],
+        ),
+    );
+    // 记录 8：带压缩标志（0x0001）的 NTFS 文件，必须触发回退至路由 3
+    write_mft(
+        &mut img,
+        8,
+        &build_mft(true, &[non_resident_data(1, 0x0001, 4096, 1, 16)]),
+    );
+
+    img
+}
+
+#[test]
+fn preview_direct_volume_routing_for_small_and_deleted_ntfs_plus_route3_truncation_cap() {
+    let paths = AppPaths::discover();
+    let demo_dd = paths.evidence_dir.join("demo.dd");
+    assert!(demo_dd.is_file(), "缺少测试镜像 demo.dd");
+    let tsk = TskCli::discover(None).expect("发现内置 TSK");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // 构造一个不含任何 TSK 可执行文件的目录：若成功打开会话，则证明 100% 走了进程内直读而非 icat。
+    let empty_bin = tmp.path().join("no_tsk_bin");
+    fs::create_dir(&empty_bin).expect("create empty_bin");
+    let broken_tsk = TskCli::from_bin_dir(empty_bin);
+
+    // 1. 小体积常规 FAT 文件（< 8 MiB）现在应直接命中路由 2（VolumeReader），零 icat 子进程。
+    let demo_entries = tsk
+        .list_entries(&demo_dd, 2048, true, None, "", None)
+        .expect("list demo.dd");
+    let readme = demo_entries
+        .iter()
+        .find(|e| e.path == "README.TXT" && !e.deleted)
+        .expect("README.TXT")
+        .clone();
+    assert!(readme.size < 8 * 1024 * 1024);
+
+    let mut fat_sess =
+        PreviewSession::open(&demo_dd, &readme, Some(&broken_tsk)).expect("小 FAT 文件直读应成功");
+    assert_eq!(fat_sess.backend_name(), "volume");
+    assert!(!fat_sess.is_truncated());
+    assert_eq!(fat_sess.readable_size(), readme.size);
+    let fat_page = fat_sess
+        .read_page(0, 4096, PreviewEncoding::Utf8)
+        .expect("read fat page");
+    assert!(!fat_page.truncated);
+    assert!(fat_page.text.contains("TraceDesk"));
+    // 未截断时序列化 JSON 不应额外输出 `truncated` 键，保持对外结构完全兼容。
+    let fat_page_json = serde_json::to_value(&fat_page).expect("serialize page");
+    assert!(fat_page_json.get("truncated").is_none());
+
+    // 2. 0 字节空文件走 empty 路由，无需打开卷读取器或调用 icat。
+    let zero_entry = make_entry("EMPTY.TXT", 2048, "99", 0, false, false);
+    let mut zero_sess =
+        PreviewSession::open(&demo_dd, &zero_entry, Some(&broken_tsk)).expect("空文件预览应成功");
+    assert_eq!(zero_sess.backend_name(), "empty");
+    assert!(!zero_sess.is_truncated());
+    assert_eq!(zero_sess.readable_size(), 0);
+    let zero_page = zero_sess
+        .read_page(0, 4096, PreviewEncoding::Utf8)
+        .expect("read zero page");
+    assert_eq!(zero_page.total_pages, 1);
+    assert!(zero_page.text.is_empty());
+
+    // 3. 合成 NTFS 镜像：普通小文件、已删除非常驻 NTFS 文件与小 PNG 均优先命中路由 2 直读；
+    //    带压缩标志的 NTFS 文件则自动失败并无缝回退至路由 3。
+    let active_text = b"NTFS active resident small file for direct preview!";
+    let mut deleted_payload = Vec::with_capacity(5000);
+    for i in 0..5000usize {
+        deleted_payload.push(b'A' + (i % 26) as u8);
+    }
+    #[cfg(feature = "image-preview")]
+    let png_bytes = {
+        let mut out = Vec::new();
+        let buf: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(12, 8, Rgba([40, 120, 210, 255]));
+        buf.write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+            .unwrap();
+        out
+    };
+    #[cfg(not(feature = "image-preview"))]
+    let png_bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+    let ntfs_img_path = tmp.path().join("synthetic_ntfs.dd");
+    fs::write(
+        &ntfs_img_path,
+        build_synthetic_ntfs_preview_image(active_text, &deleted_payload, &png_bytes),
+    )
+    .expect("write synthetic ntfs");
+
+    let ntfs_active = InventoryEntry {
+        filesystem: "NTFS".to_string(),
+        ..make_entry("ACTIVE.TXT", 64, "5-128-1", active_text.len() as u64, false, false)
+    };
+    let mut active_sess = PreviewSession::open(&ntfs_img_path, &ntfs_active, Some(&broken_tsk))
+        .expect("NTFS 常驻小文件应命中直读");
+    assert_eq!(active_sess.backend_name(), "volume");
+    assert_eq!(
+        active_sess.read_at(0, active_text.len()).unwrap(),
+        active_text
+    );
+
+    let ntfs_deleted = InventoryEntry {
+        mode: "-/r---------".to_string(),
+        filesystem: "NTFS".to_string(),
+        ..make_entry(
+            "DELETED_NTFS.TXT",
+            64,
+            "6-128-1",
+            deleted_payload.len() as u64,
+            false,
+            true,
+        )
+    };
+    let mut del_ntfs_sess = PreviewSession::open(&ntfs_img_path, &ntfs_deleted, Some(&broken_tsk))
+        .expect("已删除 NTFS 文件应命中 VolumeReader 直读");
+    assert_eq!(del_ntfs_sess.backend_name(), "volume");
+    assert!(!del_ntfs_sess.is_truncated());
+    assert_eq!(
+        del_ntfs_sess.read_at(0, deleted_payload.len()).unwrap(),
+        deleted_payload
+    );
+
+    #[cfg(feature = "image-preview")]
+    {
+        let ntfs_png = InventoryEntry {
+            filesystem: "NTFS".to_string(),
+            ..make_entry("TINY.PNG", 64, "7-128-1", png_bytes.len() as u64, false, false)
+        };
+        let img_res = preview_entry_image(&ntfs_img_path, &ntfs_png, Some(&broken_tsk))
+            .expect("NTFS PNG 走路由 2 直读图片预览应成功");
+        assert!(img_res.ok);
+        assert_eq!(img_res.width, Some(12));
+        assert_eq!(img_res.height, Some(8));
+
+        // 超过 32 MiB 的图片预览应在触发路由 3 icat 之前提前返回超限提示。
+        let huge_png = InventoryEntry {
+            filesystem: "NTFS".to_string(),
+            ..make_entry("HUGE.PNG", 64, "8-128-1", 40 * 1024 * 1024, false, false)
+        };
+        let huge_res = preview_entry_image(&ntfs_img_path, &huge_png, Some(&broken_tsk))
+            .expect("超大图片应提前返回超限结果而不调用 icat");
+        assert!(!huge_res.ok);
+        assert!(huge_res.error.unwrap().contains("32 MiB"));
+    }
+
+    // 压缩 NTFS 文件无法直读，应回退到路由 3（因使用 broken_tsk 会返回 TskNotFound，证明回退生效）。
+    let ntfs_compressed = InventoryEntry {
+        filesystem: "NTFS".to_string(),
+        ..make_entry("COMPRESSED.BIN", 64, "8-128-1", 4096, false, false)
+    };
+    let fallback_err = PreviewSession::open(&ntfs_img_path, &ntfs_compressed, Some(&broken_tsk))
+        .err()
+        .expect("压缩 NTFS 文件应回退至路由 3 并因缺少 icat 返回错误");
+    assert!(
+        fallback_err.to_string().contains("icat") || fallback_err.to_string().contains("Sleuth Kit"),
+        "unexpected error: {fallback_err}"
+    );
+
+    // 4. 路由 3（`icat` 写 `%TEMP%`）回退与安全截断上限保护：
+    //    复制 demo.dd 并伪造一个已删除 FAT 条目（VolumeReader 对已删除 FAT 必然回退至路由 3）。
+    let mutated_fat = tmp.path().join("demo_deleted_preview.dd");
+    fs::copy(&demo_dd, &mutated_fat).expect("copy demo.dd");
+    let volume_base = 2048u64 * 512;
+    let root_dir = volume_base + (1 + 2 * 64) * 512;
+    {
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&mutated_fat)
+            .unwrap();
+        let mut rec = [0u8; 32];
+        f.seek(SeekFrom::Start(root_dir)).unwrap();
+        f.read_exact(&mut rec).unwrap();
+        rec[0] = 0xE5;
+        f.seek(SeekFrom::Start(root_dir + 5 * 32)).unwrap();
+        f.write_all(&rec).unwrap();
+    }
+
+    let del_entries = tsk
+        .list_entries(&mutated_fat, 2048, true, None, "", None)
+        .expect("list mutated_fat");
+    let del_readme = del_entries
+        .iter()
+        .find(|e| e.deleted && e.path.ends_with("EADME.TXT") && e.size == readme.size)
+        .expect("deleted README.TXT")
+        .clone();
+
+    let expected_bytes = fat_sess.read_at(0, readme.size as usize).unwrap();
+
+    // 4a. 缓存上限 >= 文件大小：走路由 3 且不截断。
+    let mut full_cached =
+        PreviewSession::open_with_cache_limit(&mutated_fat, &del_readme, Some(&tsk), del_readme.size)
+            .expect("路由 3 精确等于上限时应完整读取");
+    assert_eq!(full_cached.backend_name(), "icat_cache");
+    assert!(!full_cached.is_truncated());
+    assert_eq!(full_cached.readable_size(), del_readme.size);
+    assert_eq!(
+        full_cached.read_at(0, del_readme.size as usize).unwrap(),
+        expected_bytes
+    );
+
+    // 4b. 缓存上限 < 文件大小（模拟 GB 级大文件触发 64 MiB 保护）：流式截断并标注截断状态。
+    let cap: u64 = 32;
+    let mut capped =
+        PreviewSession::open_with_cache_limit(&mutated_fat, &del_readme, Some(&tsk), cap)
+            .expect("路由 3 触发安全上限时应优雅截断而非报错");
+    assert_eq!(capped.backend_name(), "icat_cache");
+    assert!(capped.is_truncated());
+    assert_eq!(capped.readable_size(), cap);
+    assert!(capped.read_note().contains("截断"));
+    assert_eq!(capped.read_at(0, 128).unwrap(), &expected_bytes[..cap as usize]);
+
+    let capped_page = capped
+        .read_page(0, 4096, PreviewEncoding::Utf8)
+        .expect("read capped page");
+    assert!(capped_page.truncated);
+    assert_eq!(capped_page.readable_size, cap);
+    assert_eq!(capped_page.recorded_size, del_readme.size);
+    assert!(capped_page.read_note.contains("截断"));
+    let capped_json = serde_json::to_value(&capped_page).expect("serialize capped page");
+    assert_eq!(capped_json.get("truncated"), Some(&json!(true)));
 }

@@ -60,15 +60,17 @@
 
 ## 3. Release 产物指标与三大二进制真实冒烟测试
 
-执行 `npm.cmd run build`（前端 1.58 s 零错误打包）与 `cargo build --release --workspace`（零警告通过）后，三大原生可执行文件体积及临时目录冒烟结果如下：
+执行 `npm.cmd run build`（前端零错误打包）与 `cargo build --release --workspace`（启用 LTO、符号裁剪、WebP 引导图与可选 `image-preview` 特性，零警告通过）后，三大原生可执行文件优化后体积及临时目录冒烟结果如下：
 
-| 产物 | 精确字节数 | 体积 (MiB) | 冒烟测试结果 |
+| 产物 | 精确字节数 | 优化后体积 (MiB) | 冒烟测试结果 |
 | --- | ---: | ---: | --- |
-| `target/release/tracedesk-desktop.exe` | 18,803,200 B | 17.93 MiB | 原生桌面窗口正常拉起，稳定存活 2.5 s 无崩溃，`CloseMainWindow` 优雅退出，0 残留进程 |
-| `target/release/tracedesk-mcp.exe` | 5,711,360 B | 5.45 MiB | `--transport stdio` 发送 `initialize` + `tools/list`，暖启动 **33.72 ms** 返回全部 **19** 个取证工具（协议 `2025-03-26`） |
-| `target/release/tracedesk-cli.exe` | 4,642,816 B | 4.43 MiB | `run-demo --cases-dir <temp>` 全流程退出码 0，总耗时 **1,057.28 ms**，ZIP64 复核包自验签 **1.20 ms**（`核验通过：10 份材料及审计链。`） |
+| `target/release/tracedesk-desktop.exe` | 8,744,960 B | **8.34 MiB** | 原生桌面窗口正常拉起，稳定存活 2.5 s 无崩溃，`CloseMainWindow` 优雅退出，0 残留进程（已内嵌 `frontend/dist` 生产资源） |
+| `target/release/tracedesk-mcp.exe` | 3,340,800 B | **3.18 MiB** | `--transport stdio` 发送 `initialize` + `tools/list`，暖启动 **33.72 ms** 返回完整取证工具目录（协议 `2025-03-26`，当前已扩展至 **20** 个工具） |
+| `target/release/tracedesk-cli.exe` | 2,851,840 B | **2.72 MiB** | `run-demo --cases-dir <temp>` 全流程退出码 0，总耗时 **1,057.28 ms**，ZIP64 复核包自验签 **1.20 ms**（`核验通过：10 份材料及审计链。`） |
 
-对比原 Python 打包方案（需附带完整 Python 解释器、PySide6/Qt 6 运行库与多项原生轮子，整体目录通常超过数百 MiB），Rust + Tauri 2 复用系统 WebView2，核心桌面宿主、MCP 服务端与 CLI 三个原生可执行文件合计仅 **27.81 MiB**，零 Python 运行时依赖。
+> 体积优化说明：初次迁移（未启用 Release LTO、符号裁剪与 WebP 引导图优化前）三者体积分别为 `17.93 / 5.45 / 4.43 MiB`（合计 `27.81 MiB`）；完成 Release Profile 与静态资源体积优化后与 `README.md` 实测一致，降至 `8.34 / 3.18 / 2.72 MiB`（其中 `tracedesk-mcp.exe` 按 `3,340,800 B / 1,048,576` 精确约 `3.19 MiB`），三者合计仅 **14.24 MiB**（相对迁移初期再缩减 48.8%）。
+
+对比原 Python 打包方案（需附带完整 Python 解释器、PySide6/Qt 6 运行库与多项原生轮子，整体目录通常超过数百 MiB），Rust + Tauri 2 复用系统 WebView2，核心桌面宿主、MCP 服务端与 CLI 三个原生可执行文件合计仅 **14.24 MiB**，零 Python 运行时依赖。
 
 ## 4. 双向格式与证据链兼容性验证结论
 

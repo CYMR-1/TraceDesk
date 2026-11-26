@@ -4179,6 +4179,8 @@ dependencies = [
 name = "tracedesk-desktop"
 version = "0.1.0"
 dependencies = [
+ "memchr",
+ "rayon",
  "regex",
  "serde",
  "serde_json",

@@ -242,7 +242,10 @@ fn format_summary_value(key: &str, val: &Value) -> Option<String> {
             if trimmed.is_empty() {
                 return None;
             }
-            let display = if matches!(key, "case_dir" | "image_path" | "cases_root" | "comparison_path") {
+            let display = if matches!(
+                key,
+                "case_dir" | "image_path" | "cases_root" | "comparison_path" | "report_path"
+            ) {
                 compact_path_display(trimmed)
             } else {
                 sanitize_single_line(trimmed, 44)
@@ -329,6 +332,7 @@ pub fn summarize_params(method: &str, params: &Value) -> String {
             const PRIMARY_KEYS: &[&str] = &[
                 "query",
                 "encoding",
+                "report_path",
                 "path",
                 "image_path",
                 "number",

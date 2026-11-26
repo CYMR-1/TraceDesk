@@ -17,6 +17,8 @@ interface EvidenceInfoModuleProps {
   busy: boolean;
   onRegisterSource: () => void;
   onExportFsstat: (offset: number) => void;
+  /** 大镜像按需模式下对指定偏移分区执行“仅索引此分区” */
+  onScanPartition: (offset: number) => void;
 }
 
 interface BinarySizeUnit {
@@ -85,6 +87,7 @@ const EvidenceInfoModuleInner: React.FC<EvidenceInfoModuleProps> = ({
   busy,
   onRegisterSource,
   onExportFsstat,
+  onScanPartition,
 }) => {
   const evidence = snapshot?.evidence ?? null;
   const partitions = evidence?.partitions ?? [];
@@ -172,13 +175,31 @@ const EvidenceInfoModuleInner: React.FC<EvidenceInfoModuleProps> = ({
       ],
     });
 
-    const partRows: [string, string][] = partitions.map((p) => {
+    const partRows: [string, unknown][] = partitions.map((p) => {
       const scan = scanMap.get(p.offset);
-      const state =
-        scan?.status === 'ready'
-          ? `已读取 ${scan.count ?? 0} 项`
-          : scan?.error || '待读取';
-      return [`偏移 ${p.offset} 扇区`, `${p.description} · ${state}`];
+      const isReady = scan?.status === 'ready';
+      const isError = scan?.status === 'error';
+      const state = isReady ? `已读取 ${scan?.count ?? 0} 项` : scan?.error || '待读取';
+      const summaryText = `${p.description} · ${state}`;
+      if (!isReady && !isError) {
+        return [
+          `偏移 ${p.offset} 扇区`,
+          <div className="td-dossier-inline-action" key={`part-${p.offset}`}>
+            <span>{summaryText}</span>
+            <button
+              type="button"
+              className="td-btn td-btn--compact td-btn--soft"
+              disabled={busy}
+              onClick={() => onScanPartition(p.offset)}
+              title={`仅扫描并建立分区偏移 ${p.offset} 扇区的文件索引`}
+            >
+              <UiIcon name="index" size={12} color="var(--accent-soft-text)" />
+              仅索引此分区
+            </button>
+          </div>,
+        ];
+      }
+      return [`偏移 ${p.offset} 扇区`, summaryText];
     });
 
     list.push({
@@ -187,7 +208,7 @@ const EvidenceInfoModuleInner: React.FC<EvidenceInfoModuleProps> = ({
     });
 
     return list;
-  }, [evidence, snapshot, partitions, sizeUnitIdx]);
+  }, [evidence, snapshot, partitions, sizeUnitIdx, busy, onScanPartition]);
 
   const rawText = useMemo(() => {
     if (!evidence) return '';

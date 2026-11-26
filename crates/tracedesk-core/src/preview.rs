@@ -18,9 +18,10 @@ use image::imageops::FilterType;
 #[cfg(feature = "image-preview")]
 use image::{AnimationDecoder, ImageFormat, ImageReader};
 use serde::{Deserialize, Serialize};
-use tracedesk_engines::{InventoryEntry, TskCli, VolumeReader, deleted_source_note};
+use tracedesk_engines::{EngineError, InventoryEntry, TskCli, VolumeReader, deleted_source_note};
 
 use crate::error::{CoreError, CoreResult};
+use crate::formatting::format_commas;
 
 /// 每行 HEX 预览显示的字节数。
 pub const ROW_BYTES: usize = 16;
@@ -32,8 +33,11 @@ pub const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_IMAGE_PIXELS: u64 = 40_000_000;
 /// 缩放前单边允许的最大显示尺寸（像素）。
 pub const MAX_IMAGE_DIM: u32 = 4096;
-/// 未删除常规文件优先使用 `VolumeReader` 随机读取的大小阈值。
-pub const RANDOM_READ_MIN_BYTES: u64 = 8 << 20;
+/// 优先尝试 `VolumeReader` 进程内随机直读的最小文件大小阈值（已放宽为 1 字节，所有非空支持文件均优先直读）。
+pub const RANDOM_READ_MIN_BYTES: u64 = 1;
+/// 路由 3（`icat` 流式写入 `%TEMP%` 临时缓存文件）的安全预览上限（64 MiB），
+/// 避免预览未支持直读的 GB 级大文件时耗尽系统临时盘空间。
+pub const MAX_CACHED_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
 
 /// 支持的图片文件扩展名（含前导点号的小写形式）。
 pub const IMAGE_SUFFIXES: [&str; 9] = [
@@ -145,6 +149,9 @@ pub struct PreviewPageResult {
     pub text: String,
     pub hex_rows: Vec<HexRow>,
     pub is_image_candidate: bool,
+    /// 是否因触发路由 3 临时缓存安全上限而被流式截断（为 `false` 时省略序列化以保持完全兼容）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 /// 适用于桌面端 / Web 端渲染的解码图片预览结果。
@@ -676,6 +683,7 @@ fn detect_animated(raw_bytes: &[u8], format: Option<ImageFormat>) -> bool {
 }
 
 enum PreviewBackend {
+    Empty,
     Extents {
         file: File,
         extents: Vec<(u64, u64)>,
@@ -690,11 +698,13 @@ enum PreviewBackend {
         cache: File,
         total_size: u64,
         read_note: String,
+        truncated: bool,
     },
 }
 
 /// 有状态的预览读取器，按文件特性路由至 FAT 空间区域 extents、进程内 [`VolumeReader`]
-/// 随机读取（`>= 8 MiB` 常规文件）或 `icat` 流式临时缓存（并在顺序翻页时复用传统多字节进位检查点）。
+/// 随机直读（支持常规文件与已删除 NTFS 文件）或带安全上限保护的 `icat` 流式临时缓存
+/// （并在顺序翻页时复用传统多字节进位检查点）。
 pub struct PreviewSession {
     entry: InventoryEntry,
     backend: PreviewBackend,
@@ -702,8 +712,18 @@ pub struct PreviewSession {
 }
 
 impl PreviewSession {
-    /// 为镜像 `image` 内的 `entry` 打开一个 [`PreviewSession`]。
+    /// 为镜像 `image` 内的 `entry` 打开一个 [`PreviewSession`]（路由 3 使用默认 64 MiB 临时缓存上限）。
     pub fn open(image: &Path, entry: &InventoryEntry, tsk: Option<&TskCli>) -> CoreResult<Self> {
+        Self::open_with_cache_limit(image, entry, tsk, MAX_CACHED_PREVIEW_BYTES)
+    }
+
+    /// 为镜像 `image` 内的 `entry` 打开一个 [`PreviewSession`]，并指定路由 3 `icat` 临时缓存的最大安全字节上限。
+    pub fn open_with_cache_limit(
+        image: &Path,
+        entry: &InventoryEntry,
+        tsk: Option<&TskCli>,
+        max_cache_bytes: u64,
+    ) -> CoreResult<Self> {
         if entry.directory || entry.mode.starts_with("V/") {
             return Err(CoreError::InvalidInput(format!(
                 "{} 是目录，无法按文件内容预览。",
@@ -739,12 +759,28 @@ impl PreviewSession {
             });
         }
 
-        // 路由 2：未删除的大体积常规文件优先使用 `VolumeReader` 随机读取。
-        if entry.size >= RANDOM_READ_MIN_BYTES
-            && !entry.deleted
-            && entry.mode.starts_with("r/")
+        // 0 字节空文件无需打开卷读取器或创建临时缓存文件。
+        if entry.size == 0 {
+            return Ok(Self {
+                entry: entry.clone(),
+                backend: PreviewBackend::Empty,
+                checkpoint: None,
+            });
+        }
+
+        // 路由 2：放宽 8 MiB 限制，对普通常规文件与已删除 NTFS 文件均优先尝试
+        // 进程内 `VolumeReader` 直接随机读取（零子进程、零临时文件）；
+        // 若文件系统/属性不支持（如 FAT 删除记录、压缩/加密 NTFS 或未支持镜像格式），无缝回退至路由 3。
+        let can_try_direct = entry.size >= RANDOM_READ_MIN_BYTES
+            && ((!entry.deleted && entry.mode.starts_with("r/"))
+                || (entry.deleted
+                    && (entry.mode.starts_with("r/") || entry.mode.starts_with("-/r"))));
+        if can_try_direct
             && let Ok(mut vol) = VolumeReader::open(image)
             && vol.read_entry_at(entry, 0, 1).is_ok()
+            && (!entry.deleted
+                || entry.size <= 1
+                || vol.read_entry_at(entry, entry.size - 1, 1).is_ok())
         {
             return Ok(Self {
                 entry: entry.clone(),
@@ -756,20 +792,9 @@ impl PreviewSession {
             });
         }
 
-        // 路由 3：其余文件与已删除条目通过 `icat` 流式写入临时缓存文件。
+        // 路由 3：无法直读的文件与已删除条目通过 `icat` 流式写入临时缓存文件，
+        // 并强制受 `max_cache_bytes` 安全上限约束，防止 GB 级大文件写满 `%TEMP%`。
         let mut cache = tempfile::tempfile()?;
-        if entry.size == 0 {
-            return Ok(Self {
-                entry: entry.clone(),
-                backend: PreviewBackend::Cached {
-                    cache,
-                    total_size: 0,
-                    read_note: String::new(),
-                },
-                checkpoint: None,
-            });
-        }
-
         let discovered;
         let tool = match tsk {
             Some(t) => t,
@@ -778,12 +803,50 @@ impl PreviewSession {
                 &discovered
             }
         };
-        let (written, raw_note) = tool.stream_entry(image, entry, None, |chunk| {
-            cache.write_all(chunk)?;
+
+        let cap = max_cache_bytes.max(1);
+        let mut cached_written: u64 = 0;
+        let mut truncated = false;
+
+        let stream_res = tool.stream_entry(image, entry, None, |chunk| {
+            let remaining = cap.saturating_sub(cached_written);
+            if remaining == 0 {
+                // 已达到临时缓存安全上限，立即中止 `icat` 子进程。
+                truncated = true;
+                return Err(EngineError::Cancelled("preview_cache_limit".to_string()));
+            }
+            let take = (chunk.len() as u64).min(remaining) as usize;
+            if take > 0 {
+                cache.write_all(&chunk[..take])?;
+                cached_written += take as u64;
+            }
+            if take < chunk.len() || (cached_written == cap && entry.size > cap) {
+                // 超出或精确写满缓存上限且原始文件更长：仅保留安全前缀并中止 `icat`。
+                truncated = true;
+                return Err(EngineError::Cancelled("preview_cache_limit".to_string()));
+            }
             Ok(())
-        })?;
+        });
+
+        let (written, raw_note) = match stream_res {
+            Ok((w, note)) => (w, note),
+            Err(EngineError::Cancelled(_)) if truncated => (cached_written, String::new()),
+            Err(err) => return Err(err.into()),
+        };
         cache.flush()?;
-        let read_note = if entry.deleted && written < entry.size {
+
+        let read_note = if truncated {
+            let cap_note = format!(
+                "已按临时缓存上限截断预览（仅缓存前 {} / {} 字节，完整内容请导出查看）",
+                format_commas(written),
+                format_commas(entry.size)
+            );
+            if raw_note.is_empty() {
+                cap_note
+            } else {
+                format!("{cap_note} · {raw_note}")
+            }
+        } else if entry.deleted && written < entry.size {
             if raw_note.is_empty() {
                 format!("可读 {written} / {} 字节", entry.size)
             } else {
@@ -799,6 +862,7 @@ impl PreviewSession {
                 cache,
                 total_size: written,
                 read_note,
+                truncated,
             },
             checkpoint: None,
         })
@@ -806,6 +870,7 @@ impl PreviewSession {
 
     pub fn readable_size(&self) -> u64 {
         match &self.backend {
+            PreviewBackend::Empty => 0,
             PreviewBackend::Extents { total_size, .. } => *total_size,
             PreviewBackend::Volume { total_size, .. } => *total_size,
             PreviewBackend::Cached { total_size, .. } => *total_size,
@@ -819,6 +884,24 @@ impl PreviewSession {
         }
     }
 
+    /// 返回本次预览会话是否因触及路由 3 临时缓存上限而被安全截断。
+    pub fn is_truncated(&self) -> bool {
+        match &self.backend {
+            PreviewBackend::Cached { truncated, .. } => *truncated,
+            _ => false,
+        }
+    }
+
+    /// 返回当前会话使用的底层读取路由名称（`empty` / `extents` / `volume` / `icat_cache`）。
+    pub fn backend_name(&self) -> &'static str {
+        match &self.backend {
+            PreviewBackend::Empty => "empty",
+            PreviewBackend::Extents { .. } => "extents",
+            PreviewBackend::Volume { .. } => "volume",
+            PreviewBackend::Cached { .. } => "icat_cache",
+        }
+    }
+
     /// 精确读取 `[offset, offset + len)` 范围内的字节（自动截断至 `readable_size`）。
     pub fn read_at(&mut self, offset: u64, len: usize) -> CoreResult<Vec<u8>> {
         let total = self.readable_size();
@@ -827,6 +910,7 @@ impl PreviewSession {
         }
         let want = (total - offset).min(len as u64) as usize;
         match &mut self.backend {
+            PreviewBackend::Empty => Ok(Vec::new()),
             PreviewBackend::Extents {
                 file,
                 extents,
@@ -936,6 +1020,7 @@ impl PreviewSession {
             text,
             hex_rows,
             is_image_candidate: is_image,
+            truncated: self.is_truncated(),
         })
     }
 
@@ -971,6 +1056,21 @@ pub fn preview_entry_image(
     entry: &InventoryEntry,
     tsk: Option<&TskCli>,
 ) -> CoreResult<ImagePreviewResult> {
+    if entry.directory || entry.mode.starts_with("V/") {
+        return Err(CoreError::InvalidInput(format!(
+            "{} 是目录，无法按文件内容预览。",
+            entry.path
+        )));
+    }
+    if !image.is_file() {
+        return Err(CoreError::NotFound(format!(
+            "案件记录的镜像不存在：{}",
+            image.display()
+        )));
+    }
+    if entry.size > MAX_IMAGE_BYTES {
+        return Ok(decode_image_preview(&[], entry, ""));
+    }
     let mut session = PreviewSession::open(image, entry, tsk)?;
     session.read_image()
 }

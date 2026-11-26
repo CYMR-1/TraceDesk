@@ -16,6 +16,10 @@ export interface BusyTaskDialogProps {
   stageText: string;
   /** 确定进度百分比（0~100）；为 null 时展示不确定流动进度条 */
   progressPercent: number | null;
+  /** 请求取消当前正在执行的任务（可选） */
+  onCancelTasks?: () => void;
+  /** 是否正在取消中 */
+  cancelling?: boolean;
   /** 关闭弹窗回调 */
   onClose: () => void;
 }
@@ -25,6 +29,8 @@ export const BusyTaskDialog: React.FC<BusyTaskDialogProps> = ({
   taskNames,
   stageText,
   progressPercent,
+  onCancelTasks,
+  cancelling = false,
   onClose,
 }) => {
   const finished = taskNames.length === 0;
@@ -44,10 +50,20 @@ export const BusyTaskDialog: React.FC<BusyTaskDialogProps> = ({
   return (
     <Modal
       title={finished ? '任务已完成' : '正在处理'}
-      width={500}
+      width={520}
       onClose={onClose}
       footer={
         <>
+          {!finished && onCancelTasks && (
+            <button
+              type="button"
+              className="td-btn td-btn--warning"
+              disabled={cancelling}
+              onClick={onCancelTasks}
+            >
+              {cancelling ? '正在取消…' : '取消当前任务'}
+            </button>
+          )}
           <div className="td-modal-footer-spacer" />
           <button type="button" className="td-btn td-btn--accent" onClick={onClose} autoFocus>
             {finished ? '关闭' : '我知道了'}

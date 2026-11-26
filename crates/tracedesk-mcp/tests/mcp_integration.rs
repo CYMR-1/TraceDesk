@@ -1,5 +1,5 @@
 //! TraceDesk MCP 服务端端到端集成测试：
-//! - 全部 19 个 MCP 工具 + 2 个资源在真实 `evidence/demo.dd` 上的完整取证闭环
+//! - 全部 20 个 MCP 工具 + 2 个资源在真实 `evidence/demo.dd` 上的完整取证闭环
 //! - `origin="mcp"` 与 `origin="manual"` 审计链记录、筛选与篡改检测
 //! - ZIP64 复核包构建与原生验签
 //! - `case.lock` 并发冲突提示、单次调用立即释放锁与 `force_release_case_lock`
@@ -133,7 +133,7 @@ fn test_tool_catalog_resources_and_config_generation() {
     let server = create_server(Some(cases_dir.clone()), None);
 
     let tools = server.list_tools();
-    assert_eq!(tools.len(), 19);
+    assert_eq!(tools.len(), 20);
     assert_eq!(tools.len(), TOOL_CATALOG.len());
     for (def, cat) in tools.iter().zip(TOOL_CATALOG.iter()) {
         assert_eq!(def.name, cat.name);
@@ -911,7 +911,7 @@ fn test_stdio_jsonrpc_and_subprocess_end_to_end() {
     assert_eq!(lines[1]["id"].as_u64(), Some(2)); // ping 响应
     assert_eq!(
         lines[2]["result"]["tools"].as_array().map(Vec::len),
-        Some(19)
+        Some(20)
     );
     assert_eq!(
         lines[3]["result"]["resources"].as_array().map(Vec::len),
@@ -1067,7 +1067,7 @@ fn test_streamable_http_and_dns_rebinding_protection_end_to_end() {
     let snap = manager.status(Some(port), Some("MCP-HTTP".to_string()));
     assert!(snap.running);
     assert_eq!(snap.port, port);
-    assert_eq!(snap.tools.len(), 19);
+    assert_eq!(snap.tools.len(), 20);
 
     // 第二个管理器尝试绑定同一端口时必须返回端口占用错误
     let manager2 =
@@ -2296,4 +2296,483 @@ fn test_http_hardening_client_registry_and_input_validation_regressions() {
     );
     assert!(bad_bundle.is_error);
     assert!(bad_bundle.text().contains("从 1 开始"));
+}
+
+#[test]
+fn test_read_search_report_pagination_no_audit_and_path_traversal() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cases_dir = tmp.path().join("cases");
+    fs::create_dir_all(&cases_dir).expect("create cases_dir");
+    let (image_path, _) = prepare_demo_image(&tmp.path().join("evidence"));
+    let server = create_server(Some(cases_dir.clone()), None);
+
+    // 校验工具清单与工作流指南资源均已包含只读分页工具 `tracedesk_read_search_report`。
+    let tools = server.list_tools();
+    assert_eq!(tools.len(), 20);
+    let read_tool = tools
+        .iter()
+        .find(|t| t.name == "tracedesk_read_search_report")
+        .expect("应注册 tracedesk_read_search_report");
+    assert!(read_tool.annotations.read_only_hint);
+    assert!(read_tool.annotations.idempotent_hint);
+    let guide = server
+        .read_resource("tracedesk://guide/workflow")
+        .expect("读取工作流指南资源");
+    assert!(guide.text.contains("tracedesk_read_search_report"));
+
+    // 创建主案件与旁路案件（用于跨案件路径穿越拦截测试）。
+    let created = call_json(
+        &server,
+        "tracedesk_create_case",
+        json!({
+            "number": "SEARCH-PAGE-01",
+            "examiner": "测试员",
+            "target": "搜索报告只读翻页"
+        }),
+    );
+    let case_dir = created["case_dir"].as_str().expect("case_dir").to_string();
+    let other_created = call_json(
+        &server,
+        "tracedesk_create_case",
+        json!({
+            "number": "SEARCH-OTHER-02",
+            "examiner": "测试员",
+            "target": "隔离越界案件"
+        }),
+    );
+    let other_case_dir = other_created["case_dir"]
+        .as_str()
+        .expect("other case_dir")
+        .to_string();
+    let other_report = Path::new(&other_case_dir)
+        .join("reports")
+        .join("search_foreign.json");
+    fs::create_dir_all(other_report.parent().expect("reports parent")).expect("mkdir other reports");
+    fs::write(&other_report, "{}").expect("write foreign search report");
+
+    call_json(
+        &server,
+        "tracedesk_load_image",
+        json!({
+            "case_dir": case_dir,
+            "image_path": image_path.to_string_lossy(),
+            "scan_all": true
+        }),
+    );
+
+    // 1. 执行一次会产生多条命中的内容搜索（使用 limit=2 触发翻页提示）。
+    let search_md = call_text(
+        &server,
+        "tracedesk_search_content",
+        json!({
+            "case_dir": case_dir,
+            "query": "e",
+            "encoding": "UTF-8",
+            "limit": 2,
+            "offset": 0,
+            "response_format": "markdown"
+        }),
+    );
+    assert!(
+        search_md.contains("tracedesk_read_search_report"),
+        "Markdown 分页提示必须明确指引调用 tracedesk_read_search_report，实际：{search_md}"
+    );
+    assert!(
+        search_md.contains("offset=2"),
+        "Markdown 分页提示必须给出下一页 offset=2，实际：{search_md}"
+    );
+    assert!(
+        search_md.contains("reports/search_"),
+        "Markdown 分页提示必须包含 report_path，实际：{search_md}"
+    );
+
+    // 再执行一次 JSON 搜索获取 report_path、report_file 与首尾分页基准。
+    let first_page = call_json(
+        &server,
+        "tracedesk_search_content",
+        json!({
+            "case_dir": case_dir,
+            "query": "e",
+            "encoding": "UTF-8",
+            "limit": 2,
+            "offset": 0
+        }),
+    );
+    let total_hits = first_page["total"].as_u64().expect("total");
+    assert!(total_hits >= 5, "预期至少命中 5 条以验证多页翻页，实际：{total_hits}");
+    assert_eq!(first_page["count"].as_u64(), Some(2));
+    assert_eq!(first_page["has_more"].as_bool(), Some(true));
+    assert_eq!(first_page["next_offset"].as_u64(), Some(2));
+    let rel_report_path = first_page["report_path"]
+        .as_str()
+        .expect("report_path")
+        .to_string();
+    let abs_report_file = first_page["report_file"]
+        .as_str()
+        .expect("report_file")
+        .to_string();
+    assert!(rel_report_path.starts_with("reports/search_"));
+
+    // 记录只读翻页前的审计链条数与 reports/search_*.json 文件数。
+    let audit_before = verify_audit_chain_at(Path::new(&case_dir))
+        .expect("翻页前审计链校验")
+        .len();
+    let reports_dir = Path::new(&case_dir).join("reports");
+    let count_search_reports = || {
+        fs::read_dir(&reports_dir)
+            .expect("read reports dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+                name.starts_with("search_") && name.ends_with(".json")
+            })
+            .count()
+    };
+    let report_files_before = count_search_reports();
+
+    // 2. 使用相对路径翻页读取第 2 页（JSON 与 Markdown）及使用绝对路径读取第 1 页。
+    let page2 = call_json(
+        &server,
+        "tracedesk_read_search_report",
+        json!({
+            "case_dir": case_dir,
+            "report_path": rel_report_path,
+            "limit": 2,
+            "offset": 2
+        }),
+    );
+    assert_eq!(page2["total"].as_u64(), Some(total_hits));
+    assert_eq!(page2["count"].as_u64(), Some(2));
+    assert_eq!(page2["offset"].as_u64(), Some(2));
+    assert_eq!(page2["query"].as_str(), Some("e"));
+    assert_ne!(page2["items"], first_page["items"]);
+
+    let page1_abs = call_json(
+        &server,
+        "tracedesk_read_search_report",
+        json!({
+            "case_dir": case_dir,
+            "report_path": abs_report_file,
+            "limit": 2,
+            "offset": 0
+        }),
+    );
+    assert_eq!(page1_abs["items"], first_page["items"]);
+
+    let page2_md = call_text(
+        &server,
+        "tracedesk_read_search_report",
+        json!({
+            "case_dir": case_dir,
+            "report_path": rel_report_path,
+            "limit": 2,
+            "offset": 2,
+            "response_format": "markdown"
+        }),
+    );
+    assert!(page2_md.contains("# 内容搜索结果"));
+    assert!(page2_md.contains("tracedesk_read_search_report"));
+
+    // 关键不变式：只读翻页绝不新增审计记录，也绝不生成新的 search_*.json 文件。
+    let audit_after = verify_audit_chain_at(Path::new(&case_dir))
+        .expect("翻页后审计链校验")
+        .len();
+    assert_eq!(
+        audit_after, audit_before,
+        "tracedesk_read_search_report 不得写入新审计记录"
+    );
+    assert_eq!(
+        count_search_reports(),
+        report_files_before,
+        "tracedesk_read_search_report 不得生成新搜索报告文件"
+    );
+
+    // 3. 路径穿越与非法文件名拦截。
+    let non_search_file = reports_dir.join("notes.md");
+    fs::write(&non_search_file, "# not a search report").expect("write notes.md");
+
+    let other_folder_name = Path::new(&other_case_dir)
+        .file_name()
+        .expect("other folder name")
+        .to_string_lossy()
+        .into_owned();
+    let traversal_rel = format!("../{other_folder_name}/reports/search_foreign.json");
+    let other_abs = other_report.to_string_lossy().into_owned();
+
+    for bad_path in [
+        "../case.json",
+        "reports/../case.json",
+        "case.json",
+        traversal_rel.as_str(),
+        other_abs.as_str(),
+        "reports/notes.md",
+        "reports",
+    ] {
+        let out = server.call_tool(
+            "tracedesk_read_search_report",
+            json!({
+                "case_dir": case_dir,
+                "report_path": bad_path
+            }),
+        );
+        assert!(
+            out.is_error,
+            "越界或非法搜索报告路径 {bad_path} 必须被拒绝，实际返回：{}",
+            out.text()
+        );
+        assert!(
+            out.text().starts_with("Error (ValueError):"),
+            "预期 ValueError，实际：{bad_path} -> {}",
+            out.text()
+        );
+    }
+
+    // 不存在的合法 reports/search_*.json 返回 FileNotFoundError。
+    let missing = server.call_tool(
+        "tracedesk_read_search_report",
+        json!({
+            "case_dir": case_dir,
+            "report_path": "reports/search_00000000000000000000000000000000.json"
+        }),
+    );
+    assert!(missing.is_error);
+    assert!(
+        missing.text().starts_with("Error (FileNotFoundError):"),
+        "不存在的搜索报告应返回 FileNotFoundError，实际：{}",
+        missing.text()
+    );
+}
+
+#[test]
+fn test_desktop_http_transport_label_and_telemetry_caller_identity_alignment() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cases_dir = tmp.path().join("cases");
+    let logs_dir = tmp.path().join("logs");
+    fs::create_dir_all(&cases_dir).expect("mkdir cases");
+    fs::create_dir_all(&logs_dir).expect("mkdir logs");
+    let log_path = logs_dir.join(ACTIVITY_LOG_FILENAME);
+    let (image_path, _) = prepare_demo_image(&tmp.path().join("evidence"));
+
+    // 1. 通过 LocalHttpMcpManager::start（桌面端托管入口，保持既有签名）启动服务并配置 default_actor="王五"。
+    let port = free_local_port();
+    let manager = LocalHttpMcpManager::new(Some(cases_dir.clone()), Some("王五".to_string()))
+        .with_activity_sink(Arc::new(FileActivitySink::new(log_path.clone())));
+    let url = manager
+        .start("127.0.0.1", port, "/mcp")
+        .expect("启动桌面内嵌 HTTP MCP 服务");
+    assert_eq!(url, format!("http://127.0.0.1:{port}/mcp"));
+    let host_hdr = format!("127.0.0.1:{port}");
+
+    // 1a. 客户端以带版本号的名称 "Cursor 1.9.0" 握手初始化。
+    let (code_init, hdrs_init, _) = send_http(
+        port,
+        "POST",
+        "/mcp",
+        &[("Host", &host_hdr), ("Content-Type", "application/json")],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "clientInfo": { "name": "Cursor", "version": "1.9.0" }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code_init, 200);
+    let sid = hdrs_init
+        .get("mcp-session-id")
+        .cloned()
+        .expect("Mcp-Session-Id");
+
+    // 1b. 建案（未传 actor -> 使用 default_actor="王五" + "Cursor" => "王五 / Cursor"）。
+    let (code_create, _, body_create) = send_http(
+        port,
+        "POST",
+        "/mcp",
+        &[
+            ("Host", &host_hdr),
+            ("Content-Type", "application/json"),
+            ("Mcp-Session-Id", &sid),
+        ],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_create_case",
+                "arguments": {
+                    "number": "DESK-HTTP-01",
+                    "examiner": "王五",
+                    "target": "desktop-http 遥测对齐测试",
+                    "response_format": "json"
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code_create, 200);
+    let create_rpc: Value = serde_json::from_str(&body_create).expect("parse create rpc");
+    let created: Value = serde_json::from_str(
+        create_rpc["result"]["content"][0]["text"]
+            .as_str()
+            .expect("create text"),
+    )
+    .expect("create json");
+    let case_dir = created["case_dir"].as_str().expect("case_dir").to_string();
+    assert_eq!(created["mcp_client"].as_str(), Some("王五 / Cursor"));
+
+    // 1c. 加载镜像并传入入参 actor="张三" -> 覆盖 default_actor，审计与遥测均须为 "张三 / Cursor"。
+    let (code_load, _, _) = send_http(
+        port,
+        "POST",
+        "/mcp",
+        &[
+            ("Host", &host_hdr),
+            ("Content-Type", "application/json"),
+            ("Mcp-Session-Id", &sid),
+        ],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_load_image",
+                "arguments": {
+                    "case_dir": case_dir,
+                    "image_path": image_path.to_string_lossy(),
+                    "scan_all": true,
+                    "actor": "张三",
+                    "response_format": "json"
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code_load, 200);
+
+    // 1d. 携带非通用 User-Agent "ForensicBot/3.2" 且不带 session -> 去除末尾版本号后与 default_actor 合并为 "王五 / ForensicBot"。
+    let (code_note, _, body_note) = send_http(
+        port,
+        "POST",
+        "/mcp",
+        &[
+            ("Host", &host_hdr),
+            ("Content-Type", "application/json"),
+            ("User-Agent", "ForensicBot/3.2"),
+        ],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_record_finding",
+                "arguments": {
+                    "case_dir": case_dir,
+                    "path": "DOCS/CASE.TXT",
+                    "partition_offset": 2048,
+                    "note": "验证 desktop-http 与调用方名称一致性",
+                    "response_format": "json"
+                }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code_note, 200);
+    let note_rpc: Value = serde_json::from_str(&body_note).expect("parse note rpc");
+    let note_json: Value = serde_json::from_str(
+        note_rpc["result"]["content"][0]["text"]
+            .as_str()
+            .expect("note text"),
+    )
+    .expect("note json");
+    assert_eq!(note_json["mcp_client"].as_str(), Some("王五 / ForensicBot"));
+
+    manager.stop();
+
+    // 校验所有通过 LocalHttpMcpManager 产生的遥测事件：transport 均为 "desktop-http"，且 client 与 audit.jsonl 逐项一致。
+    let mut tailer = ActivityLogTailer::new(log_path.clone(), 0);
+    let desktop_events = tailer.poll_new_records();
+    assert_eq!(desktop_events.len(), 8, "4 次请求应产生 8 条 started/completed 事件");
+    assert!(
+        desktop_events.iter().all(|e| e.transport == "desktop-http"),
+        "LocalHttpMcpManager 发出的遥测事件 transport 必须全部为 desktop-http"
+    );
+
+    let completed_by_tool = |name: &str| {
+        desktop_events
+            .iter()
+            .find(|e| e.phase == "completed" && e.tool_name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("未找到工具 {name} 的 completed 遥测事件"))
+            .client
+            .clone()
+    };
+
+    let audit_records = verify_audit_chain_at(Path::new(&case_dir)).expect("校验审计链");
+    let audit_client_for = |action: &str| {
+        audit_records
+            .iter()
+            .find(|r| r.action == action)
+            .and_then(audit_mcp_user)
+            .unwrap_or_else(|| panic!("未找到审计动作 {action} 的 mcp_client"))
+    };
+
+    assert_eq!(completed_by_tool("tracedesk_create_case"), "王五 / Cursor");
+    assert_eq!(
+        completed_by_tool("tracedesk_create_case"),
+        audit_client_for("CASE_CREATE")
+    );
+    assert_eq!(completed_by_tool("tracedesk_load_image"), "张三 / Cursor");
+    assert_eq!(
+        completed_by_tool("tracedesk_load_image"),
+        audit_client_for("IMAGE_LOAD")
+    );
+    assert_eq!(
+        completed_by_tool("tracedesk_record_finding"),
+        "王五 / ForensicBot"
+    );
+    assert_eq!(
+        completed_by_tool("tracedesk_record_finding"),
+        audit_client_for("FILE_NOTE")
+    );
+
+    // 2. 验证独立 CLI 默认入口 McpHttpServerHandle::start 仍保持 transport="streamable-http"。
+    let standalone_port = free_local_port();
+    let standalone_server = create_server(Some(cases_dir), None)
+        .with_activity_sink(Arc::new(FileActivitySink::new(log_path)));
+    let mut standalone_handle =
+        McpHttpServerHandle::start(standalone_server, "127.0.0.1", standalone_port, "/mcp")
+            .expect("启动独立 streamable-http 服务");
+    assert_eq!(standalone_handle.transport_label(), "streamable-http");
+    let standalone_host = format!("127.0.0.1:{standalone_port}");
+    let (code_list, _, _) = send_http(
+        standalone_port,
+        "POST",
+        "/mcp",
+        &[("Host", &standalone_host), ("Content-Type", "application/json")],
+        &json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedesk_list_cases",
+                "arguments": { "response_format": "json" }
+            }
+        })
+        .to_string(),
+    );
+    assert_eq!(code_list, 200);
+    standalone_handle.stop();
+
+    let standalone_events = tailer.poll_new_records();
+    assert_eq!(standalone_events.len(), 2);
+    assert!(
+        standalone_events
+            .iter()
+            .all(|e| e.transport == "streamable-http"),
+        "独立 McpHttpServerHandle::start 应默认保持 transport=streamable-http"
+    );
 }

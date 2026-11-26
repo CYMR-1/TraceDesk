@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
@@ -609,7 +610,7 @@ impl TskCli {
     fn run_text(&self, cmd: TskCommand, args: Vec<OsString>, timeout: Duration) -> EngineResult<String> {
         let bytes = self.run_captured(cmd, args, timeout)?;
         if cmd == TskCommand::Fls {
-            decode_acp_strict(&bytes)
+            Ok(decode_fls_line(&bytes).0.into_owned())
         } else {
             Ok(decode_acp_lossy(&bytes))
         }
@@ -952,36 +953,17 @@ impl TskCli {
 
         stdout_tmp.seek(SeekFrom::Start(0))?;
         let mut reader = BufReader::with_capacity(256 * 1024, stdout_tmp);
-        let mut entries = Vec::new();
-        let mut raw_line = Vec::with_capacity(512);
-        let mut line_index: usize = 0;
-
-        loop {
-            if line_index.is_multiple_of(2048) && cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
-                return Err(EngineError::Cancelled("已取消建立索引".to_string()));
-            }
-            raw_line.clear();
-            let n = reader.read_until(b'\n', &mut raw_line)?;
-            if n == 0 {
-                break;
-            }
-            while matches!(raw_line.last(), Some(b'\n' | b'\r')) {
-                raw_line.pop();
-            }
-            // 纯 ASCII 行零拷贝快速路径：直接以 &str 解析，跳过 Win32 宽字符解码与堆分配。
-            let entry = if raw_line.is_ascii() {
-                let ascii_line =
-                    std::str::from_utf8(&raw_line).expect("ASCII 字节必为有效 UTF-8");
-                parse_bodyfile_line(ascii_line, offset, deleted)?
-            } else {
-                let decoded = decode_acp_strict(&raw_line)?;
-                parse_bodyfile_line(&decoded, offset, deleted)?
-            };
-            entries.push(entry);
-            line_index += 1;
+        let summary = parse_fls_bodyfile_reader(&mut reader, offset, deleted, cancel)?;
+        if summary.skipped_lines > 0 || summary.lossy_decoded_lines > 0 {
+            eprintln!(
+                "[tracedesk-engines::tsk] fls(offset={offset}, deleted={deleted}) 解析汇总：有效条目 {}，跳过异常行 {}，有损解码行 {}",
+                summary.entries.len(),
+                summary.skipped_lines,
+                summary.lossy_decoded_lines
+            );
         }
 
-        Ok(entries)
+        Ok(summary.entries)
     }
 
     /// 为指定的 `(offset, inode)` 组合构造 `icat` 参数。
@@ -1456,6 +1438,85 @@ pub fn parse_mmls_output(raw: &str) -> Vec<PartitionInfo> {
         }
     }
     partitions
+}
+
+/// `fls` bodyfile 流式解析汇总结果，保留有效条目以及单行容错统计。
+#[derive(Debug, Clone, Default)]
+pub struct FlsParseSummary {
+    /// 成功解析的目录与文件条目列表。
+    pub entries: Vec<InventoryEntry>,
+    /// 因格式异常而被优雅跳过的非空行数。
+    pub skipped_lines: usize,
+    /// 经由有损编码降级解码的行数（用于诊断损坏或混合编码文件名）。
+    pub lossy_decoded_lines: usize,
+}
+
+/// 将 `fls` 单行原始字节解码为字符串，并返回 `(解码结果, 是否触发有损降级)`：
+/// 1. 优先零拷贝 `std::str::from_utf8`（同时覆盖纯 ASCII 及 UTF-8 中文/日韩文/Emoji 文件名）；
+/// 2. 若非有效 UTF-8，回退 Windows `CP_ACP` 严格解码；
+/// 3. 若仍失败，仅对该单行采用 `String::from_utf8_lossy` 有损降级解码（既保留合法 UTF-8 片段，
+///    也避免 DBCS 孤立高位字节吞掉后续 ASCII 分隔符 `|`），防止损坏文件名中断整盘扫描。
+pub fn decode_fls_line(raw_line: &[u8]) -> (Cow<'_, str>, bool) {
+    if let Ok(utf8) = std::str::from_utf8(raw_line) {
+        return (Cow::Borrowed(utf8), false);
+    }
+    if let Ok(acp) = decode_acp_strict(raw_line) {
+        return (Cow::Owned(acp), false);
+    }
+    (String::from_utf8_lossy(raw_line), true)
+}
+
+/// 从 `fls -m /` 原始字节流中逐行解码并容错解析 bodyfile 条目：
+/// 保留 [`parse_bodyfile_line`] 的严格字段边界校验，遇到单条格式异常行时优雅跳过并计数，
+/// 确保不会因个别损坏记录中断整盘分区索引。
+pub fn parse_fls_bodyfile_reader<R: BufRead>(
+    reader: &mut R,
+    offset: u64,
+    deleted: bool,
+    cancel: Option<&AtomicBool>,
+) -> EngineResult<FlsParseSummary> {
+    let mut entries = Vec::new();
+    let mut skipped_lines: usize = 0;
+    let mut lossy_decoded_lines: usize = 0;
+    let mut raw_line = Vec::with_capacity(512);
+    let mut line_index: usize = 0;
+
+    loop {
+        if line_index.is_multiple_of(2048) && cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            return Err(EngineError::Cancelled("已取消建立索引".to_string()));
+        }
+        raw_line.clear();
+        let n = reader.read_until(b'\n', &mut raw_line)?;
+        if n == 0 {
+            break;
+        }
+        while matches!(raw_line.last(), Some(b'\n' | b'\r')) {
+            raw_line.pop();
+        }
+        if raw_line.is_empty() {
+            line_index += 1;
+            continue;
+        }
+
+        let (decoded, used_lossy) = decode_fls_line(&raw_line);
+        if used_lossy {
+            lossy_decoded_lines += 1;
+        }
+        match parse_bodyfile_line(&decoded, offset, deleted) {
+            Ok(entry) => entries.push(entry),
+            Err(_) => {
+                // 单条 bodyfile 格式异常仅记录计数并优雅跳过，不中断其余条目解析。
+                skipped_lines += 1;
+            }
+        }
+        line_index += 1;
+    }
+
+    Ok(FlsParseSummary {
+        entries,
+        skipped_lines,
+        lossy_decoded_lines,
+    })
 }
 
 /// 解析单行 `fls -m /` bodyfile 输出，与 `forensic/engines/tsk.py::_body_entries` 行为一致。

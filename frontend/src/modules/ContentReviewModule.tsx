@@ -21,6 +21,14 @@ import {
 } from '../types/ipc';
 import { formatError } from '../utils/assets';
 
+export interface ContentSearchLiveState {
+  searching: boolean;
+  searchId: string | null;
+  stageText: string;
+  percent: number | null;
+  hitCount: number;
+}
+
 interface ContentReviewModuleProps {
   snapshot: CaseSnapshot | null;
   selectedBrowserEntry: EntryView | null;
@@ -28,6 +36,8 @@ interface ContentReviewModuleProps {
   singleFileRequestToken: number;
   busy: boolean;
   onSearchingChange: (searching: boolean) => void;
+  /** 将后台内容搜索实时状态同步给主工作台底栏进度条与标签微点 */
+  onSearchLiveStateChange?: (state: ContentSearchLiveState) => void;
   onSnapshotUpdated: (snapshot: CaseSnapshot) => void;
   onAlert: (title: string, message: string, tone?: 'info' | 'warning' | 'error') => void;
 }
@@ -42,6 +52,7 @@ const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
   singleFileRequestToken,
   busy,
   onSearchingChange,
+  onSearchLiveStateChange,
   onSnapshotUpdated,
   onAlert,
 }) => {
@@ -58,6 +69,12 @@ const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
   const [progress, setProgress] = useState<SearchProgressEvent | null>(null);
   const [finishedInfo, setFinishedInfo] = useState<SearchFinishedEvent | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  // 历史搜索记录回放与命中二次筛查状态
+  const [selectedHistoryReport, setSelectedHistoryReport] = useState('');
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [pathFilter, setPathFilter] = useState('');
+  const [deletedFilter, setDeletedFilter] = useState<'all' | 'active' | 'deleted'>('all');
 
   const [hits, setHits] = useState<SearchHitDto[]>([]);
   const [offsetOptions, setOffsetOptions] = useState<string[]>([]);
@@ -141,6 +158,10 @@ const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
       setProgress(null);
       setFinishedInfo(null);
       setNotice(null);
+      setSelectedHistoryReport('');
+      setLoadingHistory(false);
+      setPathFilter('');
+      setDeletedFilter('all');
     }
   }, [snapshot?.id, onSearchingChange, cancelScheduledFlush]);
 
@@ -189,6 +210,9 @@ const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
       setCancelling(false);
       onSearchingChange(false);
       setFinishedInfo(ev);
+      if (ev.reportName) {
+        setSelectedHistoryReport(ev.reportName);
+      }
       if (ev.snapshot) {
         onSnapshotUpdated(ev.snapshot);
       }
@@ -283,13 +307,22 @@ const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
       .map(String);
   }, [excludedSet.size, offsetOptions, retainedHits]);
 
-  // 当前可见命中（已应用分区偏移表头筛选）
+  // 当前可见命中（依次应用分区偏移表头筛选、路径关键词过滤与已删除状态筛选）
   const visibleHits = useMemo(() => {
     const offsetFilter = activeFilters.offset ?? [];
-    if (offsetFilter.length === 0) return retainedHits;
-    const allow = new Set(offsetFilter);
-    return retainedHits.filter((h) => allow.has(String(h.offset)));
-  }, [retainedHits, activeFilters.offset]);
+    const allowOffsets = offsetFilter.length > 0 ? new Set(offsetFilter) : null;
+    const kw = pathFilter.trim().toLowerCase();
+    if (!allowOffsets && !kw && deletedFilter === 'all') {
+      return retainedHits;
+    }
+    return retainedHits.filter((h) => {
+      if (allowOffsets && !allowOffsets.has(String(h.offset))) return false;
+      if (deletedFilter === 'deleted' && !h.deleted) return false;
+      if (deletedFilter === 'active' && Boolean(h.deleted)) return false;
+      if (kw && !h.path.toLowerCase().includes(kw)) return false;
+      return true;
+    });
+  }, [retainedHits, activeFilters.offset, pathFilter, deletedFilter]);
 
   const visibleCheckedCount = useMemo(() => {
     // 未勾选任何命中时 O(1) 短路返回，避免流式增长期间每批全表遍历
@@ -370,6 +403,9 @@ const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
     setProgress(null);
     setFinishedInfo(null);
     setNotice(null);
+    setSelectedHistoryReport('');
+    setPathFilter('');
+    setDeletedFilter('all');
 
     try {
       const res = await tauriApi.startContentSearch({
@@ -441,6 +477,83 @@ const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
     });
     const remaining = Math.max(0, retainedHits.length - targets.length);
     setNotice(`已从本次搜索中排除 ${targets.length} 项，当前保留 ${remaining} 项。`);
+  };
+
+  /** 恢复所有已排除的命中项 */
+  const handleRestoreExcluded = () => {
+    const count = excludedSet.size;
+    if (count === 0) return;
+    setExcludedSet(new Set());
+    setNotice(`已恢复 ${count} 条已排除的命中项。`);
+  };
+
+  /** 回放选中的历史内容搜索记录（reports/search_*.json） */
+  const handleLoadHistoryRecord = async (reportName: string) => {
+    setSelectedHistoryReport(reportName);
+    if (!reportName) return;
+    if (starting || searching) {
+      onAlert('提示', '请先等待或取消当前正在进行的内容搜索，再回放历史记录。', 'info');
+      return;
+    }
+    const meta = (snapshot?.searchRecords ?? []).find((r) => r.reportName === reportName);
+    setLoadingHistory(true);
+    setNotice(null);
+    try {
+      const loadedHits = await tauriApi.loadSearchRecord({ reportName });
+      const offsets = Array.from(new Set(loadedHits.map((h) => h.offset)))
+        .sort((a, b) => a - b)
+        .map(String);
+      seenOffsetsRef.current = new Set(loadedHits.map((h) => h.offset));
+      setHits(loadedHits);
+      setOffsetOptions(offsets);
+      setExcludedSet(new Set());
+      setCheckedSet(new Set());
+      setSelectedHitIndex(null);
+      setActiveFilters({});
+      setPathFilter('');
+      setDeletedFilter('all');
+      setPreviewHit(null);
+      setProgress(null);
+
+      // 绑定后端已注册的 replay:<reportName> 会话，回放命中亦可直接保存为取证发现
+      const replaySid = `replay:${reportName}`;
+      activeSearchIdRef.current = replaySid;
+      setSearchId(replaySid);
+      if (meta) {
+        setQuery(meta.query);
+        const enc = (SEARCH_ENCODINGS.includes(meta.encoding as SearchEncoding)
+          ? meta.encoding
+          : 'UTF-8') as SearchEncoding;
+        setEncoding(enc);
+        setActiveEncoding(enc);
+        setNeedleHex(meta.query);
+        setFinishedInfo({
+          searchId: replaySid,
+          status: `历史回放（${meta.status}）`,
+          visited: meta.visited,
+          eligible: meta.eligible,
+          totalHits: loadedHits.length,
+          errorsCount: meta.failed,
+          verification: `记录时间 ${meta.time}`,
+          reportName: meta.reportName,
+        });
+      } else {
+        setFinishedInfo({
+          searchId: replaySid,
+          status: '历史回放',
+          visited: loadedHits.length,
+          eligible: loadedHits.length,
+          totalHits: loadedHits.length,
+          errorsCount: 0,
+          reportName,
+        });
+      }
+      setNotice(`已加载历史搜索记录 reports/${reportName}（共 ${loadedHits.length} 条命中）。`);
+    } catch (err) {
+      onAlert('加载历史搜索记录失败', formatError(err), 'error');
+    } finally {
+      setLoadingHistory(false);
+    }
   };
 
   const handleBookmarkSelected = async () => {
@@ -567,6 +680,36 @@ const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
       ? Math.min(100, Math.round((100 * progress.done) / progress.total))
       : null;
 
+  // 将后台内容搜索实时进度同步给主工作台底栏与标签微点，切页后仍可随时观察与取消
+  useEffect(() => {
+    if (!onSearchLiveStateChange) return;
+    if (!searching) {
+      onSearchLiveStateChange({
+        searching: false,
+        searchId: null,
+        stageText: '',
+        percent: null,
+        hitCount: 0,
+      });
+      return;
+    }
+    const stageText =
+      progress && progress.total > 0 && percent !== null
+        ? `后台内容搜索 · ${progress.stage} ${percent}% · 已命中 ${retainedHits.length} 条`
+        : progress
+          ? `后台内容搜索 · ${progress.stage}… · 已命中 ${retainedHits.length} 条`
+          : `后台内容搜索中 · 已命中 ${retainedHits.length} 条`;
+    onSearchLiveStateChange({
+      searching: true,
+      searchId: activeSearchIdRef.current ?? searchId,
+      stageText,
+      percent,
+      hitCount: retainedHits.length,
+    });
+  }, [onSearchLiveStateChange, searching, searchId, progress, percent, retainedHits.length]);
+
+  const historyRecords = snapshot?.searchRecords ?? [];
+
   const tableFilterOptions = useMemo(
     () => ({ offset: effectiveOffsetOptions }),
     [effectiveOffsetOptions]
@@ -675,6 +818,17 @@ const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
           {visibleCheckedCount > 0 ? `排除所选项 (${visibleCheckedCount})` : '排除所选项'}
         </button>
 
+        {excludedSet.size > 0 && (
+          <button
+            type="button"
+            className="td-btn"
+            title="恢复全部已排除的命中项"
+            onClick={handleRestoreExcluded}
+          >
+            恢复已排除项 ({excludedSet.size})
+          </button>
+        )}
+
         <button
           type="button"
           className="td-btn td-btn--soft"
@@ -688,6 +842,78 @@ const ContentReviewModuleInner: React.FC<ContentReviewModuleProps> = ({
               ? `保存为取证发现 (${visibleCheckedCount})`
               : '保存为取证发现'}
         </button>
+      </div>
+
+      {/* 历史搜索回放 + 命中结果二次筛查工具条 */}
+      <div className="td-panel-sub-bar td-review-secondary-bar">
+        <select
+          className="td-select"
+          style={{ minWidth: 210, maxWidth: 320 }}
+          aria-label="历史搜索记录回放"
+          value={selectedHistoryReport}
+          disabled={isBusySearching || loadingHistory || !snapshot || historyRecords.length === 0}
+          onChange={(e) => void handleLoadHistoryRecord(e.target.value)}
+        >
+          <option value="">
+            {loadingHistory
+              ? '正在加载历史搜索记录…'
+              : historyRecords.length > 0
+                ? `历史搜索记录回放 (${historyRecords.length} 条)`
+                : '暂无历史搜索记录'}
+          </option>
+          {historyRecords.map((rec) => (
+            <option key={rec.reportName} value={rec.reportName}>
+              {`${rec.query || '(空)'} [${rec.encoding}] · ${rec.hits} 命中 · ${rec.time}`}
+            </option>
+          ))}
+        </select>
+
+        <div className="td-toolbar-divider" />
+
+        <div className="td-search-box" style={{ maxWidth: 260 }}>
+          <span className="td-search-box-icon">
+            <UiIcon name="search" size={13} color="var(--text-muted)" />
+          </span>
+          <input
+            type="text"
+            className="td-input"
+            style={{ height: 28, minHeight: 28, fontSize: 12 }}
+            placeholder="二次筛查：按路径关键词过滤命中"
+            aria-label="命中路径关键词过滤"
+            value={pathFilter}
+            disabled={hits.length === 0}
+            onChange={(e) => setPathFilter(e.target.value)}
+          />
+          {pathFilter && (
+            <button
+              type="button"
+              className="td-search-clear"
+              aria-label="清空路径过滤"
+              onClick={() => setPathFilter('')}
+            >
+              ×
+            </button>
+          )}
+        </div>
+
+        <select
+          className="td-select"
+          style={{ minWidth: 112, height: 28, minHeight: 28, fontSize: 12 }}
+          aria-label="命中文件删除状态筛选"
+          value={deletedFilter}
+          disabled={hits.length === 0}
+          onChange={(e) => setDeletedFilter(e.target.value as 'all' | 'active' | 'deleted')}
+        >
+          <option value="all">全部状态</option>
+          <option value="active">仅现存文件</option>
+          <option value="deleted">仅已删除</option>
+        </select>
+
+        {(pathFilter || deletedFilter !== 'all') && (
+          <span className="td-muted-text" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
+            筛查显示 {visibleHits.length}/{retainedHits.length} 条
+          </span>
+        )}
       </div>
 
       <div className="td-panel-sub-bar">
