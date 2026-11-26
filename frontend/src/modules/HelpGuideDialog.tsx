@@ -2,7 +2,7 @@
  * 模块 8：图文操作说明弹窗 (help)
  * 内置 9 个分步取证主题、红色 ①–⑤ 标注、真实桌面引导图与 Lightbox 大图查看器。
  */
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { UiIcon } from '../components/Icons';
 import { LightboxDialog } from '../components/dialogs/LightboxDialog';
 import { Modal } from '../components/dialogs/Modal';
@@ -262,6 +262,13 @@ export const HelpGuideDialog: React.FC<HelpGuideDialogProps> = ({ onClose }) => 
   const page = GUIDE_PAGES[index];
   const imgSrc = assetUrl(page.image);
 
+  /** 切换操作主题页时自动将右侧滚动条重置回顶部，确保第一时间看到标题与完整引导图 */
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = 0;
+    }
+  }, [index]);
+
   const goTo = (nextIdx: number) => {
     if (nextIdx < 0 || nextIdx >= GUIDE_PAGES.length) return;
     setIndex(nextIdx);
@@ -275,8 +282,8 @@ export const HelpGuideDialog: React.FC<HelpGuideDialogProps> = ({ onClose }) => 
       <Modal
         title="TraceDesk 分步操作引导"
         subtitle="对照真实界面编号标注（①–⑤）快速定位控件 · 点击引导图可放大查看"
-        width="min(1040px, 92vw)"
-        height="min(720px, 88vh)"
+        width="min(1080px, 92vw)"
+        height="min(780px, 88vh)"
         flushBody
         onClose={onClose}
         footer={
@@ -333,33 +340,49 @@ export const HelpGuideDialog: React.FC<HelpGuideDialogProps> = ({ onClose }) => 
           </aside>
 
           <div ref={scrollRef} className="td-guide-content">
-            <h2 className="td-guide-page-title">
-              {index + 1}. {page.title}
-            </h2>
-            <p className="td-guide-page-summary">{page.summary}</p>
+            <div className="td-guide-flow">
+              <header className="td-guide-header">
+                <h2 className="td-guide-page-title">
+                  {index + 1}. {page.title}
+                </h2>
+                <p className="td-guide-page-summary">{page.summary}</p>
+              </header>
 
-            <div className="td-guide-figure">
-              <div
-                className="td-guide-figure-canvas"
-                title="点击放大查看高清引导图"
-                onClick={() => setLightboxOpen(true)}
-              >
-                <img src={imgSrc} alt={page.caption} />
-              </div>
-              <div className="td-guide-figure-footer">
-                <span>{page.caption}</span>
-                <button
-                  type="button"
-                  className="td-btn td-btn--compact"
+              <figure className="td-guide-figure">
+                <div
+                  className="td-guide-figure-canvas"
+                  role="button"
+                  tabIndex={0}
+                  title="点击放大查看高清引导图"
                   onClick={() => setLightboxOpen(true)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setLightboxOpen(true);
+                    }
+                  }}
                 >
-                  <UiIcon name="search" size={12} color="var(--text-secondary)" />
-                  查看大图
-                </button>
-              </div>
-            </div>
+                  <img key={imgSrc} src={imgSrc} alt={page.caption} />
+                  <span className="td-guide-zoom-badge" aria-hidden="true">
+                    <UiIcon name="search" size={11} color="var(--accent-soft-text)" />
+                    点击查看大图
+                  </span>
+                </div>
+                <figcaption className="td-guide-figure-footer">
+                  <span className="td-guide-figure-caption">{page.caption}</span>
+                  <button
+                    type="button"
+                    className="td-btn td-btn--compact"
+                    onClick={() => setLightboxOpen(true)}
+                  >
+                    <UiIcon name="search" size={12} color="var(--text-secondary)" />
+                    查看大图
+                  </button>
+                </figcaption>
+              </figure>
 
-            <GuideContent markdown={page.content} />
+              <GuideContent markdown={page.content} />
+            </div>
           </div>
         </div>
       </Modal>

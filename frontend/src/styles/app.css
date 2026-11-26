@@ -2183,6 +2183,8 @@
 .td-guide-nav {
   width: 226px;
   min-width: 226px;
+  min-height: 0;
+  flex-shrink: 0;
   background: var(--chrome-bg);
   border-right: 1px solid var(--border-pane);
   display: flex;
@@ -2238,62 +2240,146 @@
   background: var(--accent);
 }
 
+/* 右侧整体纵向滚动区：采用块级滚动容器 + 内部流式排版，彻底杜绝 Flex 收缩折叠引导图 */
 .td-guide-content {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   overflow-y: auto;
-  padding: 18px 24px 22px 24px;
+  overflow-x: hidden;
+  padding: 20px 26px 26px 26px;
   background: var(--surface-bg);
+  display: block;
+}
+
+.td-guide-flow {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
+}
+
+.td-guide-header {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .td-guide-page-title {
   margin: 0;
   font-size: 18px;
   font-weight: 700;
+  line-height: 1.35;
   color: var(--text-primary);
 }
 
 .td-guide-page-summary {
   margin: 0;
   font-size: 12.5px;
+  line-height: 1.55;
   color: var(--text-muted);
 }
 
+/* 引导图卡片：显式禁止收缩，保留瓷白浅蓝描边与轻柔层次阴影 */
 .td-guide-figure {
+  margin: 0;
+  flex-shrink: 0;
   background: var(--surface-bg);
-  border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border: 1px solid #C8DCF0;
+  border-radius: 10px;
+  box-shadow: 0 2px 10px rgba(38, 116, 196, 0.08), 0 1px 3px rgba(15, 23, 42, 0.04);
   overflow: hidden;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.td-guide-figure:hover {
+  border-color: #9BC1E8;
+  box-shadow: 0 4px 14px rgba(38, 116, 196, 0.13), 0 1px 4px rgba(15, 23, 42, 0.05);
 }
 
 .td-guide-figure-canvas {
-  background: var(--surface-tint);
-  padding: 8px;
+  position: relative;
+  background: linear-gradient(180deg, #F8FBFF 0%, #F1F6FC 100%);
+  padding: 10px;
   display: flex;
+  align-items: center;
   justify-content: center;
   cursor: zoom-in;
+  outline: none;
+}
+
+.td-guide-figure-canvas:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--border-focus);
 }
 
 .td-guide-figure-canvas img {
-  max-width: 100%;
-  max-height: 390px;
-  object-fit: contain;
   display: block;
+  width: 100%;
+  height: auto;
+  max-height: 360px;
+  object-fit: contain;
+  border-radius: 5px;
+}
+
+/* 右上角轻巧“点击查看大图”提示角标 */
+.td-guide-zoom-badge {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--accent-soft-border);
+  color: var(--accent-soft-text);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.3;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+  opacity: 0.88;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+
+.td-guide-figure-canvas:hover .td-guide-zoom-badge {
+  opacity: 1;
+  background: #FFFFFF;
 }
 
 .td-guide-figure-footer {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 7px 12px;
+  gap: 10px;
+  padding: 8px 12px;
   background: var(--chrome-bg);
   border-top: 1px solid var(--border-subtle);
   font-size: 12px;
   color: var(--text-muted);
+}
+
+.td-guide-figure-caption {
+  min-width: 0;
+  line-height: 1.45;
+}
+
+.td-guide-content .td-guide-article {
+  flex-shrink: 0;
+}
+
+/* 矮窗（如 1280×720）下微调引导图最大高度与内边距，兼顾图片完整清晰与首屏正文可见 */
+@media (max-height: 760px) {
+  .td-guide-content {
+    padding: 16px 22px 22px 22px;
+  }
+
+  .td-guide-figure-canvas img {
+    max-height: 290px;
+  }
 }
 
 /* 高清图片放大查看器 (Lightbox) */
