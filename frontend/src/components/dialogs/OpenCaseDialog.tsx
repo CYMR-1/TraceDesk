@@ -6,7 +6,7 @@
 import React, { useEffect, useState } from 'react';
 import { tauriApi } from '../../api/tauri';
 import type { CaseSnapshot, RecentCaseDto } from '../../types/ipc';
-import { formatError } from '../../utils/assets';
+import { formatCaseTimestamp, formatError } from '../../utils/assets';
 import { UiIcon } from '../Icons';
 import { Modal } from './Modal';
 
@@ -192,7 +192,9 @@ export const OpenCaseDialog: React.FC<OpenCaseDialogProps> = ({
                       {item.created && (
                         <>
                           <span>·</span>
-                          <span className="td-mono">{item.created}</span>
+                          <span className="td-mono" title={item.created}>
+                            {formatCaseTimestamp(item.created)}
+                          </span>
                         </>
                       )}
                     </div>
