@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 
 # Release 编译体积与性能平衡配置：全链路 LTO + 去符号 + 体积优先 + abort

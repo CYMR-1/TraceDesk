@@ -17,7 +17,7 @@
 | `demo.dd` 端到端闭环总耗时（含真实 TSK） | 1,535.75 ms | **727.74 ms** | **2.11×** |
 | 纯 Rust EWF1 多段并行校验 / SIMD 搜索吞吐 | — | **501.69 MiB/s** / **14.44 GiB/s** | 原生并发 |
 
-三大 Release 原生二进制体积紧凑（启用 LTO、符号裁剪、WebP 引导图与可选 `image-preview` 特性）：`tracedesk-desktop.exe` **8.80 MiB**（已内嵌 `frontend/dist` 生产资源）、`tracedesk-mcp.exe` **3.18 MiB**、`tracedesk-cli.exe` **2.72 MiB**。
+三大 Release 原生二进制体积紧凑（启用 LTO、符号裁剪、WebP 引导图与可选 `image-preview` 特性）：`tracedesk-desktop.exe` **8.98 MiB**（已内嵌 `frontend/dist` 生产资源）、`tracedesk-mcp.exe` **3.39 MiB**、`tracedesk-cli.exe` **2.89 MiB**。
 
 ## 目录导航
 

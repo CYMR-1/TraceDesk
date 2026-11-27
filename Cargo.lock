@@ -4137,7 +4137,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracedesk-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "adler2",
  "flate2",
@@ -4155,7 +4155,7 @@ dependencies = [
 
 [[package]]
 name = "tracedesk-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4177,7 +4177,7 @@ dependencies = [
 
 [[package]]
 name = "tracedesk-desktop"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "memchr",
  "rayon",
@@ -4196,7 +4196,7 @@ dependencies = [
 
 [[package]]
 name = "tracedesk-engines"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "adler2",
  "flate2",
@@ -4214,7 +4214,7 @@ dependencies = [
 
 [[package]]
 name = "tracedesk-mcp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "lru",
  "serde",
