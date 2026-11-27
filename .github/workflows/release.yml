@@ -1,0 +1,208 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 Git 标签（如 v1.0.0；留空自动选取最新 v* 标签）'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  release:
+    name: Build & Publish Windows Release
+    runs-on: windows-latest
+    steps:
+      - name: 检出仓库完整历史与标签
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 解析目标标签并检出对应代码快照
+        id: resolve_tag
+        run: |
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          if ("${{ github.event_name }}" -eq "push") {
+            $tag = "${{ github.ref_name }}"
+          } else {
+            $tag = "${{ inputs.tag }}".Trim()
+            if ([string]::IsNullOrWhiteSpace($tag)) {
+              $tag = (git describe --tags --abbrev=0 --match "v*" 2>$null | Out-String).Trim()
+            }
+          }
+
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            throw "未能解析到目标版本标签，请手动输入如 v1.0.0。"
+          }
+
+          git rev-parse --verify "refs/tags/$tag" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            throw "Git 标签 '$tag' 不存在，请先创建并推送该标签。"
+          }
+
+          git checkout --force "refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) {
+            throw "检出标签 '$tag' 失败。"
+          }
+
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "已锁定发布标签：$tag"
+
+      - name: 配置 Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装前端依赖并构建生产资源
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: 配置 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: 恢复 Rust 构建缓存
+        uses: Swatinem/rust-cache@v2
+
+      - name: 运行静态检查、全工作区测试与 Release 编译
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          cargo test --workspace
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          cargo build --release --workspace
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 打包 Windows 便携发行包与 SHA-256 校验清单
+        run: |
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $tag = "${{ steps.resolve_tag.outputs.tag }}"
+          $packageName = "TraceDesk-$tag-windows-x64"
+          $stagingDir = Join-Path "release-staging" $packageName
+          $assetsDir = "release-assets"
+
+          if (Test-Path "release-staging") { Remove-Item -Recurse -Force "release-staging" }
+          if (Test-Path $assetsDir) { Remove-Item -Recurse -Force $assetsDir }
+
+          New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $stagingDir "cases") | Out-Null
+          New-Item -ItemType Directory -Force -Path $assetsDir | Out-Null
+
+          # 1. 三大原生 Release 二进制
+          $binaries = @(
+            "target\release\tracedesk-desktop.exe",
+            "target\release\tracedesk-mcp.exe",
+            "target\release\tracedesk-cli.exe"
+          )
+          foreach ($bin in $binaries) {
+            if (-not (Test-Path $bin)) {
+              throw "缺少 Release 产物：$bin"
+            }
+            Copy-Item -Path $bin -Destination $stagingDir -Force
+            Copy-Item -Path $bin -Destination $assetsDir -Force
+          }
+
+          # 2. 官方 Sleuth Kit 4.15.0（含 DLL 与 licenses/）、演示夹具、cases/.gitkeep 及说明文档
+          Copy-Item -Path "tools" -Destination (Join-Path $stagingDir "tools") -Recurse -Force
+          Copy-Item -Path "evidence" -Destination (Join-Path $stagingDir "evidence") -Recurse -Force
+          if (Test-Path "cases\.gitkeep") {
+            Copy-Item -Path "cases\.gitkeep" -Destination (Join-Path $stagingDir "cases\.gitkeep") -Force
+          }
+          foreach ($doc in @("README.md", "CHANGELOG.md")) {
+            if (Test-Path $doc) {
+              Copy-Item -Path $doc -Destination $stagingDir -Force
+            }
+          }
+
+          # 3. 打包便携版 ZIP（包含根目录结构，解压后即可自动识别运行根目录）
+          $zipPath = Join-Path $assetsDir "$packageName.zip"
+          Compress-Archive -Path $stagingDir -DestinationPath $zipPath -CompressionLevel Optimal -Force
+
+          # 4. 生成 UTF-8 无 BOM 的 SHA256SUMS.txt
+          $checksumLines = Get-ChildItem -Path $assetsDir -File | Sort-Object Name | ForEach-Object {
+            $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)"
+          }
+          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::WriteAllLines((Join-Path (Resolve-Path $assetsDir).Path "SHA256SUMS.txt"), $checksumLines, $utf8NoBom)
+
+          Get-ChildItem -Path $assetsDir | Format-Table Name, Length -AutoSize
+
+      - name: 从 CHANGELOG.md 提取发布说明
+        run: |
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $tag = "${{ steps.resolve_tag.outputs.tag }}"
+          $packageName = "TraceDesk-$tag-windows-x64"
+          $body = ""
+
+          if (Test-Path "CHANGELOG.md") {
+            $raw = [System.IO.File]::ReadAllText((Resolve-Path "CHANGELOG.md").Path, [System.Text.Encoding]::UTF8)
+            $pattern = "(?ms)^## \[" + [regex]::Escape($tag) + "\][^\r\n]*\r?\n(.*?)(?=\r?\n## \[|\z)"
+            $match = [regex]::Match($raw, $pattern)
+            if ($match.Success) {
+              $body = $match.Groups[1].Value.Trim()
+            }
+          }
+
+          if ([string]::IsNullOrWhiteSpace($body)) {
+            $body = "TraceDesk $tag 正式发布版本（Windows x64 原生桌面工作台、MCP 服务端与 CLI 工具集）。"
+          }
+
+          $notes = @"
+          $body
+
+          ---
+
+          ### 下载与使用说明
+          - **推荐下载完整便携包**：``$packageName.zip``（内置 ``tracedesk-desktop.exe``、``tracedesk-mcp.exe``、``tracedesk-cli.exe``、官方 The Sleuth Kit 4.15.0 与演示镜像，解压后直接运行 ``tracedesk-desktop.exe`` 即可）。
+          - **环境要求**：Windows 10 / 11 x64（系统自带 Microsoft Edge WebView2 Runtime，零 Python 运行时依赖）。
+          - **完整性核验**：可对照 ``SHA256SUMS.txt`` 使用 ``Get-FileHash <文件名> -Algorithm SHA256`` 核对安装包与二进制摘要。
+          "@
+
+          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::WriteAllText((Join-Path (Get-Location).Path "release-notes.md"), $notes.Trim() + "`n", $utf8NoBom)
+
+      - name: 创建或更新 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $tag = "${{ steps.resolve_tag.outputs.tag }}"
+          $assets = Get-ChildItem -Path "release-assets" -File | ForEach-Object { $_.FullName }
+
+          $prevPref = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          gh release view "$tag" *> $null
+          $exists = ($LASTEXITCODE -eq 0)
+          $ErrorActionPreference = $prevPref
+
+          if ($exists) {
+            gh release edit "$tag" --title "TraceDesk $tag" --notes-file "release-notes.md"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            gh release upload "$tag" @assets --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            $argsList = @("release", "create", "$tag") + $assets + @("--title", "TraceDesk $tag", "--notes-file", "release-notes.md")
+            if ($tag -match "-") {
+              $argsList += "--prerelease"
+            }
+            & gh @argsList
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
